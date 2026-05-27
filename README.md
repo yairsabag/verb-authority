@@ -17,36 +17,50 @@ the recipient sink. The legitimate reply still works.
 ## Quickstart
 
 ```bash
-python3 verb_authority_gate.py
+python3 verb_authority.py
 ```
 
 Expected output:
 
 ```
-=== auto-inferred policy for send_email (no hand-written rules) ===
-   to       -> trusted_fixed
-   subject  -> typed_bounded
-   body     -> outbound_payload
+risk tiers:     {'send_email': 'write', 'search_web': 'read_only', 'delete_record': 'destructive'}
+needs confirm:  ['delete_record']
+review queue:   [('send_email', 'subject'), ('delete_record', 'table'), ('delete_record', 'record_id')]
 
-=== ATTACK: the injected email tries to redirect the reply ===
-   -> BLOCKED: param 'to' is a sensitive sink ... data may not author this
-
-=== LEGIT: reply to the original sender, summary in the body ===
-   -> ALLOW: all params within authority
+attack send_email(to=attacker): BLOCKED - param 'to' is a locked sink; data may not author it
+legit  send_email(to=alice):    ALLOW - within authority
+delete_record:                  NEEDS CONFIRM - high-risk verb (destructive); needs human confirmation
 ```
 
-## How it works
+## How it works (v0.1)
 
-Two pieces:
+Four pieces in one small module:
 
 - **The gate** runs before every tool call and enforces a per-parameter policy:
   sensitive sinks (recipient, url, account, path...) can't be filled by data;
   free-text bodies are outbound-only; everything else is type/bounds checked.
-- **Auto-inference** derives that policy straight from your existing tool
-  schema — so it's a drop-in, with no policy language to learn.
+- **Auto-inference** derives that policy straight from your existing tool schema.
+- **Confidence + ask-when-unsure:** when the heuristic isn't sure about a param,
+  it locks it safe-by-default and surfaces it for a one-time review, instead of
+  guessing silently.
+- **Verb-risk tiers:** the whole tool is classified by risk
+  (read-only / write / financial / destructive / code-exec). Dangerous verbs
+  force a human confirmation at runtime — caught at the verb level, even when
+  individual param names look innocent.
 
-Wiring it into an OpenAI / Anthropic tool-use loop is ~5 lines around your
-existing loop (see the bottom of `verb_authority_gate.py`).
+Wiring into an OpenAI / Anthropic tool-use loop is ~5 lines around your existing
+loop (sketch at the bottom of `verb_authority.py`).
+
+## Validation
+
+`validate_v01.py` re-runs the auto-inference on 11 realistic tool schemas and
+measures correctness. v0 had 9 silent mistakes; **v0.1 has 0 silent unsafe**
+mistakes — uncertain params are now locked-safe and surfaced for a one-time
+review, instead of being guessed.
+
+```bash
+python3 validate_v01.py
+```
 
 ## Credit
 
@@ -57,4 +71,4 @@ CaMeL proved the principle; the goal here is to make it drop-in simple.
 
 ## Status
 
-v0 — early and research-grade, not production-ready yet. Built in public.
+v0.1 — early and research-grade, not production-ready yet. Built in public.
