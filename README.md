@@ -69,6 +69,41 @@ This builds directly on the security model from Google DeepMind's **CaMeL**
 [arXiv:2503.18813](https://arxiv.org/abs/2503.18813), Apache-2.0).
 CaMeL proved the principle; the goal here is to make it drop-in simple.
 
+## Related Work
+
+The field is converging on the structural / capability-based approach to prompt
+injection defense. A few of the works that informed (or contrast with) this
+project:
+
+- **CaMeL** (Debenedetti et al., DeepMind, 2025). The original capability-based
+  defense. Uses a custom Python interpreter and a Privileged / Quarantined dual
+  LLM architecture. The
+  [reference implementation](https://github.com/google-research/camel-prompt-injection)
+  is explicitly a research artifact, not maintained. This project tries to make
+  the same core principle a drop-in module.
+- **Operationalizing CaMeL** (Tallam & Miller, SentinelAI, 2025,
+  [arXiv:2505.22852](https://arxiv.org/abs/2505.22852)). Identifies engineering
+  gaps in CaMeL for enterprise deployment and proposes, among other things, a
+  three-tier risk access model (green / yellow / red). The `Risk` enum in
+  this project is a more granular implementation of that same idea, with the
+  added contribution of inferring the tier directly from the tool name.
+- **LlamaFirewall** (Meta, 2025,
+  [arXiv:2505.03574](https://arxiv.org/abs/2505.03574)). A detector-based
+  guardrail pipeline (PromptGuard 2 + AlignmentCheck + CodeShield). Different
+  category from this project: classifies content rather than constraining
+  actions. Complementary, not overlapping.
+- **OpenAI Guardrails Python**
+  ([docs](https://openai.github.io/openai-guardrails-python/)). Includes a
+  Prompt Injection Detection guardrail at the tool-call boundary. Also
+  detector-based: a model judges whether a proposed tool call aligns with the
+  inferred user intent. Useful, but inherits the usual classifier failure modes
+  (false positives, bypass under adaptive attack).
+
+The auto-inference of policies directly from existing tool schemas, and the
+description-based resolver that uses an LLM only on trusted developer-authored
+descriptions (never on runtime data), are the parts of this project that, as
+far as I can tell, are not present in the works above.
+
 ## Status
 
 v0.1 — early and research-grade, not production-ready yet. Built in public.

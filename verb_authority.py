@@ -30,6 +30,11 @@ class Confidence(str, Enum):
     UNCERTAIN = "uncertain"
 
 
+# The risk tiers below are inspired by the tiered-risk access model proposed in
+# Tallam & Miller, "Operationalizing CaMeL" (arXiv:2505.22852, 2025).
+# This implementation is more granular (5 tiers vs. their 3) and infers the tier
+# from the tool name; the underlying idea -- adjusting enforcement strictness to
+# the action's risk class -- is theirs.
 class Risk(str, Enum):
     READ_ONLY = "read_only"
     WRITE = "write"
