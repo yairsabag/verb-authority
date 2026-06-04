@@ -139,6 +139,37 @@ description-based resolver that uses an LLM only on trusted developer-authored
 descriptions (never on runtime data), are the parts of this project that, as
 far as I can tell, are not present in the works above.
 
+## Known limitations
+
+This gate has real failure modes. `adversarial.py` exercises four attack
+families and reports honestly which slip through.
+
+**Strong:** direct injections in any form (encoding, homograph, subdomain
+tricks, etc.) are blocked structurally — the gate does not read content, so it
+cannot be fooled by clever encodings.
+
+**Weak — dev provenance:** the gate trusts whatever the developer declares as
+`trusted_args`. If a value derived from untrusted data is passed in as trusted,
+the gate has no way to know and lets it through. *Provenance is the developer's
+responsibility.*
+
+**Gap — chain propagation:** taint does not flow automatically across tool
+calls. CaMeL solves this with a custom Python interpreter; this project does
+not (yet). For multi-step chains where the output of one tool feeds the input
+of another, the developer must thread provenance manually.
+
+**Out of scope (today) — output-side:** the gate inspects tool *calls*, not the
+agent's text *output* to the human user. A document returned by a tool can
+still social-engineer the user via the agent's reply. Tallam & Miller propose
+an output-auditing pass to close this gap (arXiv:2505.22852 §2.2); this is
+future work.
+
+Run the adversarial suite:
+
+```bash
+python3 adversarial.py
+```
+
 ## Status
 
 v0.1 — early and research-grade, not production-ready yet. Built in public.
