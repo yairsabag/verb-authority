@@ -51,6 +51,34 @@ Four pieces in one small module:
 Wiring into an OpenAI / Anthropic tool-use loop is ~5 lines around your existing
 loop (sketch at the bottom of `verb_authority.py`).
 
+## Drop it into your agent
+
+Wrap your existing tool-use loop with five extra lines. The `dispatch` helper
+takes the tool_use block your model produced and verifies it against the
+inferred policy.
+
+```python
+from verb_authority import Registry, Tool, Param, build_policy, dispatch
+
+reg = Registry()
+reg.add(Tool("send_email", [Param("to", "email"), Param("body", "string")]))
+ps = build_policy(reg)
+
+# in your agent loop, after the LLM proposes a tool_use:
+decision = dispatch(reg, ps, tool_use, trusted_args={"to": user_email})
+if not decision.allow:
+    return {"error": decision.reason}
+if decision.needs_confirm and not ask_user(f"Confirm? {decision.reason}"):
+    return {"error": "user denied"}
+# safe to execute
+result = run_tool(tool_use)
+```
+
+`trusted_args` is your provenance declaration: any arg matching one of these
+values gets provenance `trusted`; everything else is treated as `data`. The
+gate then enforces that trusted-fixed params (recipients, accounts, paths)
+cannot be filled by data.
+
 ## Validation
 
 `validate_v01.py` re-runs the auto-inference on 11 realistic tool schemas and
@@ -60,6 +88,13 @@ review, instead of being guessed.
 
 ```bash
 python3 validate_v01.py
+```
+
+A pytest suite (`test_gate.py`) covers inference, verb-risk classification, the
+gate, and the dispatcher (20 tests).
+
+```bash
+pytest test_gate.py -v
 ```
 
 ## Credit

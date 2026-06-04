@@ -170,6 +170,23 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
     return Decision(True, "within authority")
 
 
+# === drop-in dispatcher (the 5-line integration point) ===================
+def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
+             trusted_args: dict | None = None) -> Decision:
+    """Drop-in wrapper for an LLM-proposed tool call.
+
+    Pass the tool_use block your agent produced (OpenAI / Anthropic format:
+    a dict with `name` and `input` keys). `trusted_args` is a small map of
+    param -> known-trusted value (e.g. {"to": user.confirmed_email}); any arg
+    matching gets provenance='trusted', everything else 'data'. Returns a
+    Decision with .allow, .reason, .needs_confirm.
+    """
+    trusted_args = trusted_args or {}
+    tool, args = tool_use["name"], tool_use["input"]
+    provenance = {n: ("trusted" if args.get(n) == trusted_args.get(n) else "data") for n in args}
+    return gate(reg, ps, tool, args, provenance)
+
+
 # === demo =================================================================
 def demo() -> None:
     reg = Registry()
