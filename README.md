@@ -1,8 +1,14 @@
 # Verb-Authority Gate
 
-A tiny, drop-in action-layer guard for AI agents.
+A drop-in action-layer guard for AI agents that makes prompt injection
+**structurally impossible — not by detecting it.**
 
 **Principle: data selects, never authors.**
+
+This addresses what Simon Willison calls [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+for AI agents — private data + untrusted content + an exfiltration vector — by
+closing the third leg: untrusted content cannot author the actions that
+exfiltrate.
 
 Most prompt-injection defenses try to *classify* whether content is malicious —
 which can't be done reliably, and causes constant false positives (it blocks
