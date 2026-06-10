@@ -170,20 +170,86 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
     return Decision(True, "within authority")
 
 
+# === provenance ledger (partial taint propagation across a call chain) ====
+#
+# THE GAP THIS CLOSES (and the part it does not):
+#
+# The plain `dispatch` below decides provenance from a `trusted_args` map the
+# developer supplies. That has a laundering hole: if a value came OUT of an
+# earlier tool call (so it is really untrusted data the agent just read) and a
+# naive developer threads it into `trusted_args` for the next call, the gate
+# would trust it. That is Family 3 in adversarial.py.
+#
+# The ledger adds an INDEPENDENT, dev-proof source of truth. Every value a tool
+# *returns* is data the agent read, so it is tainted at origin. We record those
+# values. On a later call, if an argument's value matches something the ledger
+# saw come out of a previous tool, the gate forces its provenance to "data" --
+# EVEN IF the developer declared it trusted. The dev can no longer launder a
+# tool result into a sink by mis-wiring trusted_args.
+#
+# What this is NOT: it is not CaMeL's sound interpreter taint. It tracks values
+# by exact match, so a value the agent paraphrases or reformats (e.g. strips a
+# name out of a sentence) no longer matches and escapes the ledger. It catches
+# verbatim propagation -- the common, naive case -- not arbitrary control flow.
+# Honest verdict: closes the laundering path it can SEE; the transform path
+# still needs the dev to be careful (or a real interpreter).
+@dataclass
+class ProvenanceLedger:
+    """Remembers values that originated from tool results within one session.
+
+    Thread one ledger through an agent's tool-use loop. Call `record_result`
+    after each tool returns; pass the ledger to `dispatch` on each call.
+    """
+    _tainted: set[str] = field(default_factory=set)
+
+    def record_result(self, result: Any) -> None:
+        """Register every string value found in a tool's return as tainted."""
+        for s in _iter_strings(result):
+            if s.strip():
+                self._tainted.add(s.strip())
+
+    def is_tainted(self, value: Any) -> bool:
+        return isinstance(value, str) and value.strip() in self._tainted
+
+
+def _iter_strings(obj: Any):
+    """Yield all string leaves from a nested dict/list/str result."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
 # === drop-in dispatcher (the 5-line integration point) ===================
 def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
-             trusted_args: dict | None = None) -> Decision:
+             trusted_args: dict | None = None,
+             ledger: ProvenanceLedger | None = None) -> Decision:
     """Drop-in wrapper for an LLM-proposed tool call.
 
     Pass the tool_use block your agent produced (OpenAI / Anthropic format:
     a dict with `name` and `input` keys). `trusted_args` is a small map of
     param -> known-trusted value (e.g. {"to": user.confirmed_email}); any arg
-    matching gets provenance='trusted', everything else 'data'. Returns a
-    Decision with .allow, .reason, .needs_confirm.
+    matching gets provenance='trusted', everything else 'data'.
+
+    Optionally pass a `ProvenanceLedger`. Any argument whose value the ledger
+    saw come out of a previous tool result is forced to provenance='data',
+    overriding `trusted_args` -- this is what stops a laundered tool result
+    from reaching a locked sink. Returns a Decision.
     """
     trusted_args = trusted_args or {}
     tool, args = tool_use["name"], tool_use["input"]
-    provenance = {n: ("trusted" if args.get(n) == trusted_args.get(n) else "data") for n in args}
+    provenance = {}
+    for n in args:
+        if ledger is not None and ledger.is_tainted(args.get(n)):
+            provenance[n] = "data"            # ledger overrides any dev declaration
+        elif args.get(n) == trusted_args.get(n):
+            provenance[n] = "trusted"
+        else:
+            provenance[n] = "data"
     return gate(reg, ps, tool, args, provenance)
 
 
