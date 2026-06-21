@@ -38,9 +38,9 @@ legit  send_email(to=alice):    ALLOW - within authority
 delete_record:                  NEEDS CONFIRM - high-risk verb (destructive); needs human confirmation
 ```
 
-## How it works (v0.1)
+## How it works
 
-Four pieces in one small module:
+Five pieces in one small module:
 
 - **The gate** runs before every tool call and enforces a per-parameter policy:
   sensitive sinks (recipient, url, account, path...) can't be filled by data;
@@ -53,6 +53,14 @@ Four pieces in one small module:
   (read-only / write / financial / destructive / code-exec). Dangerous verbs
   force a human confirmation at runtime — caught at the verb level, even when
   individual param names look innocent.
+- **Provenance ledger (v0.6–0.7):** an optional, dev-proof second source of
+  truth for provenance. Every value a tool *returns* is recorded as tainted at
+  origin. On a later call, if an argument reuses one of those values in a locked
+  sink, the gate forces it to `data` and blocks it — *even if the developer
+  mistakenly declared it trusted*. A containment layer extends this to
+  risk-shaped values (emails, URLs) that the agent *extracts* from inside
+  returned free text. This partially closes the chain-propagation gap (see
+  Known Limitations for the boundary it does not cross).
 
 Wiring into an OpenAI / Anthropic tool-use loop is ~5 lines around your existing
 loop (sketch at the bottom of `verb_authority.py`).
@@ -85,6 +93,23 @@ values gets provenance `trusted`; everything else is treated as `data`. The
 gate then enforces that trusted-fixed params (recipients, accounts, paths)
 cannot be filled by data.
 
+To defend multi-step chains, thread a `ProvenanceLedger` through your loop and
+record each tool result as it comes back:
+
+```python
+from verb_authority import ProvenanceLedger
+
+ledger = ProvenanceLedger()
+# ... after each tool runs:
+result = run_tool(tool_use)
+ledger.record_result(result)          # everything the tool returned is now tainted
+# ... on the next proposed call, pass the ledger so laundered values are caught:
+decision = dispatch(reg, ps, next_tool_use, trusted_args={"to": user_email}, ledger=ledger)
+```
+
+The ledger overrides `trusted_args` for any value it saw come out of a previous
+tool, so a naively threaded tool result can't launder its way into a sink.
+
 ## Validation
 
 `validate_v01.py` re-runs the auto-inference on 11 realistic tool schemas and
@@ -97,10 +122,17 @@ python3 validate_v01.py
 ```
 
 A pytest suite (`test_gate.py`) covers inference, verb-risk classification, the
-gate, and the dispatcher (20 tests).
+gate, the dispatcher, and the provenance ledger (27 tests).
 
 ```bash
 pytest test_gate.py -v
+```
+
+`chain_demo.py` shows the chain-propagation defense as a before/after: the same
+laundered tool result is allowed without the ledger and blocked with it.
+
+```bash
+python3 chain_demo.py
 ```
 
 ## Credit
@@ -128,6 +160,18 @@ project:
   three-tier risk access model (green / yellow / red). The `Risk` enum in
   this project is a more granular implementation of that same idea, with the
   added contribution of inferring the tier directly from the tool name.
+- **Securing AI Agents with Information-Flow Control / FIDES** (Costa, Köpf et
+  al., Microsoft Research, 2025,
+  [arXiv:2505.23643](https://arxiv.org/abs/2505.23643)). A planner that tracks
+  confidentiality and integrity labels through the whole agent loop and enforces
+  deterministic policies before consequential actions, with novel primitives for
+  selectively hiding information. Now shipping as experimental middleware in
+  Microsoft's Agent Framework. FIDES and CaMeL are the two heavyweight
+  information-flow approaches; both require adopting a dedicated planner or
+  interpreter that propagates labels across execution. This project deliberately
+  trades that soundness for drop-in adoption: per-call provenance enforcement
+  you can wrap around an existing loop, honest about where it stops short of
+  full dataflow tracking (see Known Limitations).
 - **LlamaFirewall** (Meta, 2025,
   [arXiv:2505.03574](https://arxiv.org/abs/2505.03574)). A detector-based
   guardrail pipeline (PromptGuard 2 + AlignmentCheck + CodeShield). Different
@@ -159,10 +203,15 @@ cannot be fooled by clever encodings.
 the gate has no way to know and lets it through. *Provenance is the developer's
 responsibility.*
 
-**Gap — chain propagation:** taint does not flow automatically across tool
-calls. CaMeL solves this with a custom Python interpreter; this project does
-not (yet). For multi-step chains where the output of one tool feeds the input
-of another, the developer must thread provenance manually.
+**Mostly closed — chain propagation:** as of v0.6–0.7, a `ProvenanceLedger`
+records every value a tool returns and blocks its reuse in a locked sink, even
+when the developer mistakenly declares it trusted. A containment layer extends
+this to emails and URLs the agent *extracts* from inside returned free text.
+What it still does **not** catch: a value the agent *rewrites* or *obfuscates*
+(`attacker [at] evil [dot] com`, a base64 blob, a translation) has no verbatim
+substring in the tainted text, so it escapes. Closing that requires
+interpreter-level dataflow tracking through transforms — which is exactly what
+CaMeL and FIDES do, and this drop-in approach does not.
 
 **Out of scope (today) — output-side:** the gate inspects tool *calls*, not the
 agent's text *output* to the human user. A document returned by a tool can
@@ -178,4 +227,9 @@ python3 adversarial.py
 
 ## Status
 
-v0.1 — early and research-grade, not production-ready yet. Built in public.
+v0.7 — early and research-grade, not production-ready yet. Built in public.
+
+Milestones so far: v0.1 auto-inference with zero silent-unsafe mistakes ·
+v0.5 honest adversarial suite · v0.6 provenance ledger (verbatim laundering) ·
+v0.7 containment layer (extraction from prose). The next honest boundary is
+rewrite/obfuscation, which needs interpreter-level dataflow tracking.
