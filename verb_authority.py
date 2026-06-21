@@ -199,17 +199,61 @@ class ProvenanceLedger:
 
     Thread one ledger through an agent's tool-use loop. Call `record_result`
     after each tool returns; pass the ledger to `dispatch` on each call.
+
+    Two layers of matching:
+      1. exact   -- a value equal to something a tool returned verbatim.
+      2. contained -- a RISK-SHAPED value (an email or URL) that appears as a
+         substring inside a larger free-text blob a tool returned. This closes
+         the extraction-from-prose path: read_doc returns a sentence containing
+         attacker@evil.com, the agent lifts the bare address out, and we still
+         recognise it because it lived inside a tainted blob.
+
+    Why containment is limited to risk-shaped values: checking "is this string
+    a substring of anything a tool returned" for ALL arguments would flag
+    innocuous values that happen to co-occur in returned text (a real first
+    name, a common word), producing false positives. Restricting containment
+    to emails/URLs -- the things that actually author exfiltration -- keeps the
+    check cheap and the false-positive surface small.
+
+    Still NOT closed (the honest next boundary): a value the agent *rewrites*
+    -- attacker [at] evil [dot] com, a base64 blob, a translated string -- has
+    no verbatim substring in the tainted text, so it escapes. That needs real
+    dataflow tracking through transforms (CaMeL's interpreter), not matching.
     """
     _tainted: set[str] = field(default_factory=set)
+    _blobs: list[str] = field(default_factory=list)
 
     def record_result(self, result: Any) -> None:
-        """Register every string value found in a tool's return as tainted."""
+        """Register every string a tool returned: exact values + full blobs."""
         for s in _iter_strings(result):
-            if s.strip():
-                self._tainted.add(s.strip())
+            stripped = s.strip()
+            if stripped:
+                self._tainted.add(stripped)
+                self._blobs.append(s)
 
     def is_tainted(self, value: Any) -> bool:
-        return isinstance(value, str) and value.strip() in self._tainted
+        """True if value is a tool-result value (exact), or a risk-shaped
+        value extracted from inside one (contained)."""
+        if not isinstance(value, str):
+            return False
+        v = value.strip()
+        if not v:
+            return False
+        if v in self._tainted:                         # layer 1: exact
+            return True
+        if _is_risk_shaped(v):                          # layer 2: contained
+            return any(v in blob for blob in self._blobs)
+        return False
+
+
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+
+def _is_risk_shaped(v: str) -> bool:
+    """A value that can author exfiltration: an email address or a URL.
+    Containment matching is restricted to these to bound false positives."""
+    return bool(_EMAIL_RE.fullmatch(v) or _URL_RE.search(v))
 
 
 def _iter_strings(obj: Any):
