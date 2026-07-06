@@ -51,6 +51,13 @@ class Param:
     enum: list[str] | None = None
     max_len: int | None = None
     cap: float | None = None
+    sink: bool | None = None  # declared capability (DylanWang's point):
+                              #   True  -> this param IS a sink (data may not author it)
+                              #   False -> explicitly NOT a sink (safe to let data fill)
+                              #   None  -> not declared; fall back to name-based inference
+                              # A declaration always overrides the name-based guess, so
+                              # overloaded names (path, query, template) stop being
+                              # guessed from the verb and are stated by the tool instead.
 
 
 @dataclass
@@ -94,6 +101,19 @@ _PAYLOAD = re.compile(r"(body|message|content|^text$|summary|reply|note|descript
 
 
 def infer_policy(p: Param):
+    # A declared capability always wins over name-based guessing (DylanWang):
+    # the tool manifest is authoritative, so we don't infer sink-ness from the
+    # param name when the developer has stated it outright.
+    if p.sink is True:
+        return Policy.TRUSTED_FIXED, Confidence.HIGH
+    if p.sink is False:
+        # explicitly not a sink: still type-check, but data may fill it
+        if p.type in ("number", "integer", "enum", "boolean"):
+            return Policy.TYPED_BOUNDED, Confidence.HIGH
+        if _PAYLOAD.search(p.name) or (p.type == "string" and (p.max_len or 0) > 200):
+            return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
+        return Policy.TYPED_BOUNDED, Confidence.HIGH
+    # --- no declaration: fall back to name-based inference (unchanged) ---
     if p.type in ("number", "integer", "enum", "boolean"):
         return Policy.TYPED_BOUNDED, Confidence.HIGH
     if p.type in ("email", "uri") or _SINK.search(p.name):

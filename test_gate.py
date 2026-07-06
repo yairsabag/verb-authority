@@ -29,6 +29,27 @@ def test_ambiguous_string_marked_uncertain_and_locked_safe():
     assert conf is Confidence.UNCERTAIN
     assert pol is Policy.TRUSTED_FIXED   # safe-by-default
 
+# --- declared capability (DylanWang: capability belongs in the manifest) -----
+
+def test_declared_sink_overrides_innocent_name():
+    # "query" looks harmless by name, but a tool can declare it a sink
+    # (e.g. it's interpolated into a command). Declaration wins over the guess.
+    pol, conf = infer_policy(Param("query", "string", sink=True))
+    assert pol is Policy.TRUSTED_FIXED and conf is Confidence.HIGH
+
+def test_declared_non_sink_overrides_sinky_name():
+    # "path" matches the sink regex, but in a read-only tool it's safe to let
+    # data fill it. Declaring sink=False frees it without renaming the param.
+    pol, conf = infer_policy(Param("path", "string", sink=False))
+    assert pol is not Policy.TRUSTED_FIXED and conf is Confidence.HIGH
+
+def test_overloaded_param_resolved_per_tool():
+    # The same name, opposite capability in two tools -- the whole point.
+    read_path  = infer_policy(Param("path", "string", sink=False))[0]
+    delete_path = infer_policy(Param("path", "string", sink=True))[0]
+    assert read_path is not Policy.TRUSTED_FIXED
+    assert delete_path is Policy.TRUSTED_FIXED
+
 # --- verb-risk --------------------------------------------------------------
 
 def test_destructive_verb_caught():

