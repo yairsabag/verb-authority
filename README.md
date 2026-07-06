@@ -144,6 +144,11 @@ CaMeL proved the principle; the goal here is to make it drop-in simple.
 
 ## Related Work
 
+**New to this space?** [`LANDSCAPE.md`](LANDSCAPE.md) is an honest map of the
+structural prompt-injection defenses (CaMeL, FIDES, Progent, NeuroTaint) and
+exactly where this project sits among them — including what it does *worse*.
+Start there if you want to know whether this is the right tool for you.
+
 The field is converging on the structural / capability-based approach to prompt
 injection defense. A few of the works that informed (or contrast with) this
 project:
