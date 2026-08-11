@@ -122,7 +122,8 @@ python3 validate_v01.py
 ```
 
 A pytest suite (`test_gate.py`) covers inference, verb-risk classification, the
-gate, the dispatcher, and the provenance ledger (27 tests).
+gate, the dispatcher, the provenance ledger, and the canonicalization/homograph
+defenses (35 tests).
 
 ```bash
 pytest test_gate.py -v
@@ -133,6 +134,29 @@ laundered tool result is allowed without the ledger and blocked with it.
 
 ```bash
 python3 chain_demo.py
+```
+
+### Adaptive evaluation (the attacker moves second)
+
+Static suites only test attacks you already thought of. `adaptive.py` is a
+black-box adaptive attacker: it has one goal (get `send_email` to reach the
+attacker) and an arsenal of transformations ordered from naive to
+sophisticated. It escalates until it breaks through, and reports the
+**resistance depth** — how many tiers held before the defense broke — in the
+spirit of *The Attacker Moves Second* (Nasr, Carlini, Hayes, Shumailov, Tramèr
+et al., 2025, [arXiv:2510.09023](https://arxiv.org/abs/2510.09023)).
+
+Building this attacker surfaced a real bug the static suite missed: a Cyrillic
+homograph slipped past both the sink rule and the ledger, because neither
+normalized characters. The fix was **not** a patch per trick but a principled
+one — canonicalization (NFKC + casefold + disguise-stripping) folds homograph,
+uppercase, and spacing variants to a single form, caught together. Resistance
+depth went from 2 tiers to 5; the break now lands at the genuine semantic
+boundary (a value the model must interpret and reconstruct), which needs
+interpreter-level tracking to close.
+
+```bash
+python3 adaptive.py
 ```
 
 ## Credit
@@ -208,15 +232,20 @@ cannot be fooled by clever encodings.
 the gate has no way to know and lets it through. *Provenance is the developer's
 responsibility.*
 
-**Mostly closed — chain propagation:** as of v0.6–0.7, a `ProvenanceLedger`
-records every value a tool returns and blocks its reuse in a locked sink, even
-when the developer mistakenly declares it trusted. A containment layer extends
-this to emails and URLs the agent *extracts* from inside returned free text.
-What it still does **not** catch: a value the agent *rewrites* or *obfuscates*
-(`attacker [at] evil [dot] com`, a base64 blob, a translation) has no verbatim
-substring in the tainted text, so it escapes. Closing that requires
-interpreter-level dataflow tracking through transforms — which is exactly what
-CaMeL and FIDES do, and this drop-in approach does not.
+**Mostly closed — chain propagation & lexical disguise:** as of v0.6–0.9, a
+`ProvenanceLedger` records every value a tool returns and blocks its reuse in a
+locked sink, even when the developer mistakenly declares it trusted. A
+containment layer extends this to emails and URLs the agent *extracts* from
+returned free text, and a canonicalization layer (v0.9) folds lexical disguises
+— homograph, uppercase, spacing — to a single form so they're caught together
+rather than by a rule per trick. What it still does **not** catch: a *semantic*
+rewrite the agent must interpret and reconstruct (`attacker at evil dot com` as
+words, a translation) is no longer the same string in disguise — it's content
+the model understood. Closing that requires interpreter-level dataflow tracking,
+which is exactly what CaMeL and FIDES do and this drop-in approach does not.
+
+This boundary was mapped by an adaptive attacker (`adaptive.py`), not guessed —
+see the adaptive-evaluation note under Validation.
 
 **Out of scope (today) — output-side:** the gate inspects tool *calls*, not the
 agent's text *output* to the human user. A document returned by a tool can
@@ -232,9 +261,11 @@ python3 adversarial.py
 
 ## Status
 
-v0.7 — early and research-grade, not production-ready yet. Built in public.
+v0.9 — early and research-grade, not production-ready yet. Built in public.
 
 Milestones so far: v0.1 auto-inference with zero silent-unsafe mistakes ·
 v0.5 honest adversarial suite · v0.6 provenance ledger (verbatim laundering) ·
-v0.7 containment layer (extraction from prose). The next honest boundary is
-rewrite/obfuscation, which needs interpreter-level dataflow tracking.
+v0.7 containment layer (extraction from prose) · v0.8 declared capability
+(overloaded-param weakness) · v0.9 adaptive attacker + canonicalization
+(resistance depth 2→5). The next honest boundary is semantic rewrite, which
+needs interpreter-level dataflow tracking.
