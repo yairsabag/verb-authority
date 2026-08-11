@@ -96,6 +96,24 @@ this one. That honesty is the point.
 
 ---
 
+## On evaluation: the attacker moves second
+
+*The Attacker Moves Second* (Nasr, Carlini, Hayes, Shumailov, Tramèr et al.,
+2025, arXiv:2510.09023) took twelve leading defenses reporting ~1% attack
+success and broke every one above 90% with an adaptive attacker that adapts to
+the defense. The lesson: a static test of the attacks you already thought of
+tells you almost nothing.
+
+Most small open-source guards report a static pass rate. This one ships an
+adaptive attacker (`adaptive.py`) that escalates through transformation tiers
+and reports the depth at which the defense breaks — and it earns its keep: it
+found a homograph bypass the static suite missed, which then drove a principled
+canonicalization fix. The measure here isn't "N/N blocked"; it's the resistance
+depth, and the exact tier where a real adversary gets through. Verb-authority
+breaks at the semantic-rewrite tier, and says so.
+
+---
+
 ## Status
 
 Research-grade, built in public. If any characterization of another system above
