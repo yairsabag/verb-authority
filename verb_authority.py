@@ -171,6 +171,27 @@ def _type_ok(p: Param, v) -> bool:
     return True
 
 
+# Homograph / mixed-script detection.
+# A value that mixes Latin letters with visually-confusable letters from
+# another script (Cyrillic, Greek) is almost always an impersonation attempt:
+# "аpple.com" with a Cyrillic 'а' renders identically to "apple.com" but is a
+# different string. This is a STRUCTURAL property of the value, independent of
+# where it came from -- so we check it in the gate, before provenance even
+# matters. Found by the adaptive attacker in adaptive.py: a homograph slipped
+# past both the sink rule (dev mis-declared it trusted) and the ledger (no
+# verbatim match), because neither normalizes characters.
+_LATIN = re.compile(r"[a-zA-Z]")
+_CONFUSABLE = re.compile(
+    r"[\u0400-\u04FF\u0370-\u03FF]"   # Cyrillic + Greek blocks
+)
+
+
+def _has_mixed_script(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    return bool(_LATIN.search(v) and _CONFUSABLE.search(v))
+
+
 def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) -> Decision:
     if tool not in reg.tools:
         return Decision(False, f"verb '{tool}' is not in the registry")
@@ -179,6 +200,10 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
     for name, val in args.items():
         if name not in pol:
             return Decision(False, f"unknown param '{name}'")
+        # Structural check first: a mixed-script value in a locked sink is a
+        # homograph impersonation regardless of declared provenance.
+        if pol[name] is Policy.TRUSTED_FIXED and _has_mixed_script(val):
+            return Decision(False, f"param '{name}' mixes scripts (homograph); rejected as impersonation")
         prov = provenance.get(name, "data")
         if pol[name] is Policy.TRUSTED_FIXED and prov == "data":
             return Decision(False, f"param '{name}' is a locked sink; data may not author it")
@@ -242,18 +267,22 @@ class ProvenanceLedger:
     """
     _tainted: set[str] = field(default_factory=set)
     _blobs: list[str] = field(default_factory=list)
+    _canon_blobs: list[str] = field(default_factory=list)
 
     def record_result(self, result: Any) -> None:
-        """Register every string a tool returned: exact values + full blobs."""
+        """Register every string a tool returned: exact values + full blobs,
+        plus a canonicalized copy of each blob for disguise-resistant matching."""
         for s in _iter_strings(result):
             stripped = s.strip()
             if stripped:
                 self._tainted.add(stripped)
                 self._blobs.append(s)
+                self._canon_blobs.append(_canonical(s))
 
     def is_tainted(self, value: Any) -> bool:
-        """True if value is a tool-result value (exact), or a risk-shaped
-        value extracted from inside one (contained)."""
+        """True if value is a tool-result value (exact), a risk-shaped value
+        extracted from a blob (contained), or a CANONICAL match -- the same
+        risk-shaped value in disguise (homograph, uppercase, spaced)."""
         if not isinstance(value, str):
             return False
         v = value.strip()
@@ -262,8 +291,46 @@ class ProvenanceLedger:
         if v in self._tainted:                         # layer 1: exact
             return True
         if _is_risk_shaped(v):                          # layer 2: contained
-            return any(v in blob for blob in self._blobs)
+            if any(v in blob for blob in self._blobs):
+                return True
+        # layer 3: canonical. Fold the value to a disguise-free form and look
+        # for it in the canonicalized blobs. This catches the family the
+        # adaptive attacker found -- homograph / uppercase / spaced variants
+        # of a tainted address -- without a separate rule per trick.
+        cv = _canonical(v)
+        if _is_risk_shaped(cv) and any(cv in cb for cb in self._canon_blobs):
+            return True
         return False
+
+
+# Canonicalization: fold a value to a single disguise-free form so that
+# variants meant to look different to a string comparison but identical to a
+# human (or to the destination system) collapse together. This is the
+# principled answer to the adaptive attacker: rather than a rule per trick
+# (homograph, uppercase, spacing), normalize once and compare.
+#   - NFKC unicode normalization folds many compatibility/confusable forms
+#   - casefold() handles case variation
+#   - stripping spaces and common obfuscation separators handles "a t t a c k"
+#     and "attacker [at] evil [dot] com" style spacing
+# HONEST BOUNDARY (unchanged): this folds *lexical* disguises. It does NOT
+# undo a SEMANTIC rewrite the model must interpret -- "attacker at evil dot
+# com" written as words the agent reads and reconstructs is no longer the same
+# string in disguise, it is content the model understood. That still needs
+# interpreter-level dataflow tracking (CaMeL/FIDES), not normalization.
+import unicodedata
+
+_DISGUISE = re.compile(r"[\s\[\](){}<>]+")
+
+
+def _canonical(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    n = unicodedata.normalize("NFKC", s)
+    n = n.casefold()
+    n = _DISGUISE.sub("", n)
+    # common textual separators used to break up an address
+    n = n.replace("[at]", "@").replace("(at)", "@").replace("[dot]", ".").replace("(dot)", ".")
+    return n
 
 
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
