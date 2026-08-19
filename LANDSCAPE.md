@@ -31,18 +31,33 @@ model can't talk its way past. Every system below is a version of this.
 | System | Where it runs | What it tracks | Adoption cost | Soundness |
 |---|---|---|---|---|
 | **CaMeL** (DeepMind) | Custom Python interpreter around the agent | Full data-flow taint through arbitrary control flow | Rewrite the agent loop into the interpreter | High — tracks transforms |
+| **PACT** | Runtime monitor before tools | Semantic argument roles + cross-step value provenance | Define trust contracts and supply or infer provenance | Deterministic enforcement; deployment depends on contract/provenance fidelity |
 | **FIDES** (Microsoft) | A planner that runs the agent | Confidentiality **and** integrity labels through execution | Adopt the planner | High — formal IFC |
 | **Progent** (UC Berkeley) | A module between agent and tools | A policy (DSL) over tool names + arguments | Minimal — wraps the loop; you write/generate policies | Deterministic on the *call*, not the value's origin |
 | **NeuroTaint** | Offline audit of execution traces | Semantic taint incl. transformation + causal influence | Runs offline, post-hoc | High — semantic, but not a runtime gate |
 | **verb-authority** (this) | A gate before each tool call | Per-call provenance (trusted vs data) + verbatim/contained tool-result taint | Minimal — ~5 lines, policy auto-inferred | Partial — verbatim + extraction; **not** transforms |
 
-Reference links: CaMeL arXiv:2503.18813 · FIDES arXiv:2505.23643 ·
-Progent arXiv:2504.11703 · NeuroTaint arXiv:2604.23374 ·
-Operationalizing CaMeL (Tallam & Miller) arXiv:2505.22852.
+Reference links: [CaMeL](https://arxiv.org/abs/2503.18813) ·
+[PACT](https://arxiv.org/abs/2605.11039) ·
+[FIDES](https://arxiv.org/abs/2505.23643) ·
+[Progent](https://arxiv.org/abs/2504.11703) ·
+[NeuroTaint](https://arxiv.org/abs/2604.23374) ·
+[Operationalizing CaMeL](https://arxiv.org/abs/2505.22852).
 
 ---
 
 ## How `verb-authority` differs — precisely, and where it loses
+
+**vs. PACT.** PACT is the closest published research neighbor. It formalizes
+the same central observation at greater depth: untrusted context becomes
+dangerous when it determines an authority-bearing argument. PACT assigns
+semantic roles to arguments, tracks provenance across replanning steps, and
+checks role-specific trust contracts. Under oracle provenance it reports full
+utility and security on its mixed-trust diagnostics; its AgentDojo results also
+show that provenance inference and contract synthesis remain the deployment
+bottleneck. `verb-authority` offers a much smaller executable prototype with
+schema-based policy inference and partial lexical provenance tracking. It does
+not reproduce PACT's evaluation or establish research novelty over it.
 
 **vs. CaMeL.** CaMeL is the gold standard for soundness: its interpreter tracks
 taint through transformations, so an address the agent *rewrites* is still
@@ -58,8 +73,7 @@ prevent exfiltration of genuinely private data through a legitimate channel. If
 you need confidentiality tracking, you need FIDES (or CaMeL), not this. (This gap
 was pointed out by a reviewer and is now explicit in Known Limitations.)
 
-**vs. Progent.** The closest neighbor, and the most important distinction to get
-right. Progent enforces a *policy over the call* — is `send_email` with these
+**vs. Progent.** Progent enforces a *policy over the call* — is `send_email` with these
 arguments permitted by the rules? It is deterministic, drop-in, and resilient to
 adaptive attacks; it is a strong, mature system from Dawn Song's group.
 `verb-authority` asks a *different* question: *where did this argument value come
@@ -78,11 +92,11 @@ job: forensics/audit vs. runtime prevention.
 
 ## So what is this actually *for*
 
-Not to beat CaMeL, FIDES, or Progent. They are deeper, and in most dimensions
-better. This exists because all of them ask you to adopt something — an
-interpreter, a planner, a policy language, an offline pipeline — and a developer
-with an existing OpenAI/Anthropic tool-use loop often can't, or won't, do that
-today.
+Not to beat PACT, CaMeL, FIDES, or Progent. They are deeper, and in most
+dimensions better. This exists because each asks you to adopt or specify more —
+trust contracts and provenance inference, an interpreter, a planner, or a
+policy language — and a developer with an existing OpenAI/Anthropic tool-use
+loop often can't, or won't, do that today.
 
 `verb-authority` is the **five-line, zero-dependency-on-your-architecture entry
 point** to the same paradigm: auto-inferred safe-by-default policy, verb-risk
@@ -111,6 +125,12 @@ found a homograph bypass the static suite missed, which then drove a principled
 canonicalization fix. The measure here isn't "N/N blocked"; it's the resistance
 depth, and the exact tier where a real adversary gets through. Verb-authority
 breaks at the semantic-rewrite tier, and says so.
+
+The repository also includes an offline schema corpus under `benchmarks/`.
+Unlike a demonstration suite, it records desired reviewer policy separately
+from current inference and therefore reports conservative false blocks and
+dangerous false allows. It is a small curated baseline, not an AgentDojo score;
+the next step is contributed sanitized schemas and compatible AgentDojo cases.
 
 ---
 
