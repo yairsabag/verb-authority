@@ -1,0 +1,68 @@
+name: Bypass report or tool schema
+description: Share a minimal bypass, inference error, or sanitized real tool schema.
+title: "[bypass/schema] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping map the boundary. Do not include secrets, private data, or live targets. Use SECURITY.md for sensitive reports.
+
+  - type: dropdown
+    id: report-type
+    attributes:
+      label: Report type
+      options:
+        - Gate or provenance bypass
+        - Policy inference error
+        - Sanitized real tool schema
+        - Documentation or evaluation correction
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.9.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: Minimal tool schema and provenance setup
+      description: Remove proprietary names and data. Show Param/Tool declarations and trusted_args or ledger setup.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: call
+    attributes:
+      label: Proposed tool call
+      description: Provide the smallest call that reproduces the result.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Observed and expected decisions
+      description: Include allow, needs_confirm, and reason when available, then explain what you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Note transformations, false positives, or why the schema is representative.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private data, proprietary schema details, and live targets.
+          required: true

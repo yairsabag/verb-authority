@@ -102,9 +102,9 @@ def run():
     if broke_at:
         i, label = broke_at
         print(f"resistance depth: held {held} tiers, broke at tier {i} ({label}).")
-        print("the tiers that held (homograph / uppercase / spacing / extraction)")
-        print("all fold to one canonical form, so they're caught together rather")
-        print("than by a rule per trick. the break is the SEMANTIC boundary: a")
+        print("the tiers reached before the break (plain / homograph / uppercase /")
+        print("extraction) are blocked by sink policy, mixed-script rejection, or")
+        print("canonical matching. the break is the SEMANTIC boundary: a")
         print("value the agent must interpret and reconstruct (at->@, dot->.) is")
         print("no longer the same string in disguise -- it's content the model")
         print("understood. closing that needs interpreter-level dataflow tracking")
