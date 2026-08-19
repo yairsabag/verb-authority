@@ -29,7 +29,7 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@main"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@@v0.9.0"
 python -m verb_authority
 ```
 
