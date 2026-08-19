@@ -25,11 +25,10 @@ deeper boundary.
 
 ## Install
 
-Verb Authority is not published on PyPI. Install the current source directly
-from GitHub:
+Verb Authority is not published on PyPI. Install v0.9.0 directly from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@@v0.9.0"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.9.0"
 python -m verb_authority
 ```
 
@@ -229,8 +228,8 @@ those deeper systems rather than this module.
 ## Project status
 
 v0.9.0 is early, research-grade work built in public. It is not described as
-production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for the v0.9.0 release notes
-release notes and [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution
-guidance.
+production-ready. See the [v0.9.0 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.9.0)
+and [`CHANGELOG.md`](CHANGELOG.md) for release details, and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 
 Licensed under Apache-2.0.
