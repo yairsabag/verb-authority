@@ -12,9 +12,9 @@ This shows the same attack twice:
       recognises the address as a tool-result value, forces it to 'data', and
       blocks it -- overriding the dev's mistaken trust declaration.
 
-Honest scope: the ledger matches values verbatim. If the agent had paraphrased
-or reformatted the address, it would no longer match and would still slip. This
-closes the naive verbatim-laundering path, not arbitrary transforms.
+Honest scope: the ledger matches exact values, risk-shaped strings contained in
+returned text, and selected lexical disguises after canonicalization. It does
+not follow semantic reconstruction or arbitrary transforms.
 """
 from verb_authority import (
     Param, Tool, Registry, build_policy, dispatch, ProvenanceLedger,

@@ -2,9 +2,10 @@
 verb-authority -- a drop-in action-layer guard for AI agents.
 
 PRINCIPLE: data selects, never authors.
-We never classify whether content is "malicious" (impossible -- and the source
-of every false positive). We constrain which ACTIONS run and which PARAMETERS
-untrusted data may fill.
+We do not classify whether content is "malicious". We constrain which ACTIONS
+run and which PARAMETERS untrusted data may fill. Under the gate's provenance
+model, data cannot author parameters whose policy is trusted_fixed; semantic
+rewrites remain outside this drop-in gate's tracking boundary.
 
 Built on the security model behind Google DeepMind's CaMeL
 ("Defeating Prompt Injections by Design", arXiv:2503.18813, Apache-2.0).
