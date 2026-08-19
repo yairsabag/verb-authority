@@ -3,7 +3,7 @@
 This project follows semantic versioning for its public Python API. Release
 dates are added when a GitHub release is actually published.
 
-## [0.9.0] - Unreleased
+## [0.9.0] - 2026-08-19
 
 ### Security model
 
