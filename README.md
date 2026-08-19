@@ -229,7 +229,7 @@ those deeper systems rather than this module.
 ## Project status
 
 v0.9.0 is early, research-grade work built in public. It is not described as
-production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for the planned v0.9.0
+production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for the v0.9.0 release notes
 release notes and [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution
 guidance.
 
