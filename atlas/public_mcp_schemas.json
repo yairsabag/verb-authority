@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "captured_at": "2026-08-20",
+  "method": "Manual JSON Schema normalization of public MCP SDK registrations; descriptions, output schemas, handlers, and runtime values are omitted.",
+  "sources": [
+    {
+      "id": "official-mcp-memory-reference",
+      "url": "https://github.com/modelcontextprotocol/servers/blob/599dafc1054550a6eeb87a6545c1e1b03b3ca827/src/memory/index.ts",
+      "license": "Apache-2.0 or MIT; see the upstream repository licensing transition notice",
+      "tools": [
+        {
+          "name": "create_entities",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entities": {
+                "type": "array",
+                "items": {"type": "object"}
+              }
+            },
+            "required": ["entities"]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "add_observations",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "observations": {
+                "type": "array",
+                "items": {"type": "object"}
+              }
+            },
+            "required": ["observations"]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "delete_entities",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entityNames": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            },
+            "required": ["entityNames"]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "read_graph",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "search_nodes",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "open_nodes",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "names": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            },
+            "required": ["names"]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "official-mcp-filesystem-reference",
+      "url": "https://github.com/modelcontextprotocol/servers/blob/599dafc1054550a6eeb87a6545c1e1b03b3ca827/src/filesystem/index.ts",
+      "license": "Apache-2.0 or MIT; see the upstream repository licensing transition notice",
+      "tools": [
+        {
+          "name": "read_text_file",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "tail": {"type": "number"},
+              "head": {"type": "number"}
+            },
+            "required": ["path"]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "write_file",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "content": {"type": "string"}
+            },
+            "required": ["path", "content"]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true,
+            "destructiveHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "edit_file",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "edits": {
+                "type": "array",
+                "items": {"type": "object"}
+              },
+              "dryRun": {"type": "boolean"}
+            },
+            "required": ["path", "edits"]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": false,
+            "destructiveHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_file_info",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"}
+            },
+            "required": ["path"]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    }
+  ]
+}

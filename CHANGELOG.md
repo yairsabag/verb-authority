@@ -3,6 +3,27 @@
 This project follows semantic versioning for its public Python API. Release
 dates are added when a GitHub release is actually published.
 
+## [Unreleased]
+
+### Scanner and Atlas
+
+- Add a zero-dependency local scanner for exported MCP, OpenAI, and Anthropic
+  tool schemas without starting servers or sending schemas over the network.
+- Produce Markdown or JSON authority reports that omit descriptions, examples,
+  defaults, runtime values, and input filenames; add optional name redaction
+  and a CI-friendly review exit status.
+- Seed the Tool Authority Atlas with ten tools normalized from source-pinned
+  official MCP memory and filesystem reference servers.
+
+### Evidence
+
+- Add a reproducible offline corpus covering 12 representative tool schemas
+  across 10 categories and 18 mixed-trust calls.
+- Report current inference misses instead of hiding them: two policy false
+  allows, two policy false blocks, two call false allows, and one call false
+  block in the initial reviewer-recorded baseline.
+- Position PACT as the closest published argument-level provenance baseline.
+
 ## [0.9.0] - 2026-08-19 
 
 ### Security model
@@ -36,4 +57,5 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/yairsabag/verb-authority/releases/tag/v0.9.0

