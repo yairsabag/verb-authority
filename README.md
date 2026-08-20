@@ -29,7 +29,7 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@@v0.9.0"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@main"
 python -m verb_authority
 ```
 
@@ -79,6 +79,36 @@ print(decision.reason)  # param 'to' is a locked sink; data may not author it
 Call `dispatch` immediately before tool execution. Execute only when
 `decision.allow` is true, and request human approval when
 `decision.needs_confirm` is true.
+
+## Scan your tool schemas locally
+
+Export the tool definitions your client already receives, then scan them
+without starting a tool server or uploading the schema:
+
+```bash
+python -m verb_authority scan tools.json --output authority-report.md
+```
+
+The scanner accepts MCP `tools/list` responses, OpenAI function tools, and
+Anthropic tool definitions. Its report contains inferred risk and per-argument
+authority, but omits descriptions, examples, defaults, runtime values, and the
+input filename. For a report intended for public sharing, also remove tool and
+parameter names:
+
+```bash
+python -m verb_authority scan tools.json \
+  --redact-names --format json --output authority-report.json
+```
+
+Use `--fail-on-review` in CI to return a non-zero status when ambiguous
+arguments or MCP annotation conflicts need attention. Static inference is a
+review aid, not a vulnerability verdict; the scanner does not inspect tool
+implementations or verify the surrounding application's authorization and
+provenance wiring.
+
+The [`Tool Authority Atlas`](atlas/README.md) checks in the same analysis for a
+small, source-pinned set of public MCP reference tools. It is the seed of a
+community corpus, not a ranking of MCP servers.
 
 ## What the gate does
 
@@ -148,9 +178,9 @@ or control flow.
 
 ## Evidence and demos
 
-The complete pytest suite contains 35 tests covering policy inference,
-declared capabilities, verb risk, the gate, dispatch, ledger containment, and
-canonicalization:
+The complete pytest suite covers policy inference, declared capabilities, verb
+risk, the gate, dispatch, ledger containment, canonicalization, schema import,
+report redaction, and the reproducible Atlas baseline:
 
 ```bash
 python -m pytest -v
@@ -228,9 +258,10 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is early, research-grade work built in public. It is not described as
-production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for the v0.9.0 release notes
-release notes and [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution
-guidance.
+v0.9.0 is the latest release. The scanner and Atlas are under development for
+v0.10.0 on `main`; the package reports `0.10.0.dev0` until that release is cut.
+This remains early, research-grade work and is not described as
+production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for release notes and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 
 Licensed under Apache-2.0.

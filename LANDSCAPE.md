@@ -130,7 +130,10 @@ The repository also includes an offline schema corpus under `benchmarks/`.
 Unlike a demonstration suite, it records desired reviewer policy separately
 from current inference and therefore reports conservative false blocks and
 dangerous false allows. It is a small curated baseline, not an AgentDojo score;
-the next step is contributed sanitized schemas and compatible AgentDojo cases.
+the adjacent Tool Authority Atlas begins expanding it with source-pinned public
+MCP schemas. A local scanner can produce name-redacted reports without sending
+the original schema anywhere. The next steps are reviewed community reports and
+compatible AgentDojo cases.
 
 ---
 

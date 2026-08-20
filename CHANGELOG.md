@@ -5,6 +5,16 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Scanner and Atlas
+
+- Add a zero-dependency local scanner for exported MCP, OpenAI, and Anthropic
+  tool schemas without starting servers or sending schemas over the network.
+- Produce Markdown or JSON authority reports that omit descriptions, examples,
+  defaults, runtime values, and input filenames; add optional name redaction
+  and a CI-friendly review exit status.
+- Seed the Tool Authority Atlas with ten tools normalized from source-pinned
+  official MCP memory and filesystem reference servers.
+
 ### Evidence
 
 - Add a reproducible offline corpus covering 12 representative tool schemas

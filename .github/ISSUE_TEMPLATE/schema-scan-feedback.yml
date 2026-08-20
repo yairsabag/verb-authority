@@ -1,0 +1,61 @@
+name: Schema scan feedback
+description: Correct an inference, add a public schema, or share a redacted local report.
+title: "[schema scan] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the authority map. Prefer a public source URL or a `--redact-names` report. Do not upload private schemas, credentials, runtime values, customer data, or production endpoints.
+
+  - type: dropdown
+    id: feedback-type
+    attributes:
+      label: Feedback type
+      options:
+        - Inferred policy correction
+        - Inferred verb-risk correction
+        - MCP annotation conflict
+        - Public Atlas schema addition
+        - Redacted local scan result
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Verb Authority version or commit
+      placeholder: v0.9.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: public-source
+    attributes:
+      label: Immutable public source URL, if applicable
+      description: Link to a specific commit rather than a moving branch.
+      placeholder: https://github.com/owner/repo/blob/<commit>/path
+
+  - type: textarea
+    id: finding
+    attributes:
+      label: Minimal finding or redacted report excerpt
+      description: Include inferred risk/policy, the expected classification, and the reason. A `--redact-names` excerpt is welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction command
+      description: Show the local scan command and report format; do not include private paths.
+      placeholder: python -m verb_authority scan tools.json --redact-names --format json
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I reviewed this submission and removed private schemas, credentials, runtime values, customer data, and production endpoints.
+          required: true
+        - label: I understand that an inference mismatch is not automatically a vulnerability in the upstream project.
+          required: true

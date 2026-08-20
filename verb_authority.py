@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 import re
+import sys
 
 
 # === roles a parameter value may play =====================================
@@ -412,5 +413,19 @@ def demo() -> None:
           "NEEDS CONFIRM" if d.needs_confirm else ("ALLOW" if d.allow else "BLOCKED"), "-", d.reason)
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    """Run the existing demo, or the opt-in local schema scanner."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "scan":
+        from verb_authority_scan import main as scan_main
+
+        return scan_main(argv[1:])
+    if argv:
+        print("usage: python -m verb_authority [scan ...]", file=sys.stderr)
+        return 2
     demo()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

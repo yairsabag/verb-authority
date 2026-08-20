@@ -3,7 +3,8 @@
 Focused contributions are welcome, especially:
 
 - minimal bypass cases with a regression test;
-- sanitized, real tool schemas that expose inference mistakes;
+- public tool schemas pinned to their source commit;
+- redacted scanner reports that expose inference mistakes;
 - documentation corrections and precise related-work citations; and
 - small changes that preserve the module's drop-in API.
 
@@ -34,3 +35,22 @@ Keep pull requests narrow. Explain the security assumption being tested, add a
 failing test before a behavioral fix, and report both blocks and known slips.
 Do not include API keys, proprietary schemas, user data, or claims such as
 “unbreakable” or “production-ready.”
+
+## Share an inference result safely
+
+Prefer a redacted report over the original schema:
+
+```bash
+python -m verb_authority scan tools.json \
+  --redact-names --output authority-report.md
+```
+
+The redacted report omits source metadata and replaces tool and parameter names
+with report-local identifiers. Read it before posting: unusual combinations of
+types and policies can still reveal context. If the schema is already public,
+link to an immutable source commit instead of copying descriptions or runtime
+examples.
+
+Atlas additions must be reproducible and neutral. Preserve input types and MCP
+annotations, record manual normalization, and describe results as inference
+findings rather than vulnerabilities in the upstream project.

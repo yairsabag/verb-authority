@@ -18,9 +18,12 @@ python -m benchmarks.run_schema_corpus
 
 Use `--json` for machine-readable results. The corpus is small and curated; it
 is not an AgentDojo result, a universal security score, or evidence of
-production readiness. The next evidence milestone is to replace or supplement
-these representative cases with contributed, sanitized schemas and to express
-compatible scenarios in AgentDojo where practical.
+production readiness. The adjacent `atlas/` dataset starts replacing
+representative cases with source-pinned public MCP schemas, while the local
+scanner lets users report classification errors without sharing the original
+schema. The next evidence milestones are to expand that public corpus, obtain
+reviewed redacted reports, and express compatible scenarios in AgentDojo where
+practical.
 
 ## v0.9.0 baseline
 
