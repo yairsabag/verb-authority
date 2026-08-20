@@ -5,6 +5,8 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.1] - 2026-08-20
+
 ### Scanner and Atlas
 
 - Add a zero-dependency local scanner for exported MCP, OpenAI, and Anthropic
@@ -57,5 +59,6 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.1...HEAD
+[0.10.0-beta.1]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.1
 [0.9.0]: https://github.com/yairsabag/verb-authority/releases/tag/v0.9.0

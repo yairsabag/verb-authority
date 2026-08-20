@@ -29,7 +29,7 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@main"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.1"
 python -m verb_authority
 ```
 
@@ -258,10 +258,10 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest release. The scanner and Atlas are under development for
-v0.10.0 on `main`; the package reports `0.10.0.dev0` until that release is cut.
-This remains early, research-grade work and is not described as
-production-ready. See [`CHANGELOG.md`](CHANGELOG.md) for release notes and
+v0.9.0 is the latest stable release. v0.10.0-beta.1 is the public beta for the
+local schema scanner and Tool Authority Atlas. This remains early,
+research-grade work and is not described as production-ready. See
+[`CHANGELOG.md`](CHANGELOG.md) for release notes and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 
 Licensed under Apache-2.0.
