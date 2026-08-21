@@ -1,0 +1,33 @@
+{
+  "tool": "purchase_bid",
+  "risk": "financial",
+  "needs_confirmation": true,
+  "schema_closes_unknown_arguments": true,
+  "attribution": {
+    "name": "avp9-nexus",
+    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5360058740"
+  },
+  "arguments": {
+    "tokenId": {
+      "authority": "free",
+      "evidence": "attested"
+    },
+    "bidWei": {
+      "authority": "constrained",
+      "evidence": "attested",
+      "bounds_mutability": [
+        "trusted_party",
+        "trusted_party",
+        "trusted_party",
+        "immutable"
+      ]
+    }
+  },
+  "unexposed_arguments": {
+    "destination": {
+      "exposure": "server_fixed",
+      "enforced_by": "server",
+      "evidence": "declared"
+    }
+  }
+}

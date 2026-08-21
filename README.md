@@ -29,12 +29,17 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.1"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.2"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
+
+The [beta.2 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.2)
+also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
+three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
+`shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
 
 For a local checkout instead:
 
@@ -105,6 +110,71 @@ arguments or MCP annotation conflicts need attention. Static inference is a
 review aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
+
+### Add implementation-level control evidence
+
+A JSON Schema cannot show that a caller-selected value is constrained by a
+runtime allowlist, or that the server supplies an argument which is not exposed
+to the model. Add a separate, reviewable declaration when you have that
+implementation evidence:
+
+```json
+{
+  "version": 1,
+  "attribution": {
+    "name": "security review",
+    "source": "implementation and integration tests"
+  },
+  "tools": {
+    "create_export": {
+      "arguments": {
+        "destination_path": {
+          "authority": "constrained",
+          "evidence": "attested",
+          "bounds": [
+            {
+              "source": "approved export root",
+              "bounds_mutability": "trusted_party",
+              "enforcement": "runtime path containment"
+            }
+          ]
+        }
+      },
+      "unexposed_arguments": {
+        "tenant_id": {
+          "exposure": "server_fixed",
+          "enforced_by": "authenticated session",
+          "evidence": "observed"
+        }
+      }
+    }
+  }
+}
+```
+
+Pass that file separately from the exported schemas:
+
+```bash
+python -m verb_authority scan tools.json \
+  --controls controls.json --output authority-report.md
+```
+
+Exposed arguments may be `locked`, `constrained`, or `free`. A constrained
+argument must name at least one bound and say whether the bound is
+`immutable`, controlled by a `trusted_party`, or controlled by the `caller`.
+Evidence may be `observed`, `declared`, or `attested`. Unexposed arguments
+currently support the explicit `server_fixed` control.
+
+These declarations are author-supplied evidence: the scanner validates their
+shape, fingerprints them, and displays them alongside (not instead of) its
+inferred policy. It does not inspect the enforcement or treat a declaration as
+proof. With `--redact-names`, tool and argument names plus attribution are
+removed, but author-written bound sources, enforcement text, and notes remain;
+review a redacted report before sharing it.
+
+The public [`avp9-nexus` financial fixture](fixtures/README.md) includes a tool
+schema, attributed control sidecar, and expected classification used as a
+regression oracle.
 
 The [`Tool Authority Atlas`](atlas/README.md) checks in the same analysis for a
 small, source-pinned set of public MCP reference tools. It is the seed of a
@@ -258,7 +328,7 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.1 is the public beta for the
+v0.9.0 is the latest stable release. v0.10.0-beta.2 is the public beta for the
 local schema scanner and Tool Authority Atlas. This remains early,
 research-grade work and is not described as production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

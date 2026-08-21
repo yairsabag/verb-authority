@@ -30,6 +30,15 @@ from verb_authority import (
 
 
 REPORT_VERSION = 1
+CONTROL_DECLARATION_VERSION = 1
+CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
+CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
+BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
+CONTROL_EXPOSURES = frozenset({"server_fixed"})
+CONTROL_VERIFICATION_NOTICE = (
+    "Control declarations are supplied by the report author. Their evidence "
+    "labels are preserved but are not independently verified by this scanner."
+)
 
 
 class SchemaError(ValueError):
@@ -194,6 +203,243 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     return properties, {item for item in required if isinstance(item, str)}
 
 
+def _optional_text(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SchemaError(f"control declaration field '{field}' must be non-empty text")
+    return value.strip()
+
+
+def _reject_unknown_fields(
+    value: dict[str, Any], *, allowed: set[str], field: str
+) -> None:
+    unknown = sorted(str(item) for item in value if item not in allowed)
+    if unknown:
+        raise SchemaError(
+            f"unknown field in {field}: " + ", ".join(str(item) for item in unknown)
+        )
+
+
+def _validate_control_declarations(
+    definitions: list[ToolDefinition], document: Any
+) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise SchemaError("control declarations must be a JSON object")
+    _reject_unknown_fields(
+        document,
+        allowed={"version", "attribution", "tools"},
+        field="control declarations",
+    )
+    if document.get("version") != CONTROL_DECLARATION_VERSION:
+        raise SchemaError(
+            f"control declaration version must be {CONTROL_DECLARATION_VERSION}"
+        )
+
+    definitions_by_name = {definition.name: definition for definition in definitions}
+    raw_tools = document.get("tools")
+    if not isinstance(raw_tools, dict):
+        raise SchemaError("control declarations must contain a tools object")
+
+    attribution = document.get("attribution")
+    normalized_attribution: dict[str, str] | None = None
+    if attribution is not None:
+        if not isinstance(attribution, dict):
+            raise SchemaError("control declaration attribution must be an object")
+        _reject_unknown_fields(
+            attribution,
+            allowed={"name", "source"},
+            field="control declaration attribution",
+        )
+        normalized_attribution = {}
+        for field in ("name", "source"):
+            value = _optional_text(attribution.get(field), field=f"attribution.{field}")
+            if value is not None:
+                normalized_attribution[field] = value
+        if not normalized_attribution:
+            normalized_attribution = None
+
+    normalized_tools: dict[str, Any] = {}
+    for tool_name, raw_tool in raw_tools.items():
+        if not isinstance(tool_name, str) or tool_name not in definitions_by_name:
+            raise SchemaError(f"control declaration references unknown tool: {tool_name}")
+        if not isinstance(raw_tool, dict):
+            raise SchemaError(f"control declaration for '{tool_name}' must be an object")
+        _reject_unknown_fields(
+            raw_tool,
+            allowed={"arguments", "unexposed_arguments"},
+            field=f"control declaration for '{tool_name}'",
+        )
+
+        properties, _ = _properties(definitions_by_name[tool_name])
+        raw_arguments = raw_tool.get("arguments", {})
+        if not isinstance(raw_arguments, dict):
+            raise SchemaError(f"control arguments for '{tool_name}' must be an object")
+        arguments: dict[str, Any] = {}
+        for argument_name, raw_argument in raw_arguments.items():
+            if argument_name not in properties:
+                raise SchemaError(
+                    f"control declaration references unknown argument: "
+                    f"{tool_name}.{argument_name}"
+                )
+            if not isinstance(raw_argument, dict):
+                raise SchemaError(
+                    f"control declaration for '{tool_name}.{argument_name}' "
+                    "must be an object"
+                )
+            _reject_unknown_fields(
+                raw_argument,
+                allowed={"authority", "evidence", "bounds", "note"},
+                field=f"control declaration for '{tool_name}.{argument_name}'",
+            )
+            authority = raw_argument.get("authority")
+            evidence = raw_argument.get("evidence")
+            if authority not in CONTROL_AUTHORITIES:
+                raise SchemaError(
+                    f"authority for '{tool_name}.{argument_name}' must be one of: "
+                    + ", ".join(sorted(CONTROL_AUTHORITIES))
+                )
+            if evidence not in CONTROL_EVIDENCE:
+                raise SchemaError(
+                    f"evidence for '{tool_name}.{argument_name}' must be one of: "
+                    + ", ".join(sorted(CONTROL_EVIDENCE))
+                )
+
+            raw_bounds = raw_argument.get("bounds", [])
+            if not isinstance(raw_bounds, list):
+                raise SchemaError(
+                    f"bounds for '{tool_name}.{argument_name}' must be an array"
+                )
+            if authority == "constrained" and not raw_bounds:
+                raise SchemaError(
+                    f"constrained argument '{tool_name}.{argument_name}' "
+                    "must declare at least one bound"
+                )
+            if authority != "constrained" and raw_bounds:
+                raise SchemaError(
+                    f"only constrained arguments may declare bounds: "
+                    f"{tool_name}.{argument_name}"
+                )
+            bounds = []
+            for bound_index, raw_bound in enumerate(raw_bounds, start=1):
+                if not isinstance(raw_bound, dict):
+                    raise SchemaError(
+                        f"bound {bound_index} for '{tool_name}.{argument_name}' "
+                        "must be an object"
+                    )
+                _reject_unknown_fields(
+                    raw_bound,
+                    allowed={"source", "bounds_mutability", "enforcement"},
+                    field=(
+                        f"bound {bound_index} for "
+                        f"'{tool_name}.{argument_name}'"
+                    ),
+                )
+                source = _optional_text(
+                    raw_bound.get("source"),
+                    field=f"{tool_name}.{argument_name}.bounds[{bound_index}].source",
+                )
+                mutability = raw_bound.get("bounds_mutability")
+                if source is None:
+                    raise SchemaError(
+                        f"bound {bound_index} for '{tool_name}.{argument_name}' "
+                        "must name its source"
+                    )
+                if mutability not in BOUND_MUTABILITY:
+                    raise SchemaError(
+                        f"bounds_mutability for '{tool_name}.{argument_name}' must be "
+                        "one of: " + ", ".join(sorted(BOUND_MUTABILITY))
+                    )
+                bound = {"source": source, "bounds_mutability": mutability}
+                enforcement = _optional_text(
+                    raw_bound.get("enforcement"),
+                    field=(
+                        f"{tool_name}.{argument_name}.bounds[{bound_index}].enforcement"
+                    ),
+                )
+                if enforcement is not None:
+                    bound["enforcement"] = enforcement
+                bounds.append(bound)
+
+            argument = {"authority": authority, "evidence": evidence}
+            if bounds:
+                argument["bounds"] = bounds
+            note = _optional_text(
+                raw_argument.get("note"), field=f"{tool_name}.{argument_name}.note"
+            )
+            if note is not None:
+                argument["note"] = note
+            arguments[argument_name] = argument
+
+        raw_unexposed = raw_tool.get("unexposed_arguments", {})
+        if not isinstance(raw_unexposed, dict):
+            raise SchemaError(
+                f"unexposed arguments for '{tool_name}' must be an object"
+            )
+        unexposed_arguments: dict[str, Any] = {}
+        for argument_name, raw_argument in raw_unexposed.items():
+            if argument_name in properties:
+                raise SchemaError(
+                    f"unexposed argument collides with schema argument: "
+                    f"{tool_name}.{argument_name}"
+                )
+            if not isinstance(argument_name, str) or not argument_name.strip():
+                raise SchemaError("unexposed argument names must be non-empty text")
+            if not isinstance(raw_argument, dict):
+                raise SchemaError(
+                    f"unexposed declaration for '{tool_name}.{argument_name}' "
+                    "must be an object"
+                )
+            _reject_unknown_fields(
+                raw_argument,
+                allowed={"exposure", "enforced_by", "evidence", "note"},
+                field=f"unexposed declaration for '{tool_name}.{argument_name}'",
+            )
+            exposure = raw_argument.get("exposure")
+            evidence = raw_argument.get("evidence")
+            if exposure not in CONTROL_EXPOSURES:
+                raise SchemaError(
+                    f"exposure for '{tool_name}.{argument_name}' must be one of: "
+                    + ", ".join(sorted(CONTROL_EXPOSURES))
+                )
+            if evidence not in CONTROL_EVIDENCE:
+                raise SchemaError(
+                    f"evidence for '{tool_name}.{argument_name}' must be one of: "
+                    + ", ".join(sorted(CONTROL_EVIDENCE))
+                )
+            enforced_by = _optional_text(
+                raw_argument.get("enforced_by"),
+                field=f"{tool_name}.{argument_name}.enforced_by",
+            )
+            if enforced_by is None:
+                raise SchemaError(
+                    f"unexposed argument '{tool_name}.{argument_name}' "
+                    "must declare enforced_by"
+                )
+            argument = {
+                "exposure": exposure,
+                "enforced_by": enforced_by,
+                "evidence": evidence,
+            }
+            note = _optional_text(
+                raw_argument.get("note"), field=f"{tool_name}.{argument_name}.note"
+            )
+            if note is not None:
+                argument["note"] = note
+            unexposed_arguments[argument_name] = argument
+
+        normalized_tools[tool_name] = {
+            "arguments": arguments,
+            "unexposed_arguments": unexposed_arguments,
+        }
+
+    return {
+        "version": CONTROL_DECLARATION_VERSION,
+        "attribution": normalized_attribution,
+        "tools": normalized_tools,
+    }
+
+
 def _reason(param: Param, policy: Policy, confidence: Confidence, risk: Risk) -> str:
     if param.sink is True:
         return "declared authority sink"
@@ -248,8 +494,99 @@ def _fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _control_declaration_fingerprint(declared_controls: dict[str, Any]) -> str:
+    normalized = {
+        "version": declared_controls["version"],
+        "tools": declared_controls["tools"],
+    }
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _declared_controls_report(
+    definitions: list[ToolDefinition],
+    report_tools: list[dict[str, Any]],
+    declarations: dict[str, Any],
+    *,
+    redact_names: bool,
+) -> dict[str, Any]:
+    declared_tools = declarations["tools"]
+    tools: list[dict[str, Any]] = []
+
+    for definition, report_tool in zip(definitions, report_tools):
+        declared_tool = declared_tools.get(definition.name)
+        if declared_tool is None:
+            continue
+
+        properties, _ = _properties(definition)
+        report_arguments = {
+            original_name: report_argument
+            for original_name, report_argument in zip(
+                properties, report_tool["arguments"]
+            )
+        }
+        exposed_arguments: list[dict[str, Any]] = []
+        for argument_name in properties:
+            if argument_name not in declared_tool["arguments"]:
+                continue
+            declared_argument = declared_tool["arguments"][argument_name]
+            report_argument = report_arguments[argument_name]
+            item = {
+                "name": report_argument["name"],
+                "schema_exposure": "exposed",
+                "inferred_policy": report_argument["policy"],
+                "review_required": report_argument["review_required"],
+                "authority": declared_argument["authority"],
+                "evidence": declared_argument["evidence"],
+            }
+            if "bounds" in declared_argument:
+                item["bounds"] = declared_argument["bounds"]
+            if "note" in declared_argument:
+                item["note"] = declared_argument["note"]
+            exposed_arguments.append(item)
+
+        unexposed_arguments: list[dict[str, Any]] = []
+        for index, argument_name in enumerate(
+            sorted(declared_tool["unexposed_arguments"]), start=len(properties) + 1
+        ):
+            declared_argument = declared_tool["unexposed_arguments"][argument_name]
+            item = {
+                "name": f"param_{index:03d}" if redact_names else argument_name,
+                "schema_exposure": "unexposed",
+                "exposure": declared_argument["exposure"],
+                "enforced_by": declared_argument["enforced_by"],
+                "evidence": declared_argument["evidence"],
+            }
+            if "note" in declared_argument:
+                item["note"] = declared_argument["note"]
+            unexposed_arguments.append(item)
+
+        tools.append(
+            {
+                "name": report_tool["name"],
+                "schema_closes_unknown_arguments": (
+                    definition.input_schema.get("additionalProperties") is False
+                ),
+                "arguments": exposed_arguments,
+                "unexposed_arguments": unexposed_arguments,
+            }
+        )
+
+    report = {
+        "version": CONTROL_DECLARATION_VERSION,
+        "verification_notice": CONTROL_VERIFICATION_NOTICE,
+        "tools": tools,
+    }
+    if not redact_names and declarations.get("attribution"):
+        report["attribution"] = declarations["attribution"]
+    return report
+
+
 def scan_definitions(
-    definitions: list[ToolDefinition], *, redact_names: bool = False
+    definitions: list[ToolDefinition],
+    *,
+    redact_names: bool = False,
+    control_declarations: Any | None = None,
 ) -> dict[str, Any]:
     if not definitions:
         raise SchemaError("no tool definitions found")
@@ -322,7 +659,7 @@ def scan_definitions(
             tool_report["source_url"] = definition.source_url
         report_tools.append(tool_report)
 
-    return {
+    report = {
         "report_version": REPORT_VERSION,
         "generator": "verb-authority",
         "privacy": {
@@ -331,6 +668,7 @@ def scan_definitions(
             "descriptions_included": False,
             "examples_or_values_included": False,
             "names_redacted": redact_names,
+            "control_declarations_included": control_declarations is not None,
         },
         "schema_fingerprint_sha256": _fingerprint(
             definitions, redact_names=redact_names
@@ -338,17 +676,57 @@ def scan_definitions(
         "summary": counts,
         "tools": report_tools,
     }
+    if control_declarations is not None:
+        declarations = _validate_control_declarations(
+            definitions, control_declarations
+        )
+        declared_controls = _declared_controls_report(
+            definitions,
+            report_tools,
+            declarations,
+            redact_names=redact_names,
+        )
+        report["declared_controls"] = declared_controls
+        report["control_declaration_fingerprint_sha256"] = (
+            _control_declaration_fingerprint(declared_controls)
+        )
+    return report
 
 
-def scan_documents(documents: Iterable[Any], *, redact_names: bool = False) -> dict[str, Any]:
+def scan_documents(
+    documents: Iterable[Any],
+    *,
+    redact_names: bool = False,
+    control_declarations: Any | None = None,
+) -> dict[str, Any]:
     definitions: list[ToolDefinition] = []
     for document in documents:
         definitions.extend(parse_tool_definitions(document))
-    return scan_definitions(definitions, redact_names=redact_names)
+    return scan_definitions(
+        definitions,
+        redact_names=redact_names,
+        control_declarations=control_declarations,
+    )
 
 
 def _markdown_cell(value: Any) -> str:
     return html.escape(str(value), quote=False).replace("|", "\\|").replace("\n", " ")
+
+
+def _control_details(argument: dict[str, Any]) -> str:
+    if argument["schema_exposure"] == "unexposed":
+        details = f"enforced by {argument['enforced_by']}"
+    else:
+        bounds = []
+        for bound in argument.get("bounds", []):
+            detail = f"{bound['source']} [{bound['bounds_mutability']}]"
+            if bound.get("enforcement"):
+                detail += f"; {bound['enforcement']}"
+            bounds.append(detail)
+        details = "; ".join(bounds) if bounds else "—"
+    if argument.get("note"):
+        details += f"; note: {argument['note']}"
+    return details
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -388,6 +766,59 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"| {_markdown_cell(source_id)} | {_markdown_cell(source_url)} |"
             )
+    declared_controls = report.get("declared_controls")
+    if declared_controls is not None:
+        lines.extend(
+            [
+                "",
+                "## Declared controls (author-supplied)",
+                "",
+                f"> {_markdown_cell(declared_controls['verification_notice'])}",
+                "",
+                "Control declaration fingerprint: "
+                f"`{report['control_declaration_fingerprint_sha256']}`",
+            ]
+        )
+        attribution = declared_controls.get("attribution")
+        if attribution:
+            attribution_parts = [
+                attribution[field] for field in ("name", "source") if field in attribution
+            ]
+            lines.append(
+                "Attribution: " + _markdown_cell(" — ".join(attribution_parts))
+            )
+        lines.extend(
+            [
+                "",
+                "| Tool | Argument | Schema exposure | Inferred policy | "
+                "Declared control | Evidence | Details |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
+        for tool in declared_controls["tools"]:
+            for argument in tool["arguments"]:
+                lines.append(
+                    "| {tool} | {argument} | exposed | {policy} | {authority} | "
+                    "{evidence} | {details} |".format(
+                        tool=_markdown_cell(tool["name"]),
+                        argument=_markdown_cell(argument["name"]),
+                        policy=_markdown_cell(argument["inferred_policy"]),
+                        authority=_markdown_cell(argument["authority"]),
+                        evidence=_markdown_cell(argument["evidence"]),
+                        details=_markdown_cell(_control_details(argument)),
+                    )
+                )
+            for argument in tool["unexposed_arguments"]:
+                lines.append(
+                    "| {tool} | {argument} | unexposed | — | {exposure} | "
+                    "{evidence} | {details} |".format(
+                        tool=_markdown_cell(tool["name"]),
+                        argument=_markdown_cell(argument["name"]),
+                        exposure=_markdown_cell(argument["exposure"]),
+                        evidence=_markdown_cell(argument["evidence"]),
+                        details=_markdown_cell(_control_details(argument)),
+                    )
+                )
     lines.extend(
         [
             "",
@@ -454,6 +885,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", help="write the report to this file instead of stdout")
     parser.add_argument(
+        "--controls",
+        help="JSON declarations for author-supplied argument controls, or - for stdin",
+    )
+    parser.add_argument(
         "--redact-names",
         action="store_true",
         help="replace tool and parameter names with stable report-local identifiers",
@@ -466,8 +901,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.controls == "-" and "-" in args.schemas:
+            raise SchemaError("schemas and control declarations cannot both use stdin")
+        controls = _load_json(args.controls) if args.controls else None
         report = scan_documents(
-            [_load_json(path) for path in args.schemas], redact_names=args.redact_names
+            [_load_json(path) for path in args.schemas],
+            redact_names=args.redact_names,
+            control_declarations=controls,
         )
     except (OSError, json.JSONDecodeError, SchemaError) as exc:
         parser.error(str(exc))

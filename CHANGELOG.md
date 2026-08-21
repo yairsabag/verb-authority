@@ -5,6 +5,28 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.2] - 2026-08-21
+
+### Scanner evidence
+
+- Accept a separate, versioned control-declaration file for constrained,
+  caller-free, locked, and server-fixed arguments; validate references and
+  bound mutability before including them in a report.
+- Keep author-supplied evidence visibly separate from inferred policy, label it
+  as independently unverified, fingerprint it, and support name-redacted JSON
+  and Markdown output.
+- Build and smoke-test both command-line entry points from the wheel in CI, and
+  retain the source and wheel distributions as workflow artifacts.
+- Add the attributed `avp9-nexus` financial-tool fixture and a regression oracle
+  that preserves `bidWei` as constrained authority and `destination` as a
+  server-fixed declaration.
+
+### Distribution
+
+- Generate and verify SHA-256 checksums for every wheel and source archive.
+- Test release tags from a clean checkout and attach the verified distributions
+  plus `SHA256SUMS` to each GitHub release.
+
 ## [0.10.0-beta.1] - 2026-08-20
 
 ### Scanner and Atlas
@@ -59,6 +81,7 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.1...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.2...HEAD
+[0.10.0-beta.2]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.2
 [0.10.0-beta.1]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.1
 [0.9.0]: https://github.com/yairsabag/verb-authority/releases/tag/v0.9.0
