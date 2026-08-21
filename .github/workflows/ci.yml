@@ -66,8 +66,19 @@ jobs:
           verb-authority scan --help
           verb-authority-scan "${{ github.workspace }}/atlas/public_mcp_schemas.json" \
             --format json --output authority-report.json
+          verb-authority diff authority-report.json authority-report.json \
+            --fail-on-increase
+          verb-authority-diff authority-report.json authority-report.json \
+            --format json --output authority-diff.json
           python -c 'import json; assert json.load(open("authority-report.json"))["summary"]["tools"] == 10'
+          python -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           python -m pip check
+
+      - name: Smoke-test local composite action
+        uses: ./
+        with:
+          before: ${{ runner.temp }}/authority-report.json
+          after: ${{ runner.temp }}/authority-report.json
 
       - name: Preserve distributions
         uses: actions/upload-artifact@v4

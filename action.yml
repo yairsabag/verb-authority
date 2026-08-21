@@ -1,0 +1,58 @@
+name: Verb Authority Diff
+description: Detect when a tool-schema change gives an AI agent more authority.
+author: Verb Authority
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  before:
+    description: Baseline tool-schema export or Verb Authority JSON report.
+    required: true
+  after:
+    description: Candidate tool-schema export or Verb Authority JSON report.
+    required: true
+  before_controls:
+    description: Optional control declarations for a raw baseline schema.
+    required: false
+    default: ""
+  after_controls:
+    description: Optional control declarations for a raw candidate schema.
+    required: false
+    default: ""
+  fail_on_increase:
+    description: Fail the step when caller authority increases.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Verb Authority
+      shell: bash
+      run: python -m pip install --disable-pip-version-check "$GITHUB_ACTION_PATH"
+
+    - name: Compare tool authority
+      shell: bash
+      env:
+        VA_BEFORE: ${{ inputs.before }}
+        VA_AFTER: ${{ inputs.after }}
+        VA_BEFORE_CONTROLS: ${{ inputs.before_controls }}
+        VA_AFTER_CONTROLS: ${{ inputs.after_controls }}
+        VA_FAIL_ON_INCREASE: ${{ inputs.fail_on_increase }}
+      run: |
+        va_args=("$VA_BEFORE" "$VA_AFTER")
+        if [[ -n "$VA_BEFORE_CONTROLS" ]]; then
+          va_args+=(--before-controls "$VA_BEFORE_CONTROLS")
+        fi
+        if [[ -n "$VA_AFTER_CONTROLS" ]]; then
+          va_args+=(--after-controls "$VA_AFTER_CONTROLS")
+        fi
+        if [[ "$VA_FAIL_ON_INCREASE" == "true" ]]; then
+          va_args+=(--fail-on-increase)
+        elif [[ "$VA_FAIL_ON_INCREASE" != "false" ]]; then
+          echo "fail_on_increase must be true or false" >&2
+          exit 2
+        fi
+        python -m verb_authority diff "${va_args[@]}"

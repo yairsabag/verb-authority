@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verb-authority"
-version = "0.10.0b2"
+version = "0.10.0b3"
 description = "A Python gate that prevents untrusted agent data from authoring sensitive tool-call arguments—without classifying prompts."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,7 @@ dependencies = []
 [project.scripts]
 verb-authority = "verb_authority:main"
 verb-authority-scan = "verb_authority_scan:main"
+verb-authority-diff = "verb_authority_diff:main"
 
 [project.optional-dependencies]
 dev = [
@@ -48,7 +49,7 @@ Repository = "https://github.com/yairsabag/verb-authority"
 Issues = "https://github.com/yairsabag/verb-authority/issues"
 
 [tool.setuptools]
-py-modules = ["verb_authority", "verb_authority_scan"]
+py-modules = ["verb_authority", "verb_authority_scan", "verb_authority_diff"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

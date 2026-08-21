@@ -29,14 +29,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.2"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.3"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.2 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.2)
+The [beta.3 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.3)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
@@ -175,6 +175,56 @@ review a redacted report before sharing it.
 The public [`avp9-nexus` financial fixture](fixtures/README.md) includes a tool
 schema, attributed control sidecar, and expected classification used as a
 regression oracle.
+
+### Catch authority drift between versions
+
+Compare two exported tool schemas directly. Verb Authority scans both inputs
+locally, then reports only authority-relevant changes:
+
+```bash
+python -m verb_authority diff tools-main.json tools-pr.json
+```
+
+Example output:
+
+```text
+[AUTHORITY INCREASE] purchase_bid.destination
+  A previously unexposed argument became caller-visible.
+  schema_exposure: unexposed -> exposed
+```
+
+The command also accepts two non-redacted JSON reports. When implementation
+controls are part of the comparison, pass the sidecars with
+`--before-controls` and `--after-controls`. Control evidence remains visibly
+author-supplied; a diff does not turn a declaration into verified enforcement.
+
+Use the CI threshold to fail only when authority increases. Review-only changes
+and protection increases remain visible without failing the job:
+
+```bash
+python -m verb_authority diff tools-main.json tools-pr.json \
+  --fail-on-increase
+```
+
+Or add the repository's zero-configuration composite action after exporting
+the baseline and candidate schemas in your workflow:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+- uses: yairsabag/verb-authority@v0.10.0-beta.3
+  with:
+    before: tools-main.json
+    after: tools-pr.json
+```
+
+The action fails the step on an authority increase by default. Set
+`fail_on_increase: "false"` for an observation-only rollout.
+
+Name-redacted reports cannot be correlated safely across versions, so diff
+them locally before applying `--redact-names` to a report intended for sharing.
 
 The [`Tool Authority Atlas`](atlas/README.md) checks in the same analysis for a
 small, source-pinned set of public MCP reference tools. It is the seed of a

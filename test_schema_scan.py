@@ -46,6 +46,7 @@ def test_scans_mcp_tools_list_result():
         "annotation_conflicts": 0,
     }
     assert report["tools"][0]["arguments"][0]["policy"] == "trusted_fixed"
+    assert report["tools"][0]["schema_closes_unknown_arguments"] is False
     assert "private description" not in json.dumps(report).lower()
 
 
