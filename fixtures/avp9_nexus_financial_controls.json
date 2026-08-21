@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "attribution": {
+    "name": "avp9-nexus",
+    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5360058740"
+  },
+  "tools": {
+    "purchase_bid": {
+      "arguments": {
+        "tokenId": {
+          "authority": "free",
+          "evidence": "attested",
+          "note": "Validity is enforced downstream by contract state; an invalid token ID reverts."
+        },
+        "bidWei": {
+          "authority": "constrained",
+          "evidence": "attested",
+          "bounds": [
+            {
+              "source": "server per-call ceiling",
+              "bounds_mutability": "trusted_party",
+              "enforcement": "pre-signature deny"
+            },
+            {
+              "source": "platform per-cycle budget",
+              "bounds_mutability": "trusted_party",
+              "enforcement": "platform budget check"
+            },
+            {
+              "source": "contract per-auction cap",
+              "bounds_mutability": "trusted_party",
+              "enforcement": "contract state validation"
+            },
+            {
+              "source": "contract absolute maximum",
+              "bounds_mutability": "immutable",
+              "enforcement": "immutable contract constant"
+            }
+          ]
+        }
+      },
+      "unexposed_arguments": {
+        "destination": {
+          "exposure": "server_fixed",
+          "enforced_by": "server",
+          "evidence": "declared",
+          "note": "Deliberately absent from the caller-visible schema."
+        }
+      }
+    }
+  }
+}

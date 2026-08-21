@@ -31,3 +31,47 @@ jobs:
 
       - name: Run complete test suite
         run: python -m pytest -v
+
+  package:
+    name: Build and smoke-test distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build frontend
+        run: python -m pip install "build>=1.2,<2"
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Generate and verify SHA-256 checksums
+        working-directory: dist
+        run: |
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Install the built wheel
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+
+      - name: Smoke-test installed commands
+        working-directory: ${{ runner.temp }}
+        run: |
+          verb-authority scan --help
+          verb-authority-scan "${{ github.workspace }}/atlas/public_mcp_schemas.json" \
+            --format json --output authority-report.json
+          python -c 'import json; assert json.load(open("authority-report.json"))["summary"]["tools"] == 10'
+          python -m pip check
+
+      - name: Preserve distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error

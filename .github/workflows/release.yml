@@ -1,0 +1,65 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-attach:
+    name: Test, build, verify, and attach distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install development dependencies
+        run: python -m pip install "build>=1.2,<2" "pytest>=8,<10"
+
+      - name: Run complete test suite
+        run: python -m pytest -v
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Generate and verify SHA-256 checksums
+        working-directory: dist
+        run: |
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Install and smoke-test the wheel
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+
+      - name: Exercise installed commands outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          verb-authority scan --help
+          verb-authority-scan "${{ github.workspace }}/fixtures/avp9_nexus_financial_tool.json" \
+            --controls "${{ github.workspace }}/fixtures/avp9_nexus_financial_controls.json" \
+            --format json --output authority-report.json
+          python -c 'import json; report = json.load(open("authority-report.json")); arguments = {item["name"]: item for item in report["declared_controls"]["tools"][0]["arguments"]}; assert arguments["bidWei"]["authority"] == "constrained"'
+          python -m pip check
+
+      - name: Preserve release distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions-${{ github.event.release.tag_name }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attach verified assets to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
