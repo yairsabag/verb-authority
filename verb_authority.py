@@ -414,14 +414,18 @@ def demo() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the existing demo, or the opt-in local schema scanner."""
+    """Run the demo, local schema scanner, or authority-diff command."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "scan":
         from verb_authority_scan import main as scan_main
 
         return scan_main(argv[1:])
+    if argv and argv[0] == "diff":
+        from verb_authority_diff import main as diff_main
+
+        return diff_main(argv[1:])
     if argv:
-        print("usage: python -m verb_authority [scan ...]", file=sys.stderr)
+        print("usage: python -m verb_authority [scan|diff ...]", file=sys.stderr)
         return 2
     demo()
     return 0

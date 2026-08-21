@@ -650,6 +650,9 @@ def scan_definitions(
             "name": display_tool,
             "risk": risk.value,
             "needs_confirmation": tool_name in policy_set.confirm,
+            "schema_closes_unknown_arguments": (
+                definition.input_schema.get("additionalProperties") is False
+            ),
             "annotation_conflicts": conflicts,
             "arguments": arguments,
         }

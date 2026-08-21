@@ -14,12 +14,12 @@ jobs:
 
     steps:
       - name: Check out the released tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -48,11 +48,16 @@ jobs:
           verb-authority-scan "${{ github.workspace }}/fixtures/avp9_nexus_financial_tool.json" \
             --controls "${{ github.workspace }}/fixtures/avp9_nexus_financial_controls.json" \
             --format json --output authority-report.json
+          verb-authority diff authority-report.json authority-report.json \
+            --fail-on-increase
+          verb-authority-diff authority-report.json authority-report.json \
+            --format json --output authority-diff.json
           python -c 'import json; report = json.load(open("authority-report.json")); arguments = {item["name"]: item for item in report["declared_controls"]["tools"][0]["arguments"]}; assert arguments["bidWei"]["authority"] == "constrained"'
+          python -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           python -m pip check
 
       - name: Preserve release distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-distributions-${{ github.event.release.tag_name }}
           path: dist/
