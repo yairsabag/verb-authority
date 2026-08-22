@@ -5,6 +5,20 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.4] - 2026-08-22
+
+### Operational control evidence
+
+- Preserve a per-bound `operational_status` of `enforced` or `specified` in
+  control declarations and reports; legacy declarations remain valid and are
+  rendered as `not_stated` rather than assumed active.
+- Make Authority Diff fail on loss or weakening of currently enforced bounds,
+  report activation as a protection increase, and keep changes to specified or
+  unstated bounds in the review category.
+- Correct the attributed `avp9-nexus` fixture to record two currently enforced
+  server/platform bounds and two specified bounds from an undeployed contract
+  revision without collapsing `bidWei` out of `constrained` authority.
+
 ## [0.10.0-beta.3] - 2026-08-22
 
 ### Authority drift
@@ -97,7 +111,8 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.3...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.4...HEAD
+[0.10.0-beta.4]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4
 [0.10.0-beta.3]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.3
 [0.10.0-beta.2]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.2
 [0.10.0-beta.1]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.1

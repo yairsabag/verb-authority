@@ -29,14 +29,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.3"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.4"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.3 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.3)
+The [beta.4 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
@@ -135,6 +135,7 @@ implementation evidence:
             {
               "source": "approved export root",
               "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
               "enforcement": "runtime path containment"
             }
           ]
@@ -162,6 +163,9 @@ python -m verb_authority scan tools.json \
 Exposed arguments may be `locked`, `constrained`, or `free`. A constrained
 argument must name at least one bound and say whether the bound is
 `immutable`, controlled by a `trusted_party`, or controlled by the `caller`.
+Each bound may also state whether it is running now (`enforced`) or belongs to
+a design that is not running (`specified`). If omitted, the report preserves
+the absence as `not_stated` rather than assuming the control is active.
 Evidence may be `observed`, `declared`, or `attested`. Unexposed arguments
 currently support the explicit `server_fixed` control.
 
@@ -214,7 +218,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.3
+- uses: yairsabag/verb-authority@v0.10.0-beta.4
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -378,9 +382,10 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.2 is the public beta for the
-local schema scanner and Tool Authority Atlas. This remains early,
-research-grade work and is not described as production-ready. See
+v0.9.0 is the latest stable release. v0.10.0-beta.4 is the public beta for the
+local schema scanner, control evidence, Authority Diff, and Tool Authority
+Atlas. This remains early, research-grade work and is not described as
+production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 

@@ -103,7 +103,53 @@ def test_server_fixed_argument_becoming_exposed_is_an_authority_increase():
     assert exposure["after"] == "exposed"
 
 
-def test_immutable_bound_becoming_caller_controlled_is_flagged():
+def test_enforced_bound_becoming_caller_controlled_is_flagged():
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    arguments = after["declared_controls"]["tools"][0]["arguments"]
+    bid = next(argument for argument in arguments if argument["name"] == "bidWei")
+    bid["bounds"][0]["bounds_mutability"] = "caller"
+
+    diff = diff_reports(before, after)
+
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "authority_increase"
+    assert "currently enforced" in bound_change["message"]
+
+
+def test_enforced_bound_becoming_specified_is_an_authority_increase():
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    arguments = after["declared_controls"]["tools"][0]["arguments"]
+    bid = next(argument for argument in arguments if argument["name"] == "bidWei")
+    bid["bounds"][0]["operational_status"] = "specified"
+
+    diff = diff_reports(before, after)
+
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "authority_increase"
+
+
+def test_specified_bound_becoming_enforced_is_a_protection_increase():
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    arguments = after["declared_controls"]["tools"][0]["arguments"]
+    bid = next(argument for argument in arguments if argument["name"] == "bidWei")
+    bid["bounds"][-1]["operational_status"] = "enforced"
+
+    diff = diff_reports(before, after)
+
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "protection_increase"
+
+
+def test_specified_bound_mutability_change_requires_review_but_does_not_fail():
     before = _avp9_report()
     after = copy.deepcopy(before)
     arguments = after["declared_controls"]["tools"][0]["arguments"]
@@ -115,8 +161,8 @@ def test_immutable_bound_becoming_caller_controlled_is_flagged():
     bound_change = next(
         change for change in diff["changes"] if change["kind"] == "bounds_changed"
     )
-    assert bound_change["classification"] == "authority_increase"
-    assert "caller-controlled" in bound_change["message"]
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["authority_increases"] == 0
 
 
 def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():

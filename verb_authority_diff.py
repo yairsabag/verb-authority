@@ -243,8 +243,36 @@ def _ranked_change(
 def _bounds_classification(
     before: list[dict[str, Any]], after: list[dict[str, Any]]
 ) -> str:
-    before_mutability = [bound.get("bounds_mutability") for bound in before]
-    after_mutability = [bound.get("bounds_mutability") for bound in after]
+    before_status = [
+        bound.get("operational_status", "not_stated") for bound in before
+    ]
+    after_status = [
+        bound.get("operational_status", "not_stated") for bound in after
+    ]
+    if "not_stated" in before_status or "not_stated" in after_status:
+        return "review"
+
+    before_enforced = [
+        bound
+        for bound, status in zip(before, before_status)
+        if status == "enforced"
+    ]
+    after_enforced = [
+        bound
+        for bound, status in zip(after, after_status)
+        if status == "enforced"
+    ]
+    if len(after_enforced) < len(before_enforced):
+        return "authority_increase"
+    if len(after_enforced) > len(before_enforced):
+        return "protection_increase"
+
+    before_mutability = [
+        bound.get("bounds_mutability") for bound in before_enforced
+    ]
+    after_mutability = [
+        bound.get("bounds_mutability") for bound in after_enforced
+    ]
     if (
         after_mutability.count("caller") > before_mutability.count("caller")
         or after_mutability.count("immutable")
@@ -348,9 +376,18 @@ def _compare_exposed_argument(
     if before_bounds != after_bounds:
         classification = _bounds_classification(before_bounds, after_bounds)
         messages = {
-            "authority_increase": "The declared bound chain became more caller-controlled.",
-            "protection_increase": "The declared bound chain gained a stronger control.",
-            "review": "The declared bound chain changed and needs review.",
+            "authority_increase": (
+                "The declared bound chain lost or weakened a currently "
+                "enforced control."
+            ),
+            "protection_increase": (
+                "The declared bound chain gained or strengthened a currently "
+                "enforced control."
+            ),
+            "review": (
+                "The declared bound chain changed without a proven change to "
+                "currently enforced controls."
+            ),
         }
         changes.append(
             _change(

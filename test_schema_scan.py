@@ -221,6 +221,9 @@ def test_reports_declared_controls_without_overriding_inferred_policy():
 
     assert report["tools"][0]["arguments"][0]["policy"] == "trusted_fixed"
     assert declared["tools"][0]["arguments"][0]["authority"] == "constrained"
+    assert declared["tools"][0]["arguments"][0]["bounds"][0][
+        "operational_status"
+    ] == "not_stated"
     assert declared["tools"][0]["arguments"][0]["inferred_policy"] == (
         "trusted_fixed"
     )
@@ -235,6 +238,7 @@ def test_reports_declared_controls_without_overriding_inferred_policy():
     assert "Declared controls (author-supplied)" in markdown
     assert "destination_path" in markdown
     assert "runtime path containment" in markdown
+    assert "not_stated" in markdown
 
 
 def test_redacts_declared_control_names_attribution_and_fingerprint_inputs():
@@ -331,6 +335,10 @@ def test_avp9_nexus_financial_fixture_regression():
             assert [
                 bound["bounds_mutability"] for bound in arguments[name]["bounds"]
             ] == expected_argument["bounds_mutability"]
+        if "operational_status" in expected_argument:
+            assert [
+                bound["operational_status"] for bound in arguments[name]["bounds"]
+            ] == expected_argument["operational_status"]
 
     # Positive-control guard: do not collapse this deployment into either extreme.
     assert arguments["bidWei"]["authority"] == "constrained"
@@ -423,6 +431,29 @@ def test_control_fingerprint_ignores_json_object_member_order():
                 },
             },
             "unknown field",
+        ),
+        (
+            {
+                "version": 1,
+                "tools": {
+                    "create_record": {
+                        "arguments": {
+                            "opaque": {
+                                "authority": "constrained",
+                                "evidence": "declared",
+                                "bounds": [
+                                    {
+                                        "source": "future limit",
+                                        "bounds_mutability": "trusted_party",
+                                        "operational_status": "planned",
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                },
+            },
+            "operational_status",
         ),
     ],
 )

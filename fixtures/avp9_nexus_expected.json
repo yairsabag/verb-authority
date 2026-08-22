@@ -5,7 +5,7 @@
   "schema_closes_unknown_arguments": true,
   "attribution": {
     "name": "avp9-nexus",
-    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5360058740"
+    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5378944333"
   },
   "arguments": {
     "tokenId": {
@@ -20,6 +20,12 @@
         "trusted_party",
         "trusted_party",
         "immutable"
+      ],
+      "operational_status": [
+        "enforced",
+        "enforced",
+        "specified",
+        "specified"
       ]
     }
   },
