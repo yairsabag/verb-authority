@@ -5,6 +5,12 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Documentation
+
+- Add a reproducible external-beta case study covering the beta.4 name-derived
+  risk failure, beta.5 independent rerun, beta.6 report-contract closure, and
+  the remaining limits of static schema evidence.
+
 ## [0.10.0-beta.6] - 2026-08-22
 
 ### Risk conflict clarity

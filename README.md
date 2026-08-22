@@ -203,7 +203,14 @@ The public [`avp9-nexus` financial fixture](fixtures/README.md) includes a tool
 schema, attributed control sidecar, and expected classification used as a
 regression oracle.
 
-### Catch authority drift between versions
+## Case studies
+
+- [External beta test: when a tool name put confirmation on the wrong
+  call](docs/case-studies/external-beta-risk-evidence.md) — a public,
+  independently rerun example of under-reporting, over-reporting, and the
+  evidence-model redesign that followed.
+
+## Catch authority drift between versions
 
 Compare two exported tool schemas directly. Verb Authority scans both inputs
 locally, then reports only authority-relevant changes:
