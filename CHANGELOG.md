@@ -5,6 +5,17 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.6] - 2026-08-22
+
+### Risk conflict clarity
+
+- Recognize `eval` only as a complete tool-name token for advisory
+  `code_exec` evidence while keeping `evaluate`, `evaluation`, and
+  `revaluate` outside the match.
+- Keep the effective risk at `unknown` when a declared tier conflicts with a
+  matched name heuristic, report `conflict_safe_default` as its source, and
+  retain review plus confirmation until the conflict is resolved.
+
 ## [0.10.0-beta.5] - 2026-08-22
 
 ### Risk evidence and safe gating
@@ -134,7 +145,8 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.5...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.6...HEAD
+[0.10.0-beta.6]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6
 [0.10.0-beta.5]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5
 [0.10.0-beta.4]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4
 [0.10.0-beta.3]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.3

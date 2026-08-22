@@ -108,7 +108,10 @@ class Registry:
 # "revaluate" -> "eval". Even a match remains advisory: build_policy keeps an
 # undeclared tool at UNKNOWN until the application supplies a risk declaration.
 _RISK_TOKENS: list[tuple[Risk, frozenset[str]]] = [
-    (Risk.CODE_EXEC, frozenset({"exec", "execute", "shell", "sql", "spawn"})),
+    (
+        Risk.CODE_EXEC,
+        frozenset({"eval", "exec", "execute", "shell", "sql", "spawn"}),
+    ),
     (Risk.DESTRUCTIVE, frozenset({
         "delete", "remove", "drop", "wipe", "revoke", "destroy", "purge", "truncate",
     })),
@@ -212,11 +215,13 @@ def build_policy(reg: Registry) -> PolicySet:
         declared = tool.risk
         if isinstance(declared, str):
             declared = Risk(declared)
-        # A caller-mutable name cannot establish runtime behavior. Keep the
-        # effective tier unknown until the application makes a declaration;
-        # the lexical inference remains available as review evidence.
-        r = declared if declared is not None else Risk.UNKNOWN
         conflict = declared is not None and inferred.risk is not Risk.UNKNOWN and declared is not inferred.risk
+        # A caller-mutable name cannot establish runtime behavior. Keep the
+        # effective tier unknown until the application makes a declaration.
+        # A declaration that conflicts with the lexical evidence is not yet a
+        # resolved tier either: preserve both claims for review and keep the
+        # effective result at the same fail-safe UNKNOWN boundary.
+        r = Risk.UNKNOWN if declared is None or conflict else declared
 
         risk_inference[name] = inferred
         risk[name] = r
@@ -224,9 +229,9 @@ def build_policy(reg: Registry) -> PolicySet:
             risk_review.append(name)
         if conflict:
             risk_conflicts.append(name)
-        # An explicit declaration controls the effective tier. If it lowers a
-        # matched high-risk heuristic, keep the confirmation fail-safe until a
-        # human resolves the visible conflict.
+        # A non-conflicting declaration controls the effective tier. A visible
+        # conflict keeps both the effective tier and confirmation fail-safe
+        # until a human resolves it.
         if r in NEEDS_CONFIRM or (conflict and inferred.risk in NEEDS_CONFIRM):
             confirm.append(name)
         policy[name] = {}

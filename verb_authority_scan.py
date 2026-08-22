@@ -763,19 +763,27 @@ def scan_definitions(
         else:
             risk_inference["matched_tokens"] = list(inferred_risk.matched_tokens)
 
+        risk_conflict = tool_name in policy_set.risk_conflicts
+        if risk_conflict:
+            risk_source = "conflict_safe_default"
+        elif declared_risk is not None:
+            risk_source = "control_declaration"
+        else:
+            risk_source = "safe_default"
+
         tool_report: dict[str, Any] = {
             "name": display_tool,
             "risk": risk.value,
-            "risk_source": (
-                "control_declaration" if declared_risk is not None else "safe_default"
-            ),
+            "risk_source": risk_source,
             "risk_evidence": (
-                declared_risk["evidence"] if declared_risk is not None else None
+                declared_risk["evidence"]
+                if declared_risk is not None and not risk_conflict
+                else None
             ),
             "inferred_risk": inferred_risk.risk.value,
             "risk_inference": risk_inference,
             "declared_risk": declared_risk,
-            "risk_conflict": tool_name in policy_set.risk_conflicts,
+            "risk_conflict": risk_conflict,
             "risk_review_required": tool_name in policy_set.risk_review,
             "needs_confirmation": tool_name in policy_set.confirm,
             "schema_closes_unknown_arguments": (

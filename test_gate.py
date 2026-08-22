@@ -80,9 +80,17 @@ def test_bid_name_mutations_are_financial_heuristics(name):
     assert assessment.review_required
 
 
-@pytest.mark.parametrize("name", ["evaluate", "eval", "evaluation", "revaluate"])
+@pytest.mark.parametrize("name", ["evaluate", "evaluation", "revaluate"])
 def test_evaluation_names_do_not_substring_match_code_execution(name):
     assert infer_risk(name).risk is Risk.UNKNOWN
+
+
+def test_eval_complete_token_is_code_execution_heuristic():
+    assessment = infer_risk("eval")
+
+    assert assessment.risk is Risk.CODE_EXEC
+    assert assessment.matched_tokens == ("eval",)
+    assert assessment.review_required
 
 
 def test_tool_name_is_advisory_until_risk_is_declared():
@@ -108,12 +116,17 @@ def test_explicit_risk_declaration_controls_runtime_policy():
 
 def test_lower_risk_declaration_keeps_confirmation_on_name_conflict():
     registry = Registry()
-    registry.add(Tool("delete_records", [], risk=Risk.READ_ONLY))
+    registry.add(
+        Tool("delete_records", [Param("query", "string")], risk=Risk.READ_ONLY)
+    )
     policy_set = build_policy(registry)
 
-    assert policy_set.risk["delete_records"] is Risk.READ_ONLY
+    assert policy_set.risk["delete_records"] is Risk.UNKNOWN
     assert "delete_records" in policy_set.risk_conflicts
+    assert "delete_records" in policy_set.risk_review
     assert "delete_records" in policy_set.confirm
+    assert policy_set.policy["delete_records"]["query"] is Policy.TRUSTED_FIXED
+    assert ("delete_records", "query") in policy_set.review
 
 # --- gate -------------------------------------------------------------------
 
