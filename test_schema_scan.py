@@ -112,7 +112,7 @@ def test_avp9_bid_name_mutations_are_only_advisory_until_declared(name):
     assert tool["needs_confirmation"] is True
 
 
-@pytest.mark.parametrize("name", ["evaluate", "eval", "evaluation", "revaluate"])
+@pytest.mark.parametrize("name", ["evaluate", "evaluation", "revaluate"])
 def test_avp9_evaluation_names_do_not_trigger_code_exec_substrings(name):
     report = scan_documents(
         [{"tools": [{"name": name, "inputSchema": {"properties": {}}}]}]
@@ -122,6 +122,19 @@ def test_avp9_evaluation_names_do_not_trigger_code_exec_substrings(name):
     assert tool["inferred_risk"] == "unknown"
     assert tool["risk_inference"]["matched_tokens"] == []
     assert tool["risk"] == "unknown"
+    assert tool["needs_confirmation"] is True
+
+
+def test_avp9_eval_complete_token_is_advisory_code_exec_evidence():
+    tool = scan_documents(
+        [{"tools": [{"name": "eval", "inputSchema": {"properties": {}}}]}]
+    )["tools"][0]
+
+    assert tool["inferred_risk"] == "code_exec"
+    assert tool["risk_inference"]["matched_tokens"] == ["eval"]
+    assert tool["risk"] == "unknown"
+    assert tool["risk_source"] == "safe_default"
+    assert tool["risk_review_required"] is True
     assert tool["needs_confirmation"] is True
 
 
@@ -217,13 +230,21 @@ def test_declared_lower_risk_conflict_keeps_confirmation_fail_safe():
         },
     }
 
-    tool = scan_documents([document], control_declarations=controls)["tools"][0]
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
 
-    assert tool["risk"] == "write"
+    assert tool["risk"] == "unknown"
+    assert tool["risk_source"] == "conflict_safe_default"
+    assert tool["risk_evidence"] is None
     assert tool["inferred_risk"] == "financial"
+    assert tool["declared_risk"]["tier"] == "write"
+    assert tool["declared_risk"]["evidence"] == "declared"
     assert tool["risk_conflict"] is True
     assert tool["risk_review_required"] is True
     assert tool["needs_confirmation"] is True
+    assert "| purchase_bid | unknown | conflict_safe_default |" in render_markdown(
+        report
+    )
 
 
 def test_redacted_report_omits_names_sources_and_name_derived_fingerprint():

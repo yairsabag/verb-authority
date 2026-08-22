@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verb-authority"
-version = "0.10.0b5"
+version = "0.10.0b6"
 description = "A Python gate that prevents untrusted agent data from authoring sensitive tool-call arguments—without classifying prompts."
 readme = "README.md"
 requires-python = ">=3.10"
