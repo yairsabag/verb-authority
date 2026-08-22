@@ -6,6 +6,16 @@
   },
   "tools": {
     "purchase_bid": {
+      "risk": {
+        "tier": "financial",
+        "evidence": "attested",
+        "effects": [
+          "signs_transaction",
+          "broadcasts_transaction",
+          "commits_funds"
+        ],
+        "note": "The tool signs and broadcasts an on-chain transaction that commits funds."
+      },
       "arguments": {
         "tokenId": {
           "authority": "free",

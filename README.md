@@ -29,14 +29,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.4"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.5"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.4 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4)
+The [beta.5 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
@@ -56,11 +56,15 @@ The gate accepts a normalized tool call shaped as `{"name": ..., "input":
 shape before dispatch.
 
 ```python
-from verb_authority import Param, Registry, Tool, build_policy, dispatch
+from verb_authority import Param, Registry, Risk, Tool, build_policy, dispatch
 
 registry = Registry()
 registry.add(
-    Tool("send_email", [Param("to", "email"), Param("body", "string")])
+    Tool(
+        "send_email",
+        [Param("to", "email"), Param("body", "string")],
+        risk=Risk.WRITE,
+    )
 )
 policy = build_policy(registry)
 
@@ -95,21 +99,24 @@ python -m verb_authority scan tools.json --output authority-report.md
 ```
 
 The scanner accepts MCP `tools/list` responses, OpenAI function tools, and
-Anthropic tool definitions. Its report contains inferred risk and per-argument
-authority, but omits descriptions, examples, defaults, runtime values, and the
-input filename. For a report intended for public sharing, also remove tool and
-parameter names:
+Anthropic tool definitions. Its report separates effective risk, an advisory
+tool-name heuristic, and author-supplied risk evidence. Tool names are mutable
+labels, so a name alone never establishes runtime behavior: without a risk
+declaration the effective tier is `unknown`, review is required, and the gate
+requires confirmation. Reports also contain per-argument authority, but omit
+descriptions, examples, defaults, runtime values, and the input filename. For a
+report intended for public sharing, also remove tool and parameter names:
 
 ```bash
 python -m verb_authority scan tools.json \
   --redact-names --format json --output authority-report.json
 ```
 
-Use `--fail-on-review` in CI to return a non-zero status when ambiguous
-arguments or MCP annotation conflicts need attention. Static inference is a
-review aid, not a vulnerability verdict; the scanner does not inspect tool
-implementations or verify the surrounding application's authorization and
-provenance wiring.
+Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
+arguments, risk conflicts, or MCP annotation conflicts need attention. Static
+inference is a review aid, not a vulnerability verdict; the scanner does not
+inspect tool implementations or verify the surrounding application's
+authorization and provenance wiring.
 
 ### Add implementation-level control evidence
 
@@ -127,6 +134,11 @@ implementation evidence:
   },
   "tools": {
     "create_export": {
+      "risk": {
+        "tier": "write",
+        "evidence": "attested",
+        "effects": ["writes_export_file"]
+      },
       "arguments": {
         "destination_path": {
           "authority": "constrained",
@@ -159,6 +171,13 @@ Pass that file separately from the exported schemas:
 python -m verb_authority scan tools.json \
   --controls controls.json --output authority-report.md
 ```
+
+Risk declarations require a `tier` (`read_only`, `write`, `financial`,
+`destructive`, or `code_exec`), an evidence label, and a non-empty list of
+concrete effects. Effects are preserved as author-written evidence and are not
+parsed into a verdict. A declaration resolves the `unknown` fail-safe; if it
+disagrees with a matched name heuristic, the report surfaces a conflict and
+keeps confirmation enabled when the heuristic is high risk.
 
 Exposed arguments may be `locked`, `constrained`, or `free`. A constrained
 argument must name at least one bound and say whether the bound is
@@ -218,7 +237,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.4
+- uses: yairsabag/verb-authority@v0.10.0-beta.5
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -246,9 +265,10 @@ The project is one importable module with five cooperating pieces:
   a one-time review queue.
 - **Declared capabilities.** `Param(..., sink=True|False)` lets a tool schema
   resolve overloaded names such as `path` without relying on the heuristic.
-- **Verb-risk tiers.** Tools are classified as read-only, write, financial,
-  destructive, or code execution. Financial, destructive, and code-execution
-  calls return `needs_confirm=True`.
+- **Declared verb-risk tiers.** Applications declare tools as read-only, write,
+  financial, destructive, or code execution. Undeclared tools remain `unknown`
+  and require review plus confirmation. A complete-token name heuristic is
+  reported only as caller-mutable evidence; it never establishes authority.
 - **Optional provenance ledger.** Values returned by tools are recorded as
   untrusted. Exact reuse, contained email/URL extraction, and canonicalized
   lexical variants are forced back to data provenance even if
@@ -265,7 +285,7 @@ trusted only when it equals the corresponding application-supplied value.
 Everything else is data.
 
 ```python
-from verb_authority import Param, ProvenanceLedger, Registry, Tool
+from verb_authority import Param, ProvenanceLedger, Registry, Risk, Tool
 from verb_authority import build_policy, dispatch
 
 registry = Registry()
@@ -273,6 +293,7 @@ registry.add(
     Tool(
         "send_email",
         [Param("to", "email"), Param("subject"), Param("body")],
+        risk=Risk.WRITE,
     )
 )
 policy = build_policy(registry)
@@ -345,9 +366,11 @@ This project deliberately publishes its failure modes:
 - **Tool calls, not model output.** Text returned to a human is not audited, so
   untrusted content can still social-engineer the user through the agent's
   reply.
-- **Heuristics need review.** Tool risk and undeclared parameter policies are
-  inferred from names and types. Review `PolicySet.review`, declare overloaded
-  sink capabilities, and keep the registry accurate.
+- **Heuristics need review.** Undeclared parameter policies are inferred from
+  names and types. Tool-name risk is only a caller-mutable review signal;
+  undeclared tools stay `unknown`. Review both `PolicySet.review` and
+  `PolicySet.risk_review`, declare tool risk and overloaded sink capabilities,
+  and keep the registry accurate.
 - **Application controls still apply.** Required arguments, authentication,
   authorization, rate limits, sandboxing, and human confirmation must still be
   enforced by the surrounding system.
@@ -382,7 +405,7 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.4 is the public beta for the
+v0.9.0 is the latest stable release. v0.10.0-beta.5 is the public beta for the
 local schema scanner, control evidence, Authority Diff, and Tool Authority
 Atlas. This remains early, research-grade work and is not described as
 production-ready. See

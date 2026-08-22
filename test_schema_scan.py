@@ -42,9 +42,15 @@ def test_scans_mcp_tools_list_result():
         "protected_parameters": 1,
         "data_fillable_parameters": 1,
         "review_required": 0,
-        "confirmation_required_tools": 0,
+        "confirmation_required_tools": 1,
+        "risk_review_required_tools": 1,
+        "risk_conflicts": 0,
         "annotation_conflicts": 0,
     }
+    assert report["tools"][0]["risk"] == "unknown"
+    assert report["tools"][0]["inferred_risk"] == "write"
+    assert report["tools"][0]["risk_source"] == "safe_default"
+    assert report["tools"][0]["risk_review_required"] is True
     assert report["tools"][0]["arguments"][0]["policy"] == "trusted_fixed"
     assert report["tools"][0]["schema_closes_unknown_arguments"] is False
     assert "private description" not in json.dumps(report).lower()
@@ -79,9 +85,145 @@ def test_scans_openai_and_anthropic_exports_together():
 
     assert report["summary"]["tools"] == 2
     assert [tool["risk"] for tool in report["tools"]] == [
+        "unknown",
+        "unknown",
+    ]
+    assert [tool["inferred_risk"] for tool in report["tools"]] == [
         "read_only",
         "destructive",
     ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["place_bid", "purchase_bid", "buy_bid", "submit_bid", "transfer_funds", "bid"],
+)
+def test_avp9_bid_name_mutations_are_only_advisory_until_declared(name):
+    report = scan_documents(
+        [{"tools": [{"name": name, "inputSchema": {"properties": {}}}]}]
+    )
+    tool = report["tools"][0]
+
+    assert tool["inferred_risk"] == "financial"
+    assert tool["risk_inference"]["source"] == "tool_name"
+    assert tool["risk_inference"]["mutability"] == "caller"
+    assert tool["risk"] == "unknown"
+    assert tool["risk_review_required"] is True
+    assert tool["needs_confirmation"] is True
+
+
+@pytest.mark.parametrize("name", ["evaluate", "eval", "evaluation", "revaluate"])
+def test_avp9_evaluation_names_do_not_trigger_code_exec_substrings(name):
+    report = scan_documents(
+        [{"tools": [{"name": name, "inputSchema": {"properties": {}}}]}]
+    )
+    tool = report["tools"][0]
+
+    assert tool["inferred_risk"] == "unknown"
+    assert tool["risk_inference"]["matched_tokens"] == []
+    assert tool["risk"] == "unknown"
+    assert tool["needs_confirmation"] is True
+
+
+def test_descriptions_and_parameter_names_do_not_author_risk():
+    document = {
+        "tools": [
+            {
+                "name": "neutral_action",
+                "description": (
+                    "Transfers funds. Spends money. Payment. Purchase. Buy. "
+                    "Sends ETH from the wallet."
+                ),
+                "inputSchema": {
+                    "properties": {
+                        "amountWei": {"type": "string"},
+                        "payment": {"type": "string"},
+                    }
+                },
+            }
+        ]
+    }
+
+    tool = scan_documents([document])["tools"][0]
+
+    assert tool["inferred_risk"] == "unknown"
+    assert tool["risk"] == "unknown"
+
+
+def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
+    document = {
+        "tools": [
+            {"name": "place_bid", "inputSchema": {"properties": {}}},
+            {"name": "evaluate", "inputSchema": {"properties": {}}},
+            {"name": "chain_index", "inputSchema": {"properties": {}}},
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "place_bid": {
+                "risk": {
+                    "tier": "financial",
+                    "evidence": "attested",
+                    "effects": ["signs_transaction", "commits_funds"],
+                }
+            },
+            "evaluate": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "attested",
+                    "effects": ["reads_metadata", "calls_model"],
+                }
+            },
+            "chain_index": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "observed",
+                    "effects": ["reads_chain_state"],
+                }
+            },
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tools = {tool["name"]: tool for tool in report["tools"]}
+
+    assert tools["place_bid"]["risk"] == "financial"
+    assert tools["place_bid"]["needs_confirmation"] is True
+    assert tools["evaluate"]["risk"] == "read_only"
+    assert tools["evaluate"]["needs_confirmation"] is False
+    assert tools["chain_index"]["risk"] == "read_only"
+    assert tools["chain_index"]["needs_confirmation"] is False
+    assert all(not tool["risk_review_required"] for tool in tools.values())
+    assert report["summary"]["risk_review_required_tools"] == 0
+
+
+def test_declared_lower_risk_conflict_keeps_confirmation_fail_safe():
+    document = {
+        "tools": [
+            {"name": "purchase_bid", "inputSchema": {"properties": {}}}
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "purchase_bid": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["writes_state"],
+                }
+            }
+        },
+    }
+
+    tool = scan_documents([document], control_declarations=controls)["tools"][0]
+
+    assert tool["risk"] == "write"
+    assert tool["inferred_risk"] == "financial"
+    assert tool["risk_conflict"] is True
+    assert tool["risk_review_required"] is True
+    assert tool["needs_confirmation"] is True
 
 
 def test_redacted_report_omits_names_sources_and_name_derived_fingerprint():
@@ -126,11 +268,13 @@ def test_public_atlas_baseline_is_reproducible():
     assert report["summary"] == {
         "tools": 10,
         "parameters": 14,
-        "protected_parameters": 9,
-        "data_fillable_parameters": 5,
-        "review_required": 5,
-        "confirmation_required_tools": 1,
-        "annotation_conflicts": 3,
+        "protected_parameters": 10,
+        "data_fillable_parameters": 4,
+        "review_required": 6,
+        "confirmation_required_tools": 10,
+        "risk_review_required_tools": 10,
+        "risk_conflicts": 0,
+        "annotation_conflicts": 8,
     }
     assert report["schema_fingerprint_sha256"] == (
         "1f0540357dd957e75ccff824560ddf0fb2de0107ee4a4bcff34ebbd1d3d2f3fb"
@@ -321,12 +465,20 @@ def test_avp9_nexus_financial_fixture_regression():
 
     assert tool["name"] == expected["tool"]
     assert tool["risk"] == expected["risk"]
+    assert tool["risk_source"] == expected["risk_source"]
+    assert tool["risk_evidence"] == expected["risk_evidence"]
+    assert tool["inferred_risk"] == expected["inferred_risk"]
+    assert tool["risk_conflict"] is expected["risk_conflict"]
+    assert tool["risk_review_required"] is expected["risk_review_required"]
+    assert tool["declared_risk"]["effects"] == expected["effects"]
     assert tool["needs_confirmation"] is expected["needs_confirmation"]
     assert (
         declared_tool["schema_closes_unknown_arguments"]
         is expected["schema_closes_unknown_arguments"]
     )
     assert declared["attribution"] == expected["attribution"]
+    assert declared_tool["risk"]["tier"] == expected["risk"]
+    assert declared_tool["risk"]["effects"] == expected["effects"]
 
     for name, expected_argument in expected["arguments"].items():
         assert arguments[name]["authority"] == expected_argument["authority"]
@@ -399,6 +551,36 @@ def test_control_fingerprint_ignores_json_object_member_order():
 @pytest.mark.parametrize(
     ("controls", "message"),
     [
+        (
+            {
+                "version": 1,
+                "tools": {
+                    "create_record": {
+                        "risk": {
+                            "tier": "write",
+                            "evidence": "declared",
+                            "effects": [],
+                        }
+                    }
+                },
+            },
+            "non-empty array",
+        ),
+        (
+            {
+                "version": 1,
+                "tools": {
+                    "create_record": {
+                        "risk": {
+                            "tier": "unknown",
+                            "evidence": "declared",
+                            "effects": ["writes_state"],
+                        }
+                    }
+                },
+            },
+            "risk tier",
+        ),
         (
             {
                 "version": 1,

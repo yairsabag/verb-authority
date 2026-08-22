@@ -19,9 +19,10 @@ python -m verb_authority scan atlas/public_mcp_schemas.json \
 ```
 
 The report is an inference map, not a vulnerability ranking or a claim about
-the upstream projects. Annotation conflicts mean that the name-based Verb
-Authority risk tier disagrees with an MCP hint; they are useful review prompts,
-not proof that either declaration is wrong.
+the upstream projects. The dataset has no implementation risk sidecar, so tool
+risks remain `unknown`, name-token matches are shown only as caller-mutable
+heuristics, and confirmation stays enabled. Annotation conflicts are useful
+review prompts, not proof that either declaration is wrong.
 
 ## Contributing a public schema
 

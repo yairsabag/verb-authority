@@ -1,6 +1,16 @@
 {
   "tool": "purchase_bid",
   "risk": "financial",
+  "risk_source": "control_declaration",
+  "risk_evidence": "attested",
+  "inferred_risk": "financial",
+  "risk_conflict": false,
+  "risk_review_required": false,
+  "effects": [
+    "signs_transaction",
+    "broadcasts_transaction",
+    "commits_funds"
+  ],
   "needs_confirmation": true,
   "schema_closes_unknown_arguments": true,
   "attribution": {

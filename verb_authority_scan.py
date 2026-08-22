@@ -29,13 +29,16 @@ from verb_authority import (
 )
 
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
 BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
 BOUND_OPERATIONAL_STATUS = frozenset({"enforced", "specified"})
 CONTROL_EXPOSURES = frozenset({"server_fixed"})
+DECLARABLE_RISKS = frozenset(
+    risk.value for risk in Risk if risk is not Risk.UNKNOWN
+)
 CONTROL_VERIFICATION_NOTICE = (
     "Control declarations are supplied by the report author. Their evidence "
     "labels and operational statuses are preserved but are not independently "
@@ -269,9 +272,65 @@ def _validate_control_declarations(
             raise SchemaError(f"control declaration for '{tool_name}' must be an object")
         _reject_unknown_fields(
             raw_tool,
-            allowed={"arguments", "unexposed_arguments"},
+            allowed={"risk", "arguments", "unexposed_arguments"},
             field=f"control declaration for '{tool_name}'",
         )
+
+        raw_risk = raw_tool.get("risk")
+        risk_declaration: dict[str, Any] | None = None
+        if raw_risk is not None:
+            if not isinstance(raw_risk, dict):
+                raise SchemaError(
+                    f"risk declaration for '{tool_name}' must be an object"
+                )
+            _reject_unknown_fields(
+                raw_risk,
+                allowed={"tier", "evidence", "effects", "note"},
+                field=f"risk declaration for '{tool_name}'",
+            )
+            tier = raw_risk.get("tier")
+            evidence = raw_risk.get("evidence")
+            if tier not in DECLARABLE_RISKS:
+                raise SchemaError(
+                    f"risk tier for '{tool_name}' must be one of: "
+                    + ", ".join(sorted(DECLARABLE_RISKS))
+                )
+            if evidence not in CONTROL_EVIDENCE:
+                raise SchemaError(
+                    f"risk evidence for '{tool_name}' must be one of: "
+                    + ", ".join(sorted(CONTROL_EVIDENCE))
+                )
+            raw_effects = raw_risk.get("effects")
+            if not isinstance(raw_effects, list) or not raw_effects:
+                raise SchemaError(
+                    f"risk effects for '{tool_name}' must be a non-empty array"
+                )
+            effects: list[str] = []
+            for effect_index, raw_effect in enumerate(raw_effects, start=1):
+                effect = _optional_text(
+                    raw_effect,
+                    field=f"{tool_name}.risk.effects[{effect_index}]",
+                )
+                if effect is None:
+                    raise SchemaError(
+                        f"risk effect {effect_index} for '{tool_name}' "
+                        "must be non-empty text"
+                    )
+                if effect in effects:
+                    raise SchemaError(
+                        f"duplicate risk effect for '{tool_name}': {effect}"
+                    )
+                effects.append(effect)
+            risk_declaration = {
+                "tier": tier,
+                "evidence": evidence,
+                "effects": effects,
+            }
+            risk_note = _optional_text(
+                raw_risk.get("note"), field=f"{tool_name}.risk.note"
+            )
+            if risk_note is not None:
+                risk_declaration["note"] = risk_note
 
         properties, _ = _properties(definitions_by_name[tool_name])
         raw_arguments = raw_tool.get("arguments", {})
@@ -449,10 +508,13 @@ def _validate_control_declarations(
                 argument["note"] = note
             unexposed_arguments[argument_name] = argument
 
-        normalized_tools[tool_name] = {
+        normalized_tool = {
             "arguments": arguments,
             "unexposed_arguments": unexposed_arguments,
         }
+        if risk_declaration is not None:
+            normalized_tool["risk"] = risk_declaration
+        normalized_tools[tool_name] = normalized_tool
 
     return {
         "version": CONTROL_DECLARATION_VERSION,
@@ -484,11 +546,11 @@ def _annotation_conflicts(risk: Risk, annotations: dict[str, Any]) -> list[str]:
     read_only = annotations.get("readOnlyHint")
     destructive = annotations.get("destructiveHint")
     if read_only is True and risk is not Risk.READ_ONLY:
-        conflicts.append("readOnlyHint=true conflicts with inferred verb risk")
+        conflicts.append("readOnlyHint=true conflicts with effective risk")
     elif read_only is False and risk is Risk.READ_ONLY:
-        conflicts.append("readOnlyHint=false conflicts with inferred verb risk")
+        conflicts.append("readOnlyHint=false conflicts with effective risk")
     if destructive is True and risk is not Risk.DESTRUCTIVE:
-        conflicts.append("destructiveHint=true conflicts with inferred verb risk")
+        conflicts.append("destructiveHint=true conflicts with effective risk")
     return conflicts
 
 
@@ -582,16 +644,17 @@ def _declared_controls_report(
                 item["note"] = declared_argument["note"]
             unexposed_arguments.append(item)
 
-        tools.append(
-            {
-                "name": report_tool["name"],
-                "schema_closes_unknown_arguments": (
-                    definition.input_schema.get("additionalProperties") is False
-                ),
-                "arguments": exposed_arguments,
-                "unexposed_arguments": unexposed_arguments,
-            }
-        )
+        tool_item = {
+            "name": report_tool["name"],
+            "schema_closes_unknown_arguments": (
+                definition.input_schema.get("additionalProperties") is False
+            ),
+            "arguments": exposed_arguments,
+            "unexposed_arguments": unexposed_arguments,
+        }
+        if "risk" in declared_tool:
+            tool_item["risk"] = declared_tool["risk"]
+        tools.append(tool_item)
 
     report = {
         "version": CONTROL_DECLARATION_VERSION,
@@ -612,6 +675,12 @@ def scan_definitions(
     if not definitions:
         raise SchemaError("no tool definitions found")
 
+    declarations = None
+    if control_declarations is not None:
+        declarations = _validate_control_declarations(
+            definitions, control_declarations
+        )
+
     registry = Registry()
     params_by_tool: dict[str, list[Param]] = {}
     required_by_tool: dict[str, set[str]] = {}
@@ -620,7 +689,15 @@ def scan_definitions(
             raise SchemaError(f"duplicate tool name: {definition.name}")
         properties, required = _properties(definition)
         params = [_param(name, raw) for name, raw in properties.items()]
-        registry.add(Tool(definition.name, params))
+        declared_tool = (
+            declarations["tools"].get(definition.name) if declarations else None
+        )
+        declared_risk = (
+            Risk(declared_tool["risk"]["tier"])
+            if declared_tool is not None and "risk" in declared_tool
+            else None
+        )
+        registry.add(Tool(definition.name, params, risk=declared_risk))
         params_by_tool[definition.name] = params
         required_by_tool[definition.name] = required
 
@@ -634,6 +711,8 @@ def scan_definitions(
         "data_fillable_parameters": 0,
         "review_required": 0,
         "confirmation_required_tools": len(policy_set.confirm),
+        "risk_review_required_tools": len(policy_set.risk_review),
+        "risk_conflicts": len(policy_set.risk_conflicts),
         "annotation_conflicts": 0,
     }
 
@@ -641,6 +720,13 @@ def scan_definitions(
         tool_name = definition.name
         display_tool = f"tool_{tool_index:03d}" if redact_names else tool_name
         risk = policy_set.risk[tool_name]
+        inferred_risk = policy_set.risk_inference[tool_name]
+        declared_tool = (
+            declarations["tools"].get(tool_name) if declarations else None
+        )
+        declared_risk = (
+            declared_tool.get("risk") if declared_tool is not None else None
+        )
         conflicts = _annotation_conflicts(risk, definition.annotations)
         counts["annotation_conflicts"] += len(conflicts)
         arguments = []
@@ -667,9 +753,30 @@ def scan_definitions(
                     "reason": _reason(param, initial_policy, confidence, risk),
                 }
             )
+        risk_inference: dict[str, Any] = {
+            "source": inferred_risk.source,
+            "confidence": inferred_risk.confidence.value,
+            "mutability": inferred_risk.mutability,
+        }
+        if redact_names:
+            risk_inference["signal_redacted"] = True
+        else:
+            risk_inference["matched_tokens"] = list(inferred_risk.matched_tokens)
+
         tool_report: dict[str, Any] = {
             "name": display_tool,
             "risk": risk.value,
+            "risk_source": (
+                "control_declaration" if declared_risk is not None else "safe_default"
+            ),
+            "risk_evidence": (
+                declared_risk["evidence"] if declared_risk is not None else None
+            ),
+            "inferred_risk": inferred_risk.risk.value,
+            "risk_inference": risk_inference,
+            "declared_risk": declared_risk,
+            "risk_conflict": tool_name in policy_set.risk_conflicts,
+            "risk_review_required": tool_name in policy_set.risk_review,
             "needs_confirmation": tool_name in policy_set.confirm,
             "schema_closes_unknown_arguments": (
                 definition.input_schema.get("additionalProperties") is False
@@ -700,10 +807,7 @@ def scan_definitions(
         "summary": counts,
         "tools": report_tools,
     }
-    if control_declarations is not None:
-        declarations = _validate_control_declarations(
-            definitions, control_declarations
-        )
+    if declarations is not None:
         declared_controls = _declared_controls_report(
             definitions,
             report_tools,
@@ -775,6 +879,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Data-fillable | {summary['data_fillable_parameters']} |",
         f"| Parameters requiring review | {summary['review_required']} |",
         f"| Tools requiring confirmation | {summary['confirmation_required_tools']} |",
+        f"| Tool risks requiring review | {summary['risk_review_required_tools']} |",
+        f"| Tool risk conflicts | {summary['risk_conflicts']} |",
         f"| Annotation conflicts | {summary['annotation_conflicts']} |",
         "",
         f"Schema fingerprint: `{report['schema_fingerprint_sha256']}`",
@@ -793,6 +899,46 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"| {_markdown_cell(source_id)} | {_markdown_cell(source_url)} |"
             )
+    lines.extend(
+        [
+            "",
+            "## Tool risk evidence",
+            "",
+            "| Tool | Effective risk | Source | Name heuristic | Mutability | "
+            "Declared effects | Conflict | Review | Confirmation |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for tool in report["tools"]:
+        risk_inference = tool["risk_inference"]
+        if risk_inference.get("signal_redacted"):
+            name_signal = "redacted"
+        else:
+            matched = risk_inference.get("matched_tokens", [])
+            name_signal = (
+                f"{tool['inferred_risk']} via {', '.join(matched)}"
+                if matched
+                else f"{tool['inferred_risk']} (no complete-token match)"
+            )
+        declared_risk = tool.get("declared_risk")
+        declared_effects = (
+            ", ".join(declared_risk["effects"]) if declared_risk else "—"
+        )
+        lines.append(
+            "| {tool} | {risk} | {source} | {signal} ({confidence}) | "
+            "{mutability} | {effects} | {conflict} | {review} | {confirmation} |".format(
+                tool=_markdown_cell(tool["name"]),
+                risk=_markdown_cell(tool["risk"]),
+                source=_markdown_cell(tool["risk_source"]),
+                signal=_markdown_cell(name_signal),
+                confidence=_markdown_cell(risk_inference["confidence"]),
+                mutability=_markdown_cell(risk_inference["mutability"]),
+                effects=_markdown_cell(declared_effects),
+                conflict="yes" if tool["risk_conflict"] else "no",
+                review="yes" if tool["risk_review_required"] else "no",
+                confirmation="yes" if tool["needs_confirmation"] else "no",
+            )
+        )
     declared_controls = report.get("declared_controls")
     if declared_controls is not None:
         lines.extend(
@@ -885,7 +1031,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Interpretation boundary",
             "",
-            "This report describes Verb Authority's name/type-based inference. It is not a",
+            "This report describes Verb Authority's declared controls and review heuristics.",
+            "A tool name is caller-mutable metadata and is never treated as proof of behavior.",
+            "Without an explicit risk declaration, the effective tier remains `unknown` and",
+            "requires review and runtime confirmation. This report is not a",
             "vulnerability verdict, does not inspect tool implementations, and does not prove",
             "that the surrounding application supplies correct provenance or authorization.",
             "Review every flagged argument against the real tool semantics before deployment.",
@@ -923,7 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fail-on-review",
         action="store_true",
-        help="exit with status 2 when arguments or annotation conflicts require review",
+        help="exit with status 2 when arguments, risks, or annotations require review",
     )
     args = parser.parse_args(argv)
 
@@ -950,7 +1099,10 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = report["summary"]
     if args.fail_on_review and (
-        summary["review_required"] or summary["annotation_conflicts"]
+        summary["review_required"]
+        or summary["risk_review_required_tools"]
+        or summary["risk_conflicts"]
+        or summary["annotation_conflicts"]
     ):
         return 2
     return 0

@@ -10,14 +10,18 @@ DylanWang's fix, implemented here: let the tool MANIFEST declare capability.
 `Param(..., sink=True/False)` overrides the guess. Same name, opposite policy
 in two different tools -- decided by declaration, not by a name-based heuristic.
 """
-from verb_authority import Param, Tool, Registry, build_policy, gate
+from verb_authority import Param, Risk, Tool, Registry, build_policy, gate
 
 # Two tools, both with a param literally named "path".
 reg = Registry()
 # read_file: the path is just a location to read -- NOT a sink. Declared safe.
-reg.add(Tool("read_file",   [Param("path", "string", sink=False)]))
+reg.add(Tool(
+    "read_file", [Param("path", "string", sink=False)], risk=Risk.READ_ONLY
+))
 # delete_file: the path decides what gets destroyed -- a sink. Declared locked.
-reg.add(Tool("delete_file", [Param("path", "string", sink=True)]))
+reg.add(Tool(
+    "delete_file", [Param("path", "string", sink=True)], risk=Risk.DESTRUCTIVE
+))
 ps = build_policy(reg)
 
 print("=== same param name 'path', opposite declared capability ===\n")

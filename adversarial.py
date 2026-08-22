@@ -5,13 +5,17 @@ Four attack families, run honestly. Each prints PASS (blocked, as designed) or
 FAIL (slipped through; an honest finding). The point is not to show off the
 strengths -- it is to expose the failure modes before someone else does.
 """
-from verb_authority import Param, Tool, Registry, build_policy, dispatch, ProvenanceLedger
+from verb_authority import (
+    Param, ProvenanceLedger, Registry, Risk, Tool, build_policy, dispatch,
+)
 
 # --- setup ---
 reg = Registry()
-reg.add(Tool("send_email", [Param("to","email"), Param("body","string")]))
-reg.add(Tool("search_web", [Param("query","string")]))
-reg.add(Tool("read_doc",   [Param("doc_id","string")]))
+reg.add(Tool(
+    "send_email", [Param("to","email"), Param("body","string")], risk=Risk.WRITE
+))
+reg.add(Tool("search_web", [Param("query","string")], risk=Risk.READ_ONLY))
+reg.add(Tool("read_doc", [Param("doc_id","string")], risk=Risk.READ_ONLY))
 ps = build_policy(reg)
 trusted = {"to": "alice@company.com"}
 
@@ -52,7 +56,9 @@ check("dev declares data-as-trusted",
 # param like 'path' used to be guessed from its name; a tool can now DECLARE
 # its capability, so the same name is a sink in one tool and safe in another.
 from verb_authority import Param as _P, Tool as _T, Registry as _R, build_policy as _bp, gate as _g
-_reg2 = _R(); _reg2.add(_T("delete_file", [_P("path", "string", sink=True)]))
+_reg2 = _R(); _reg2.add(_T(
+    "delete_file", [_P("path", "string", sink=True)], risk=Risk.DESTRUCTIVE
+))
 _ps2 = _bp(_reg2)
 _d = _g(_reg2, _ps2, "delete_file", {"path": "/etc/passwd"}, {"path": "data"})
 print(f"  overloaded 'path' declared sink   "

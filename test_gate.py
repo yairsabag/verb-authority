@@ -2,7 +2,8 @@
 import pytest
 from verb_authority import (
     Policy, Confidence, Risk, Param, Tool, Registry,
-    infer_policy, verb_risk, build_policy, gate, dispatch, ProvenanceLedger,
+    infer_policy, infer_risk, verb_risk, build_policy, gate, dispatch,
+    ProvenanceLedger,
 )
 
 # --- inference --------------------------------------------------------------
@@ -64,15 +65,70 @@ def test_financial_verb_caught():
 def test_read_only_verb_caught():
     assert verb_risk("search_web") is Risk.READ_ONLY
 
-def test_unknown_verb_defaults_to_write():
-    assert verb_risk("foo_bar") is Risk.WRITE
+def test_unknown_verb_stays_unknown():
+    assert verb_risk("foo_bar") is Risk.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["place_bid", "purchase_bid", "buy_bid", "submit_bid", "transfer_funds", "bid"],
+)
+def test_bid_name_mutations_are_financial_heuristics(name):
+    assessment = infer_risk(name)
+    assert assessment.risk is Risk.FINANCIAL
+    assert assessment.mutability == "caller"
+    assert assessment.review_required
+
+
+@pytest.mark.parametrize("name", ["evaluate", "eval", "evaluation", "revaluate"])
+def test_evaluation_names_do_not_substring_match_code_execution(name):
+    assert infer_risk(name).risk is Risk.UNKNOWN
+
+
+def test_tool_name_is_advisory_until_risk_is_declared():
+    registry = Registry()
+    registry.add(Tool("purchase_bid", []))
+    policy_set = build_policy(registry)
+
+    assert policy_set.risk["purchase_bid"] is Risk.UNKNOWN
+    assert policy_set.risk_inference["purchase_bid"].risk is Risk.FINANCIAL
+    assert "purchase_bid" in policy_set.risk_review
+    assert "purchase_bid" in policy_set.confirm
+
+
+def test_explicit_risk_declaration_controls_runtime_policy():
+    registry = Registry()
+    registry.add(Tool("place_bid", [], risk=Risk.FINANCIAL))
+    policy_set = build_policy(registry)
+
+    assert policy_set.risk["place_bid"] is Risk.FINANCIAL
+    assert "place_bid" not in policy_set.risk_review
+    assert "place_bid" in policy_set.confirm
+
+
+def test_lower_risk_declaration_keeps_confirmation_on_name_conflict():
+    registry = Registry()
+    registry.add(Tool("delete_records", [], risk=Risk.READ_ONLY))
+    policy_set = build_policy(registry)
+
+    assert policy_set.risk["delete_records"] is Risk.READ_ONLY
+    assert "delete_records" in policy_set.risk_conflicts
+    assert "delete_records" in policy_set.confirm
 
 # --- gate -------------------------------------------------------------------
 
 def _setup():
     reg = Registry()
-    reg.add(Tool("send_email", [Param("to","email"), Param("subject","string"), Param("body","string")]))
-    reg.add(Tool("delete_record", [Param("table","string"), Param("record_id","string")]))
+    reg.add(Tool(
+        "send_email",
+        [Param("to","email"), Param("subject","string"), Param("body","string")],
+        risk=Risk.WRITE,
+    ))
+    reg.add(Tool(
+        "delete_record",
+        [Param("table","string"), Param("record_id","string")],
+        risk=Risk.DESTRUCTIVE,
+    ))
     ps = build_policy(reg)
     ps.policy["send_email"]["subject"] = Policy.TYPED_BOUNDED   # dev resolved post-review
     return reg, ps

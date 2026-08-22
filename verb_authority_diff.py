@@ -123,6 +123,13 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             }
         indexed[name] = {
             "risk": raw_tool.get("risk"),
+            "risk_source": raw_tool.get("risk_source"),
+            "risk_evidence": raw_tool.get("risk_evidence"),
+            "inferred_risk": raw_tool.get("inferred_risk"),
+            "risk_inference": raw_tool.get("risk_inference"),
+            "declared_risk": raw_tool.get("declared_risk"),
+            "risk_conflict": raw_tool.get("risk_conflict"),
+            "risk_review_required": raw_tool.get("risk_review_required"),
             "needs_confirmation": raw_tool.get("needs_confirmation"),
             "annotation_conflicts": raw_tool.get("annotation_conflicts", []),
             "schema_closes_unknown_arguments": raw_tool.get(
@@ -490,6 +497,56 @@ def diff_reports(
                 reduction_message="Tool risk decreased.",
                 review_message="Tool risk class changed and needs review.",
             )
+
+        for field, kind, message in (
+            (
+                "risk_source",
+                "risk_source_changed",
+                "The source of the effective risk tier changed.",
+            ),
+            (
+                "risk_evidence",
+                "risk_evidence_changed",
+                "The evidence status for the effective risk tier changed.",
+            ),
+            (
+                "inferred_risk",
+                "inferred_risk_changed",
+                "The advisory tool-name risk heuristic changed.",
+            ),
+            (
+                "risk_inference",
+                "risk_inference_changed",
+                "The signal or evidence behind the risk heuristic changed.",
+            ),
+            (
+                "declared_risk",
+                "declared_risk_changed",
+                "The author-supplied risk tier or effects changed.",
+            ),
+            (
+                "risk_conflict",
+                "risk_conflict_changed",
+                "The conflict between declared and heuristic risk changed.",
+            ),
+            (
+                "risk_review_required",
+                "risk_review_required_changed",
+                "The tool-risk review requirement changed.",
+            ),
+        ):
+            if before_tool[field] != after_tool[field]:
+                changes.append(
+                    _change(
+                        "review",
+                        kind,
+                        tool,
+                        field=field,
+                        before=before_tool[field],
+                        after=after_tool[field],
+                        message=message,
+                    )
+                )
 
         before_confirmation = before_tool["needs_confirmation"]
         after_confirmation = after_tool["needs_confirmation"]

@@ -21,13 +21,15 @@ Run: python3 adaptive.py
 """
 import base64
 from verb_authority import (
-    Param, Tool, Registry, build_policy, dispatch, ProvenanceLedger,
+    Param, Risk, Tool, Registry, build_policy, dispatch, ProvenanceLedger,
 )
 
 # --- target setup ---------------------------------------------------------
 reg = Registry()
-reg.add(Tool("read_doc",   [Param("doc_id", "string")]))
-reg.add(Tool("send_email", [Param("to", "email"), Param("body", "string")]))
+reg.add(Tool("read_doc", [Param("doc_id", "string")], risk=Risk.READ_ONLY))
+reg.add(Tool(
+    "send_email", [Param("to", "email"), Param("body", "string")], risk=Risk.WRITE
+))
 ps = build_policy(reg)
 
 ATTACKER = "attacker@evil.com"

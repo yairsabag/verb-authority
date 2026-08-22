@@ -23,5 +23,11 @@ absent from the caller-visible schema and its evidence must remain `declared`.
 The first two `bidWei` bounds must remain `enforced`; the last two must remain
 `specified`, including the only immutable bound.
 
+The sidecar also attests that the tool signs and broadcasts an on-chain
+transaction which commits funds. That risk declaration, rather than the local
+`purchase_bid` label, establishes the effective `financial` tier. The expected
+report separately pins the name heuristic, declaration evidence, conflict
+status, and confirmation requirement.
+
 The sidecar records supplied evidence. It does not claim that Verb Authority
 independently observed or verified the deployed controls.

@@ -34,15 +34,38 @@ class Confidence(str, Enum):
 
 # The risk tiers below are inspired by the tiered-risk access model proposed in
 # Tallam & Miller, "Operationalizing CaMeL" (arXiv:2505.22852, 2025).
-# This implementation is more granular (5 tiers vs. their 3) and infers the tier
-# from the tool name; the underlying idea -- adjusting enforcement strictness to
-# the action's risk class -- is theirs.
+# This implementation is more granular (five declared tiers plus an unknown
+# fail-safe vs. their three). A tool-name heuristic is reported for review, but
+# only an explicit application declaration establishes the effective tier.
 class Risk(str, Enum):
+    UNKNOWN = "unknown"
     READ_ONLY = "read_only"
     WRITE = "write"
     FINANCIAL = "financial"
     DESTRUCTIVE = "destructive"
     CODE_EXEC = "code_exec"
+
+
+class RiskConfidence(str, Enum):
+    HEURISTIC = "heuristic"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class RiskAssessment:
+    """The lexical evidence behind a tool-name risk guess.
+
+    A tool name is author-controlled metadata, never proof of runtime behavior.
+    `HEURISTIC` therefore means only that a complete name token matched a rule;
+    it deliberately does not mean independently verified or high confidence.
+    """
+
+    risk: Risk
+    source: str
+    confidence: RiskConfidence
+    mutability: str
+    matched_tokens: tuple[str, ...]
+    review_required: bool
 
 
 # === tool schema ==========================================================
@@ -67,6 +90,7 @@ class Tool:
     name: str
     params: list[Param]
     fn: Callable[..., Any] | None = None
+    risk: Risk | str | None = None  # explicit application declaration; overrides name inference
 
 
 @dataclass
@@ -77,22 +101,65 @@ class Registry:
         self.tools[t.name] = t
 
 
-# === verb risk (inferred from the tool name) ==============================
-_RISK_RULES = [
-    (Risk.CODE_EXEC,   re.compile(r"(exec|eval|run_|shell|sql|interpret|spawn)", re.I)),
-    (Risk.DESTRUCTIVE, re.compile(r"(delete|remove|drop|wipe|revoke|destroy|purge|truncate)", re.I)),
-    (Risk.FINANCIAL,   re.compile(r"(pay|transfer|charge|refund|purchase|withdraw|invoice|billing)", re.I)),
-    (Risk.WRITE,       re.compile(r"(create|update|send|post|write|add|set|book|insert|modify|upload)", re.I)),
-    (Risk.READ_ONLY,   re.compile(r"(get|search|list|read|fetch|lookup|find|view|describe)", re.I)),
+# === verb risk (a reviewable heuristic over complete name tokens) =========
+# Tool names are mutable labels supplied by a tool author. They can seed a
+# review, but cannot establish what the implementation really does. Matching
+# complete snake/kebab/camel-case tokens avoids false positives such as
+# "revaluate" -> "eval". Even a match remains advisory: build_policy keeps an
+# undeclared tool at UNKNOWN until the application supplies a risk declaration.
+_RISK_TOKENS: list[tuple[Risk, frozenset[str]]] = [
+    (Risk.CODE_EXEC, frozenset({"exec", "execute", "shell", "sql", "spawn"})),
+    (Risk.DESTRUCTIVE, frozenset({
+        "delete", "remove", "drop", "wipe", "revoke", "destroy", "purge", "truncate",
+    })),
+    (Risk.FINANCIAL, frozenset({
+        "pay", "payment", "payments", "transfer", "charge", "refund", "purchase",
+        "withdraw", "invoice", "billing", "bid", "buy",
+    })),
+    (Risk.WRITE, frozenset({
+        "create", "update", "send", "post", "write", "add", "set", "book", "insert",
+        "modify", "upload", "submit", "place",
+    })),
+    (Risk.READ_ONLY, frozenset({
+        "get", "search", "list", "read", "fetch", "lookup", "find", "view", "describe",
+        "scan",
+    })),
 ]
-NEEDS_CONFIRM = {Risk.FINANCIAL, Risk.DESTRUCTIVE, Risk.CODE_EXEC}
+NEEDS_CONFIRM = {Risk.UNKNOWN, Risk.FINANCIAL, Risk.DESTRUCTIVE, Risk.CODE_EXEC}
+
+
+def _tool_name_tokens(tool_name: str) -> tuple[str, ...]:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tool_name)
+    return tuple(token.lower() for token in re.findall(r"[A-Za-z0-9]+", separated))
+
+
+def infer_risk(tool_name: str) -> RiskAssessment:
+    tokens = _tool_name_tokens(tool_name)
+    for risk, candidates in _RISK_TOKENS:
+        matched = tuple(token for token in tokens if token in candidates)
+        if matched:
+            return RiskAssessment(
+                risk=risk,
+                source="tool_name",
+                confidence=RiskConfidence.HEURISTIC,
+                mutability="caller",
+                matched_tokens=matched,
+                review_required=True,
+            )
+    return RiskAssessment(
+        risk=Risk.UNKNOWN,
+        source="tool_name",
+        confidence=RiskConfidence.UNCERTAIN,
+        mutability="caller",
+        matched_tokens=(),
+        review_required=True,
+    )
 
 
 def verb_risk(tool_name: str) -> Risk:
-    for risk, rx in _RISK_RULES:
-        if rx.search(tool_name):
-            return risk
-    return Risk.WRITE  # conservative default for unknown verbs
+    """Return the lexical risk guess; use `infer_risk` for its evidence."""
+
+    return infer_risk(tool_name).risk
 
 
 # === per-parameter inference (safe-by-default, with confidence) ===========
@@ -132,14 +199,35 @@ class PolicySet:
     risk: dict
     review: list      # (tool, param) -- uncertain, unlock if a legit input
     confirm: list     # tools requiring a runtime human confirmation
+    risk_inference: dict
+    risk_review: list
+    risk_conflicts: list
 
 
 def build_policy(reg: Registry) -> PolicySet:
     policy, risk, review, confirm = {}, {}, [], []
+    risk_inference, risk_review, risk_conflicts = {}, [], []
     for name, tool in reg.tools.items():
-        r = verb_risk(name)
+        inferred = infer_risk(name)
+        declared = tool.risk
+        if isinstance(declared, str):
+            declared = Risk(declared)
+        # A caller-mutable name cannot establish runtime behavior. Keep the
+        # effective tier unknown until the application makes a declaration;
+        # the lexical inference remains available as review evidence.
+        r = declared if declared is not None else Risk.UNKNOWN
+        conflict = declared is not None and inferred.risk is not Risk.UNKNOWN and declared is not inferred.risk
+
+        risk_inference[name] = inferred
         risk[name] = r
-        if r in NEEDS_CONFIRM:
+        if declared is None or conflict:
+            risk_review.append(name)
+        if conflict:
+            risk_conflicts.append(name)
+        # An explicit declaration controls the effective tier. If it lowers a
+        # matched high-risk heuristic, keep the confirmation fail-safe until a
+        # human resolves the visible conflict.
+        if r in NEEDS_CONFIRM or (conflict and inferred.risk in NEEDS_CONFIRM):
             confirm.append(name)
         policy[name] = {}
         for p in tool.params:
@@ -150,7 +238,15 @@ def build_policy(reg: Registry) -> PolicySet:
                 else:
                     review.append((name, p.name))    # keep locked + surface for review
             policy[name][p.name] = pol
-    return PolicySet(policy, risk, review, confirm)
+    return PolicySet(
+        policy,
+        risk,
+        review,
+        confirm,
+        risk_inference,
+        risk_review,
+        risk_conflicts,
+    )
 
 
 # === the gate (call before every tool execution) =========================
@@ -212,7 +308,7 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
         if pol[name] is Policy.TYPED_BOUNDED and not _type_ok(by_name[name], val):
             return Decision(False, f"param '{name}' failed its type/bounds check")
     if tool in ps.confirm:
-        return Decision(True, f"high-risk verb ({ps.risk[tool].value}); needs human confirmation",
+        return Decision(True, f"risk policy ({ps.risk[tool].value}); needs human confirmation",
                         needs_confirm=True)
     return Decision(True, "within authority")
 
@@ -389,9 +485,15 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
 # === demo =================================================================
 def demo() -> None:
     reg = Registry()
-    reg.add(Tool("send_email",    [Param("to", "email"), Param("subject", "string"), Param("body", "string")]))
-    reg.add(Tool("search_web",    [Param("query", "string"), Param("num_results", "integer")]))
-    reg.add(Tool("delete_record", [Param("table", "string"), Param("record_id", "string")]))
+    reg.add(Tool("send_email", [
+        Param("to", "email"), Param("subject", "string"), Param("body", "string")
+    ], risk=Risk.WRITE))
+    reg.add(Tool("search_web", [
+        Param("query", "string"), Param("num_results", "integer")
+    ], risk=Risk.READ_ONLY))
+    reg.add(Tool("delete_record", [
+        Param("table", "string"), Param("record_id", "string")
+    ], risk=Risk.DESTRUCTIVE))
     ps = build_policy(reg)
 
     print("risk tiers:    ", {t: r.value for t, r in ps.risk.items()})
