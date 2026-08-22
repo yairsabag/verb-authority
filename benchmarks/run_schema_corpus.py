@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from verb_authority import Param, Registry, Tool, build_policy, dispatch
+from verb_authority import Param, Registry, Risk, Tool, build_policy, dispatch
 
 
 CORPUS_PATH = Path(__file__).with_name("schema_corpus.json")
@@ -93,7 +93,15 @@ def run_corpus(path: Path = CORPUS_PATH) -> CorpusResult:
         case_id = case["id"]
         categories.add(case["category"])
         raw_tool = case["tool"]
-        tool = Tool(raw_tool["name"], [_param(raw) for raw in raw_tool["params"]])
+        # The corpus's expected risk is reviewed fixture metadata, not a guess
+        # derived from the display name. Name-heuristic behavior has its own
+        # mutation tests; the mixed-trust corpus exercises declared runtime
+        # semantics and parameter enforcement.
+        tool = Tool(
+            raw_tool["name"],
+            [_param(raw) for raw in raw_tool["params"]],
+            risk=Risk(case["expected"]["risk"]),
+        )
         registry = Registry()
         registry.add(tool)
         policy_set = build_policy(registry)

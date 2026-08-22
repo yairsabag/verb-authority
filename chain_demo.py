@@ -17,12 +17,14 @@ returned text, and selected lexical disguises after canonicalization. It does
 not follow semantic reconstruction or arbitrary transforms.
 """
 from verb_authority import (
-    Param, Tool, Registry, build_policy, dispatch, ProvenanceLedger,
+    Param, Risk, Tool, Registry, build_policy, dispatch, ProvenanceLedger,
 )
 
 reg = Registry()
-reg.add(Tool("read_doc",   [Param("doc_id", "string")]))
-reg.add(Tool("send_email", [Param("to", "email"), Param("body", "string")]))
+reg.add(Tool("read_doc", [Param("doc_id", "string")], risk=Risk.READ_ONLY))
+reg.add(Tool(
+    "send_email", [Param("to", "email"), Param("body", "string")], risk=Risk.WRITE
+))
 ps = build_policy(reg)
 
 # The attacker-controlled address, embedded in a document the agent reads.

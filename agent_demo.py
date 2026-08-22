@@ -16,7 +16,7 @@ Then:
     python3 agent_demo.py
 """
 import os, json, urllib.request
-from verb_authority import Policy, Param, Tool, Registry, build_policy, gate
+from verb_authority import Policy, Param, Risk, Tool, Registry, build_policy, gate
 
 TRUSTED_RECIPIENT = "alice@company.com"
 
@@ -75,7 +75,8 @@ def check_with_gate(reg, ps, tool, args, trusted_args):
 # --- build the policy for the agent's tools ---
 reg = Registry()
 reg.add(Tool("send_email",
-             [Param("to", "email"), Param("subject", "string"), Param("body", "string")]))
+             [Param("to", "email"), Param("subject", "string"), Param("body", "string")],
+             risk=Risk.WRITE))
 ps = build_policy(reg)
 
 # As a real dev would after the description-resolver pass (post #3):

@@ -39,6 +39,34 @@ def test_identical_reports_have_no_authority_changes():
     assert "No authority-relevant changes detected" in render_text(diff)
 
 
+def test_declared_risk_effect_change_requires_review():
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    after["tools"][0]["declared_risk"]["effects"].append("pays_gas")
+
+    diff = diff_reports(before, after)
+
+    change = next(
+        item for item in diff["changes"] if item["kind"] == "declared_risk_changed"
+    )
+    assert change["classification"] == "review"
+    assert change["field"] == "declared_risk"
+
+
+def test_new_risk_conflict_requires_review():
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    after["tools"][0]["risk_conflict"] = True
+    after["tools"][0]["risk_review_required"] = True
+
+    diff = diff_reports(before, after)
+
+    kinds = {item["kind"] for item in diff["changes"]}
+    assert "risk_conflict_changed" in kinds
+    assert "risk_review_required_changed" in kinds
+    assert diff["summary"]["reviews"] == 2
+
+
 def test_avp9_constrained_amount_becoming_free_is_an_authority_increase():
     before = _avp9_report()
     after = copy.deepcopy(before)

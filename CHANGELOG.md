@@ -5,6 +5,29 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.5] - 2026-08-22
+
+### Risk evidence and safe gating
+
+- Stop treating an author-controlled tool name as proof of runtime behavior.
+  Undeclared tools now keep an effective `unknown` risk, require review, and
+  retain runtime confirmation until the application declares a tier.
+- Replace substring rules with complete snake-, kebab-, and camel-case token
+  hints, so `revaluate` no longer becomes code execution while bid mutations
+  such as `place_bid`, `buy_bid`, and `submit_bid` remain visible financial
+  heuristics rather than silent verdicts.
+- Add explicit runtime risk declarations and version-1 sidecar risk evidence
+  with a tier, evidence label, and concrete effect list. Reports now separate
+  effective, inferred, and declared risk; show caller mutability, confidence,
+  conflicts, review status, and confirmation behavior.
+- Keep confirmation enabled when a declaration lowers a matched high-risk
+  heuristic, include risk review/conflicts in `--fail-on-review`, and compare
+  risk sources, evidence, effects, inference, and conflicts in Authority Diff.
+- Extend the attributed `avp9-nexus` positive control with attested financial
+  effects and add mutation regressions for every reported bid/evaluation name,
+  description and parameter non-signals, read-only declarations, and conflict
+  fail-safes.
+
 ## [0.10.0-beta.4] - 2026-08-22
 
 ### Operational control evidence
@@ -111,7 +134,8 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.4...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.5...HEAD
+[0.10.0-beta.5]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5
 [0.10.0-beta.4]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4
 [0.10.0-beta.3]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.3
 [0.10.0-beta.2]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.2
