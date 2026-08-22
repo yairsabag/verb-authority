@@ -2,7 +2,7 @@
   "version": 1,
   "attribution": {
     "name": "avp9-nexus",
-    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5360058740"
+    "source": "https://github.com/yairsabag/verb-authority/issues/7#issuecomment-5378944333"
   },
   "tools": {
     "purchase_bid": {
@@ -19,21 +19,25 @@
             {
               "source": "server per-call ceiling",
               "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
               "enforcement": "pre-signature deny"
             },
             {
               "source": "platform per-cycle budget",
               "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
               "enforcement": "platform budget check"
             },
             {
               "source": "contract per-auction cap",
               "bounds_mutability": "trusted_party",
+              "operational_status": "specified",
               "enforcement": "contract state validation"
             },
             {
               "source": "contract absolute maximum",
               "bounds_mutability": "immutable",
+              "operational_status": "specified",
               "enforcement": "immutable contract constant"
             }
           ]

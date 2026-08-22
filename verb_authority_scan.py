@@ -34,10 +34,12 @@ CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
 BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
+BOUND_OPERATIONAL_STATUS = frozenset({"enforced", "specified"})
 CONTROL_EXPOSURES = frozenset({"server_fixed"})
 CONTROL_VERIFICATION_NOTICE = (
     "Control declarations are supplied by the report author. Their evidence "
-    "labels are preserved but are not independently verified by this scanner."
+    "labels and operational statuses are preserved but are not independently "
+    "verified by this scanner."
 )
 
 
@@ -329,7 +331,12 @@ def _validate_control_declarations(
                     )
                 _reject_unknown_fields(
                     raw_bound,
-                    allowed={"source", "bounds_mutability", "enforcement"},
+                    allowed={
+                        "source",
+                        "bounds_mutability",
+                        "enforcement",
+                        "operational_status",
+                    },
                     field=(
                         f"bound {bound_index} for "
                         f"'{tool_name}.{argument_name}'"
@@ -350,7 +357,21 @@ def _validate_control_declarations(
                         f"bounds_mutability for '{tool_name}.{argument_name}' must be "
                         "one of: " + ", ".join(sorted(BOUND_MUTABILITY))
                     )
-                bound = {"source": source, "bounds_mutability": mutability}
+                operational_status = raw_bound.get("operational_status")
+                if (
+                    operational_status is not None
+                    and operational_status not in BOUND_OPERATIONAL_STATUS
+                ):
+                    raise SchemaError(
+                        f"operational_status for "
+                        f"'{tool_name}.{argument_name}' must be one of: "
+                        + ", ".join(sorted(BOUND_OPERATIONAL_STATUS))
+                    )
+                bound = {
+                    "source": source,
+                    "bounds_mutability": mutability,
+                    "operational_status": operational_status or "not_stated",
+                }
                 enforcement = _optional_text(
                     raw_bound.get("enforcement"),
                     field=(
@@ -722,7 +743,10 @@ def _control_details(argument: dict[str, Any]) -> str:
     else:
         bounds = []
         for bound in argument.get("bounds", []):
-            detail = f"{bound['source']} [{bound['bounds_mutability']}]"
+            detail = (
+                f"{bound['source']} [{bound['bounds_mutability']}; "
+                f"{bound.get('operational_status', 'not_stated')}]"
+            )
             if bound.get("enforcement"):
                 detail += f"; {bound['enforcement']}"
             bounds.append(detail)
