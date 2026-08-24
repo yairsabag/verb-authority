@@ -938,7 +938,11 @@ def test_markdown_neutralizes_active_link_and_image_syntax():
 
     assert hostile not in markdown
     assert "![audit](" not in markdown
-    assert "\\!\\[audit\\](https://example.invalid/pixel)\\`label\\`" in markdown
+    assert "https://example.invalid/pixel" not in markdown
+    assert (
+        "\\!\\[audit\\](https&#58;//example.invalid/pixel)\\`label\\`"
+        in markdown
+    )
 
 
 def test_reports_declared_controls_without_overriding_inferred_policy():
@@ -1418,6 +1422,7 @@ def test_cli_writes_report_and_can_fail_on_review(tmp_path):
             "properties": {"mode": {"type": "string"}},
             "dependentRequired": {"mode": ["recipient"]},
         },
+        {"properties": {}, "required": ["recipient"]},
         {"properties": {}, "$dynamicRef": "#input"},
         {"properties": {}, "$recursiveRef": "#"},
         {
@@ -1471,6 +1476,7 @@ def test_cli_writes_report_and_can_fail_on_review(tmp_path):
         "dependent-schemas",
         "legacy-dependencies",
         "dependent-required",
+        "required-property-not-modeled",
         "dynamic-ref",
         "recursive-ref",
         "pattern-properties",
@@ -1524,6 +1530,166 @@ def test_simple_schema_and_enum_instance_values_do_not_require_schema_review():
 
     assert report["tools"][0]["schema_review_required"] is False
     assert report["summary"]["schema_review_required_tools"] == 0
+
+
+def test_multi_type_union_fails_closed_and_requires_schema_review(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "pay_invoice",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {
+                            "type": ["integer", "string"],
+                            "maximum": 100,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "pay_invoice": {
+                "risk": {
+                    "tier": "financial",
+                    "evidence": "attested",
+                    "effects": ["commits_funds"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    amount = tool["arguments"][0]
+    assert tool["schema_review_required"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert amount["type"] == "json"
+    assert amount["policy"] == "trusted_fixed"
+    assert amount["review_required"] is True
+
+    schema_path = tmp_path / "schema.json"
+    controls_path = tmp_path / "controls.json"
+    output_path = tmp_path / "report.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    assert (
+        main(
+            [
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    ("collision", "collision_schema"),
+    (
+        ("type", {"type": "string", "enum": ["notice"]}),
+        ("enum", {"type": "string", "enum": ["notice"]}),
+        ("required", {"type": "string"}),
+        ("additionalProperties", False),
+    ),
+)
+def test_direct_shape_keyword_collision_preserves_all_arguments_and_reviews(
+    tmp_path, collision, collision_schema
+):
+    document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    collision: collision_schema,
+                    "recipient": {"type": "string", "format": "email"},
+                    "body": {"type": "string"},
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "attested",
+                    "effects": ["sends_message"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+    assert set(arguments) == {collision, "recipient", "body"}
+    assert arguments["recipient"]["policy"] == "trusted_fixed"
+    assert tool["schema_review_required"] is True
+    assert tool["schema_closes_unknown_arguments"] is False
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert report["summary"]["risk_review_required_tools"] == 0
+
+    schema_path = tmp_path / "schema.json"
+    controls_path = tmp_path / "controls.json"
+    output_path = tmp_path / "report.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    assert (
+        main(
+            [
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    "recipient_schema",
+    ({"type": "string", "format": "email"}, True, False),
+)
+def test_properties_keyword_collision_cannot_produce_a_clean_empty_audit(
+    recipient_schema,
+):
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "inputSchema": {
+                            "properties": {},
+                            "recipient": recipient_schema,
+                            "body": {"type": "string"},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    assert report["tools"][0]["arguments"] == []
+    assert report["tools"][0]["schema_review_required"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
 
 
 def test_boolean_additional_properties_are_handled_by_schema_closure_not_review():
@@ -1600,6 +1766,81 @@ def test_cli_fail_on_review_rejects_hidden_authority_in_local_ref(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["summary"]["schema_review_required_tools"] == 1
     assert report["tools"][0]["arguments"] == []
+
+
+def test_cli_fail_on_review_rejects_required_name_missing_from_properties(tmp_path):
+    schema_path = tmp_path / "tools.json"
+    report_path = tmp_path / "report.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": ["recipient"],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                str(schema_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert report["tools"][0]["arguments"] == []
+
+
+def test_cli_loads_schema_paths_lazily_under_the_aggregate_budget(
+    tmp_path, monkeypatch
+):
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "description": "x" * 3_500,
+                        "inputSchema": {"properties": {}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_loader = scanner.load_json_path
+    load_count = 0
+
+    def counted_loader(path, *, allow_stdin=False):
+        nonlocal load_count
+        load_count += 1
+        return original_loader(path, allow_stdin=allow_stdin)
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_MATERIAL_BYTES", 4_096)
+    monkeypatch.setattr(scanner, "load_json_path", counted_loader)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path)] * 80 + ["--format", "json"])
+
+    assert exc_info.value.code == 2
+    assert 1 <= load_count <= 2
 
 
 def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):

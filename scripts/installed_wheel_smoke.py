@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -258,27 +259,65 @@ def _daybreak_post_audit_regressions() -> None:
         "messageId",
         "message-id",
         "messageID",
+        "messageIdentifier",
+        "MESSAGEID",
+        "messageid",
+        "messageId2",
+        "messageIDs2",
+        "messageUUID",
+        "messageGuid",
+        "messageuuid",
+        "messageguid",
+        "userId1",
+        "ｍｅｓｓａｇｅｉｄ",
         "message.id",
         "message/id",
         "replyTo",
+        "replyTo2",
         "reply-to",
         "userIds",
+        "apiKey1",
+        "url2",
+        "id1",
+        "key2",
         "idempotencyKey",
+        "customerid",
+        "orderid",
+        "walletid",
+        "paymentid",
+        "auctionid",
+        "documentid",
+        "jobid",
+        "orgkey",
     ):
         inferred, _ = infer_policy(Param(name, "integer"))
         _check(
             inferred is verb_authority.Policy.TRUSTED_FIXED,
             f"installed selector tokenizer relaxed {name!r}",
         )
-    for name in ("valid", "grid", "monkey", "liquid", "keyboard", "hockey"):
+    for name in ("keyboard", "keynote", "guidance", "uuidification", "identity"):
         inferred, _ = infer_policy(Param(name, "integer"))
         _check(
             inferred is verb_authority.Policy.TYPED_BOUNDED,
             f"installed selector tokenizer matched substring-only name {name!r}",
         )
+    for name in ("valid", "grid", "monkey", "liquid", "hockey"):
+        inferred, confidence = infer_policy(Param(name, "integer"))
+        _check(
+            inferred is Policy.TRUSTED_FIXED
+            and confidence is Confidence.UNCERTAIN,
+            f"installed selector suffix did not fail closed for {name!r}",
+        )
+    inferred, confidence = infer_policy(Param("valid", "boolean", sink=False))
+    _check(
+        inferred is Policy.TYPED_BOUNDED and confidence is Confidence.HIGH,
+        "installed explicit sink=False did not release selector-suffix ambiguity",
+    )
     for name in (
         "primaryRecipient",
+        "recipient1",
         "backup-account",
+        "account2",
         "settlement.IBAN",
         "callbackURL",
         "backup-uri",
@@ -341,6 +380,13 @@ def _daybreak_post_audit_regressions() -> None:
             and confidence is Confidence.HIGH,
             f"installed authority tokenizer matched substring-only name {name!r}",
         )
+    tokenizer_started = time.perf_counter()
+    uppercase_tokens = verb_authority._identifier_tokens("A" * 16_000)
+    _check(
+        uppercase_tokens == ("a" * 16_000,)
+        and time.perf_counter() - tokenizer_started < 1.0,
+        "installed identifier tokenizer exceeded its linear resource budget",
+    )
     for name in (
         "messageBody",
         "response-content",
@@ -534,6 +580,105 @@ def _daybreak_post_audit_regressions() -> None:
         "installed scanner silently omitted composed authority",
     )
 
+    unmodeled_required_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": ["recipient"],
+                },
+            }
+        ]
+    }
+    unmodeled_required_report = scan_documents([unmodeled_required_document])
+    _check(
+        unmodeled_required_report["summary"]["schema_review_required_tools"] == 1
+        and unmodeled_required_report["tools"][0]["schema_review_required"] is True
+        and unmodeled_required_report["tools"][0]["arguments"] == [],
+        "installed scanner silently omitted an unmodeled required argument",
+    )
+
+    union_document = {
+        "tools": [
+            {
+                "name": "pay_invoice",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {
+                            "type": ["integer", "string"],
+                            "maximum": 100,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    union_controls = {
+        "version": 1,
+        "tools": {
+            "pay_invoice": {
+                "risk": {
+                    "tier": "financial",
+                    "evidence": "attested",
+                    "effects": ["commits_funds"],
+                }
+            }
+        },
+    }
+    union_report = scan_documents(
+        [union_document], control_declarations=union_controls
+    )
+    union_argument = union_report["tools"][0]["arguments"][0]
+    _check(
+        union_report["tools"][0]["schema_review_required"] is True
+        and union_argument["type"] == "json"
+        and union_argument["policy"] == "trusted_fixed"
+        and union_argument["review_required"] is True,
+        "installed scanner treated a multi-type union as a bounded integer",
+    )
+
+    direct_shape_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "enum": {"type": "string", "enum": ["notice"]},
+                    "recipient": {"type": "string", "format": "email"},
+                    "body": {"type": "string"},
+                },
+            }
+        ]
+    }
+    direct_shape_controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "attested",
+                    "effects": ["sends_message"],
+                }
+            }
+        },
+    }
+    direct_shape_report = scan_documents(
+        [direct_shape_document], control_declarations=direct_shape_controls
+    )
+    direct_arguments = {
+        argument["name"]: argument
+        for argument in direct_shape_report["tools"][0]["arguments"]
+    }
+    _check(
+        set(direct_arguments) == {"enum", "recipient", "body"}
+        and direct_arguments["recipient"]["policy"] == "trusted_fixed"
+        and direct_shape_report["tools"][0]["schema_review_required"] is True,
+        "installed scanner dropped direct-shape arguments after a keyword collision",
+    )
+
     inconsistent = copy.deepcopy(composed_report)
     inconsistent["declared_controls"]["tools"][0]["risk"]["effects"].append(
         "different_effect"
@@ -577,7 +722,8 @@ def _daybreak_post_audit_regressions() -> None:
     _check(
         hostile_name not in hostile_markdown
         and "![audit](" not in hostile_markdown
-        and "\\!\\[audit\\](https://example.invalid/pixel)\\`label\\`"
+        and "https://example.invalid/pixel" not in hostile_markdown
+        and "\\!\\[audit\\](https&#58;//example.invalid/pixel)\\`label\\`"
         in hostile_markdown,
         "installed Markdown renderer emitted an active image or link",
     )
@@ -605,6 +751,169 @@ def _daybreak_post_audit_regressions() -> None:
             exit_code == 2,
             "installed scan CLI did not fail on unresolved schema composition",
         )
+        schema_path.write_text(
+            json.dumps(unmodeled_required_document), encoding="utf-8"
+        )
+        required_exit_code = verb_authority_scan.main(
+            [
+                str(schema_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        _check(
+            required_exit_code == 2,
+            "installed scan CLI ignored an unmodeled required argument",
+        )
+        schema_path.write_text(json.dumps(union_document), encoding="utf-8")
+        controls_path.write_text(json.dumps(union_controls), encoding="utf-8")
+        union_exit_code = verb_authority_scan.main(
+            [
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        _check(
+            union_exit_code == 2,
+            "installed scan CLI ignored a multi-type union",
+        )
+        schema_path.write_text(
+            json.dumps(direct_shape_document), encoding="utf-8"
+        )
+        controls_path.write_text(
+            json.dumps(direct_shape_controls), encoding="utf-8"
+        )
+        direct_exit_code = verb_authority_scan.main(
+            [
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        _check(
+            direct_exit_code == 2,
+            "installed scan CLI ignored a direct-shape keyword collision",
+        )
+
+    open_before = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    },
+                    "additionalProperties": True,
+                },
+            }
+        ]
+    }
+    open_after = copy.deepcopy(open_before)
+    open_after["tools"][0]["inputSchema"]["properties"] = {}
+    open_diff = diff_reports(
+        scan_documents([open_before]), scan_documents([open_after])
+    )
+    removed = next(
+        change
+        for change in open_diff["changes"]
+        if change["kind"] == "argument_removed"
+    )
+    _check(
+        removed["classification"] == "authority_increase",
+        "installed diff treated a modeled argument removed from an open schema "
+        "as protection",
+    )
+
+    bounds_document = {
+        "tools": [
+            {
+                "name": "purchase_bid",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "bidWei": {"type": "integer", "maximum": 100}
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    bounds_controls = {
+        "version": 1,
+        "tools": {
+            "purchase_bid": {
+                "risk": {
+                    "tier": "financial",
+                    "evidence": "attested",
+                    "effects": ["commits_funds"],
+                },
+                "arguments": {
+                    "bidWei": {
+                        "authority": "constrained",
+                        "evidence": "attested",
+                        "bounds": [
+                            {
+                                "source": "immutable ceiling",
+                                "bounds_mutability": "immutable",
+                                "operational_status": "enforced",
+                                "enforcement": "constant check",
+                            }
+                        ],
+                    }
+                },
+            }
+        },
+    }
+    bounds_before = scan_documents(
+        [bounds_document], control_declarations=bounds_controls
+    )
+    bounds_after = copy.deepcopy(bounds_before)
+    after_bound = bounds_after["declared_controls"]["tools"][0]["arguments"][0]
+    after_bound["bounds"] = [
+        {
+            "source": "caller ceiling one",
+            "bounds_mutability": "caller",
+            "operational_status": "enforced",
+            "enforcement": "request check",
+        },
+        {
+            "source": "caller ceiling two",
+            "bounds_mutability": "caller",
+            "operational_status": "enforced",
+            "enforcement": "request check",
+        },
+    ]
+    bounds_after["control_declaration_fingerprint_sha256"] = (
+        verb_authority_scan._control_declaration_fingerprint(
+            bounds_after["declared_controls"]
+        )
+    )
+    bounds_diff = diff_reports(bounds_before, bounds_after)
+    bounds_change = next(
+        change
+        for change in bounds_diff["changes"]
+        if change["kind"] == "bounds_changed"
+    )
+    _check(
+        bounds_change["classification"] == "authority_increase",
+        "installed diff treated caller-controlled bounds as stronger than an "
+        "immutable bound",
+    )
 
 
 def _exact_authority_and_action_identity() -> None:

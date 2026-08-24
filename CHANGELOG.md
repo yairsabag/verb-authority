@@ -70,6 +70,14 @@ tag or GitHub release was created, and the version is intentionally not reused.
   Match complete tokens rather than substrings, normalize compatible fullwidth
   forms, and keep non-Latin, mixed-script, or otherwise unmodeled identifiers
   locked for review unless the application explicitly declares `sink=False`.
+  Treat numeric suffixes and complete `identifier` tokens as boundaries, and
+  conservatively recognize every compact selector suffix plus UUID/GUID selectors, so
+  `messageIdentifier`, `MESSAGEID`, `messageId2`, `messageUUID`, `account2`, and
+  `recipient1` cannot become broadly caller-authorable. Flatcase suffixes fail
+  closed without relying on a finite entity-prefix list; `sink=False` remains
+  the explicit release valve for an ordinary word that shares a suffix.
+  Implement tokenization as a bounded linear pass rather than a backtracking
+  uppercase-name expression.
 - Normalize valid string-valued policy/risk enum entries consistently in the
   direct gate, dispatcher, and guarded runner; malformed policy material now
   returns a closed decision from direct APIs instead of escaping an exception.
@@ -145,9 +153,16 @@ tag or GitHub release was created, and the version is intentionally not reused.
   expected name and version; require the exact pure-Python
   `py3-none-any` wheel filename, matching internal `WHEEL` metadata, an exact
   name/version-bound `.dist-info` root, and an exact name/version-bound source
-  root. Reject unsafe source-archive paths and special members, verify the
-  source distribution before extraction in CI/release jobs, and refuse
-  unexpected local or pre-existing release assets.
+  root. Reject unsafe, ambiguous, duplicate, case-colliding, encrypted, or
+  foreign-metadata wheel members and apply compressed, per-member, aggregate,
+  and member-count ceilings. Reject unsafe source-archive paths, duplicate or
+  portable-colliding names, GNU/PAX sparse files, special members, and archive
+  bombs under equivalent ceilings. Traverse gzip data through a decompressed
+  byte cap, bound extension-header size/depth/count, and validate each tar
+  header before advancing, so oversized regular, directory, PAX, or GNU
+  extension payloads cannot consume unbounded work
+  before rejection; verify the source distribution before extraction in
+  CI/release jobs, and refuse unexpected local or pre-existing release assets.
 - Isolate both composite-action Python entry points with `-I` and remove
   `PYTHONPATH`/`PYTHONHOME`, so consumer-workspace `pip.py`,
   `verb_authority.py`, or a planted console script cannot turn a real widening
@@ -200,17 +215,32 @@ tag or GitHub release was created, and the version is intentionally not reused.
   dynamic property shapes, and nested unmodeled schemas as an explicit
   per-tool review obligation on the first scan. Include that obligation in
   `--fail-on-review` and Authority Diff instead of allowing hidden arguments to
-  produce a clean baseline.
+  produce a clean baseline. Apply the same obligation to required names absent
+  from `properties` and to multi-type unions whose constraints are conditional
+  on the selected JSON type. Preserve every argument in direct-shape exports
+  when an argument name collides with `type`, `enum`, or another wrapper
+  keyword, and flag that unavoidable shape ambiguity instead of emitting a
+  clean empty audit. Keep the structurally indistinguishable `properties`
+  collision as explicit review debt rather than silently claiming full
+  coverage.
 - Recompute author-supplied control fingerprints before comparison and require
   duplicated risk, schema-closure, argument-policy, and review fields to agree
-  across their report locations. Escape active Markdown link/image syntax in
-  schema-controlled cells as well as terminal and bidirectional controls.
+  across their report locations. Treat removal of a modeled argument from an
+  open schema as an authority increase because the unknown name remains
+  caller-visible. Order enforced bound chains by independently controlled
+  strength before count, so multiple caller-controlled bounds cannot replace
+  one trusted or immutable bound and appear stronger.
+- Escape active Markdown link/image syntax and neutralize bare-URL autolinks,
+  mentions, and issue-reference markers in schema-controlled cells as well as
+  terminal and bidirectional controls.
 - Add scanner-specific aggregate budgets for JSON nodes/material, tool
   definitions, exposed and unexposed arguments, enum members, and
   report-expanding control collections. Reject oversized files before parsing,
   enforce the same ceilings across every public scanner entry point, recheck
   generated reports, and bound loaded reports before Authority Diff indexes
-  them; CLI over-limit failures exit 2 without a traceback.
+  them. Load CLI schema paths lazily under that same aggregate budget so a long
+  path list cannot be decoded into memory before rejection; CLI over-limit
+  failures exit 2 without a traceback.
 
 ### Documentation
 

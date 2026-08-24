@@ -356,8 +356,14 @@ composition need attention. The scanner does not resolve `$ref`, `allOf`,
 `anyOf`, `oneOf`, or conditional/dependent schemas. It instead sets
 `schema_review_required` on the tool and counts it in
 `summary.schema_review_required_tools`, so authority-bearing properties hidden
-behind those constructs cannot produce a silent clean result. Static inference
-is a review aid, not a vulnerability verdict; the scanner does not inspect tool
+behind those constructs cannot produce a silent clean result. The same flag is
+set for required names absent from the modeled `properties` map, multi-type
+unions, and ambiguous direct-shape exports whose argument names collide with
+JSON Schema wrapper keywords. Direct-shape collisions preserve the arguments
+in the report rather than silently replacing them with an empty list. The
+structurally indistinguishable `properties` collision remains an explicit
+review obligation instead of a clean empty audit. Static inference is a review
+aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
 
@@ -529,6 +535,12 @@ The v3 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
 increase; and enum replacements without a strict subset relationship require
 review. Authority Diff is not a complete JSON Schema equivalence checker.
+Removing a modeled argument counts as protection only when the candidate schema
+also rejects unknown arguments; in an open schema the same name remains
+caller-visible without its modeled policy, so the change is an authority
+increase. Enforced bound chains compare independently controlled strength
+before raw count: caller-controlled bounds cannot replace a trusted or
+immutable bound and be reported as stronger.
 Schema changes outside the modeled vocabulary are surfaced through the
 unmodeled-schema fingerprint as `REVIEW`; any change it cannot order safely
 requires independent review rather than an assumption that no reported

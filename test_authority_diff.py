@@ -1074,6 +1074,77 @@ def test_specified_bound_mutability_change_requires_review_but_does_not_fail():
     assert diff["summary"]["authority_increases"] == 0
 
 
+def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound(
+    tmp_path,
+):
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "immutable ceiling",
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": "constant check",
+        }
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    after_bid["bounds"] = [
+        {
+            "source": "caller ceiling one",
+            "bounds_mutability": "caller",
+            "operational_status": "enforced",
+            "enforcement": "request check",
+        },
+        {
+            "source": "caller ceiling two",
+            "bounds_mutability": "caller",
+            "operational_status": "enforced",
+            "enforcement": "request check",
+        },
+    ]
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "authority_increase"
+    assert diff["summary"]["authority_increases"] == 1
+    assert diff["summary"]["protection_increases"] == 0
+
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
 def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():
     pay_tool = {
         "name": "pay_invoice",
@@ -1129,6 +1200,88 @@ def test_opening_additional_properties_is_an_authority_increase():
     assert change["classification"] == "authority_increase"
     assert change["before"] is True
     assert change["after"] is False
+
+
+def test_removing_modeled_argument_from_open_schema_is_authority_increase(
+    tmp_path,
+):
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    },
+                    "additionalProperties": True,
+                },
+            }
+        ]
+    }
+    after_document = copy.deepcopy(before_document)
+    after_document["tools"][0]["inputSchema"]["properties"] = {}
+
+    diff = diff_reports(
+        scan_documents([before_document]), scan_documents([after_document])
+    )
+
+    change = next(
+        item for item in diff["changes"] if item["kind"] == "argument_removed"
+    )
+    assert change["classification"] == "authority_increase"
+    assert diff["summary"]["authority_increases"] == 1
+    assert diff["summary"]["protection_increases"] == 0
+
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(json.dumps(before_document), encoding="utf-8")
+    after_path.write_text(json.dumps(after_document), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
+def test_removing_modeled_argument_from_closed_schema_is_protection_increase():
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    after_document = copy.deepcopy(before_document)
+    after_document["tools"][0]["inputSchema"]["properties"] = {}
+
+    diff = diff_reports(
+        scan_documents([before_document]), scan_documents([after_document])
+    )
+
+    change = next(
+        item for item in diff["changes"] if item["kind"] == "argument_removed"
+    )
+    assert change["classification"] == "protection_increase"
 
 
 def test_new_unresolved_schema_composition_requires_diff_review():

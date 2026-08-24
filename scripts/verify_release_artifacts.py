@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import argparse
 from email.parser import Parser
+import gzip
 import re
+import stat
 import sys
 import tarfile
 import tomllib
+import unicodedata
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from zipfile import BadZipFile, ZipFile
 
 
@@ -21,10 +25,98 @@ _TAG_PATTERN = re.compile(
     r"(?:-(?P<phase>alpha|beta|rc)\.(?P<number>[0-9]+))?"
 )
 _PHASE_TO_PEP440 = {"alpha": "a", "beta": "b", "rc": "rc"}
+MAX_SDIST_ARCHIVE_BYTES = 128 * 1024 * 1024
+MAX_SDIST_MEMBERS = 10_000
+MAX_SDIST_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_SDIST_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_SDIST_DECOMPRESSED_BYTES = (
+    MAX_SDIST_TOTAL_BYTES
+    + MAX_SDIST_MEMBERS * (4 * tarfile.BLOCKSIZE)
+    + 2 * tarfile.BLOCKSIZE
+    + tarfile.RECORDSIZE
+)
+MAX_SDIST_RAW_HEADERS = 2 * MAX_SDIST_MEMBERS
+MAX_SDIST_HEADER_DEPTH = 64
+MAX_SDIST_EXTENSION_BYTES = 1024 * 1024
+MAX_WHEEL_ARCHIVE_BYTES = 128 * 1024 * 1024
+MAX_WHEEL_MEMBERS = 10_000
+MAX_WHEEL_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_WHEEL_TOTAL_BYTES = 256 * 1024 * 1024
 
 
 class VerificationError(ValueError):
     """Raised when a release identity or artifact boundary is inconsistent."""
+
+
+class _BoundedArchiveReader:
+    """Cap bytes exposed to tarfile, including hidden extension headers."""
+
+    def __init__(self, fileobj: BinaryIO, limit: int):
+        self._fileobj = fileobj
+        self._limit = limit
+        self._consumed = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self._limit - self._consumed
+        if remaining < 0:
+            raise VerificationError(
+                "source distribution exceeds the decompressed traversal limit"
+            )
+        request_size = remaining + 1 if size < 0 else min(size, remaining + 1)
+        data = self._fileobj.read(request_size)
+        self._consumed += len(data)
+        if self._consumed > self._limit:
+            raise VerificationError(
+                "source distribution exceeds the decompressed traversal limit"
+            )
+        return data
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Count raw and recursively nested tar extension headers."""
+
+    def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        # CPython parses GNU sparse extension blocks before returning a member
+        # to our validation loop. Reject the type at the header boundary so a
+        # malformed or extended sparse map cannot allocate, recurse, or leak an
+        # internal parser exception before the public verifier sees it.
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise VerificationError(
+                "source distribution contains a GNU sparse member"
+            )
+        if self.type in {
+            tarfile.XHDTYPE,
+            tarfile.XGLTYPE,
+            tarfile.SOLARIS_XHDTYPE,
+            tarfile.GNUTYPE_LONGNAME,
+            tarfile.GNUTYPE_LONGLINK,
+        } and (self.size < 0 or self.size > MAX_SDIST_EXTENSION_BYTES):
+            raise VerificationError(
+                "source distribution extension header exceeds the size limit"
+            )
+        return super()._proc_member(archive)
+
+    @classmethod
+    def fromtarfile(cls, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        header_count = getattr(archive, "_verb_authority_header_count", 0) + 1
+        if header_count > MAX_SDIST_RAW_HEADERS:
+            raise VerificationError(
+                "source distribution exceeds the raw-header-count limit"
+            )
+        archive._verb_authority_header_count = header_count
+
+        header_depth = getattr(archive, "_verb_authority_header_depth", 0) + 1
+        if header_depth > MAX_SDIST_HEADER_DEPTH:
+            raise VerificationError(
+                "source distribution exceeds the nested-header-depth limit"
+            )
+        archive._verb_authority_header_depth = header_depth
+        try:
+            return super().fromtarfile(archive)
+        finally:
+            archive._verb_authority_header_depth = header_depth - 1
 
 
 def _project_identity(project_path: Path) -> tuple[str, str]:
@@ -91,14 +183,85 @@ def _artifact_version_name(version: str) -> str:
     return re.sub(r"[^\w\d.]+", "_", version).lower()
 
 
+def _validate_wheel_members(wheel: ZipFile, *, expected_root: str) -> None:
+    """Reject archive paths or package metadata outside this distribution."""
+
+    infos = wheel.infolist()
+    if len(infos) > MAX_WHEEL_MEMBERS:
+        raise VerificationError("wheel exceeds the member-count limit")
+    names = [info.filename for info in infos]
+    if len(names) != len(set(names)):
+        raise VerificationError("wheel contains duplicate member paths")
+
+    canonical_paths: set[str] = set()
+    portable_paths: set[str] = set()
+    total_size = 0
+    for info in infos:
+        member = info.filename
+        canonical = member[:-1] if member.endswith("/") else member
+        parts = canonical.split("/")
+        path = PurePosixPath(canonical)
+        portable = unicodedata.normalize("NFC", canonical).casefold()
+        if (
+            not canonical
+            or path.is_absolute()
+            or "\\" in member
+            or any(part in {"", ".", ".."} for part in parts)
+            or parts[0].endswith(":")
+            or canonical in canonical_paths
+            or portable in portable_paths
+        ):
+            raise VerificationError(
+                f"wheel contains unsafe or ambiguous member path {member!r}"
+            )
+        canonical_paths.add(canonical)
+        portable_paths.add(portable)
+
+        if info.file_size < 0 or info.file_size > MAX_WHEEL_MEMBER_BYTES:
+            raise VerificationError(
+                f"wheel member exceeds the size limit: {member!r}"
+            )
+        total_size += info.file_size
+        if total_size > MAX_WHEEL_TOTAL_BYTES:
+            raise VerificationError("wheel exceeds the total-size limit")
+
+        file_type = stat.S_IFMT(info.external_attr >> 16)
+        if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+            raise VerificationError(
+                f"wheel contains unsupported member type at {member!r}"
+            )
+        if info.flag_bits & 0x1:
+            raise VerificationError(
+                f"wheel contains encrypted member {member!r}"
+            )
+
+        dist_info_parts = [
+            part for part in parts if part.casefold().endswith(".dist-info")
+        ]
+        if dist_info_parts and not (
+            len(dist_info_parts) == 1 and parts[0] == expected_root
+        ):
+            raise VerificationError(
+                f"wheel contains metadata outside expected dist-info directory: "
+                f"{member!r}"
+            )
+
+
 def _wheel_identity(
     wheel_path: Path,
     *,
     expected_name: str,
     expected_version: str,
 ) -> tuple[str, str]:
+    expected_root = (
+        f"{_artifact_distribution_name(expected_name)}-"
+        f"{_artifact_version_name(expected_version)}.dist-info"
+    )
     try:
+        if wheel_path.stat().st_size > MAX_WHEEL_ARCHIVE_BYTES:
+            raise VerificationError("wheel exceeds the compressed-size limit")
         with ZipFile(wheel_path) as wheel:
+            _validate_wheel_members(wheel, expected_root=expected_root)
             metadata_members = [
                 member
                 for member in wheel.namelist()
@@ -128,10 +291,6 @@ def _wheel_identity(
                     "wheel METADATA and WHEEL must belong to the same "
                     "dist-info directory"
                 )
-            expected_root = (
-                f"{_artifact_distribution_name(expected_name)}-"
-                f"{_artifact_version_name(expected_version)}.dist-info"
-            )
             if metadata_root != expected_root:
                 raise VerificationError(
                     f"wheel dist-info directory {metadata_root!r} does not "
@@ -169,50 +328,139 @@ def _sdist_identity(
     expected_version: str,
 ) -> tuple[str, str]:
     try:
-        with tarfile.open(sdist_path, "r:gz") as source_archive:
+        if sdist_path.stat().st_size > MAX_SDIST_ARCHIVE_BYTES:
+            raise VerificationError(
+                "source distribution exceeds the compressed-size limit"
+            )
+        with (
+            gzip.open(sdist_path, "rb") as decompressed_archive,
+            tarfile.open(
+                sdist_path.name,
+                "r|",
+                fileobj=_BoundedArchiveReader(
+                    decompressed_archive,
+                    MAX_SDIST_DECOMPRESSED_BYTES,
+                ),
+                tarinfo=_BoundedTarInfo,
+            ) as source_archive,
+        ):
             expected_root = (
                 f"{_artifact_distribution_name(expected_name)}-"
                 f"{_artifact_version_name(expected_version)}"
             )
-            members = source_archive.getmembers()
-            metadata_members = [
-                member
-                for member in members
-                if member.isfile()
-                and member.name.endswith("/PKG-INFO")
-                and member.name.count("/") == 1
-            ]
-            if len(metadata_members) != 1:
-                raise VerificationError(
-                    f"source distribution must contain exactly one top-level "
-                    f"PKG-INFO; found {len(metadata_members)}"
+            member_names: set[str] = set()
+            portable_member_names: set[str] = set()
+            member_count = 0
+            total_size = 0
+            metadata_count = 0
+            metadata_bytes: bytes | None = None
+            while True:
+                member = source_archive.next()
+                if member is None:
+                    break
+                member_count += 1
+                if member_count > MAX_SDIST_MEMBERS:
+                    raise VerificationError(
+                        "source distribution exceeds the member-count limit"
+                    )
+                canonical_name = (
+                    member.name[:-1]
+                    if member.name.endswith("/")
+                    else member.name
                 )
-            metadata_root = metadata_members[0].name.rsplit("/", 1)[0]
-            if metadata_root != expected_root:
-                raise VerificationError(
-                    f"source-distribution root {metadata_root!r} does not "
-                    f"match expected {expected_root!r}"
+                raw_parts = canonical_name.split("/")
+                path = PurePosixPath(canonical_name)
+                regular_file = member.type in {
+                    tarfile.REGTYPE,
+                    tarfile.AREGTYPE,
+                }
+                directory = member.type == tarfile.DIRTYPE
+                portable_name = unicodedata.normalize(
+                    "NFC", canonical_name
+                ).casefold()
+                sparse_headers = any(
+                    key.startswith("GNU.sparse") or key == "SCHILY.realsize"
+                    for key in member.pax_headers
                 )
-            for member in members:
-                path = PurePosixPath(member.name)
+                top_level_metadata = (
+                    regular_file
+                    and member.name.endswith("/PKG-INFO")
+                    and member.name.count("/") == 1
+                )
+                if top_level_metadata:
+                    metadata_root = member.name.rsplit("/", 1)[0]
+                    if metadata_root != expected_root:
+                        raise VerificationError(
+                            f"source-distribution root {metadata_root!r} does not "
+                            f"match expected {expected_root!r}"
+                        )
                 if (
                     path.is_absolute()
                     or not path.parts
+                    or any(part in {"", ".", ".."} for part in raw_parts)
                     or path.parts[0] != expected_root
-                    or ".." in path.parts
                     or "\\" in member.name
-                    or not (member.isfile() or member.isdir())
+                    or not (regular_file or directory)
+                    or bool(member.sparse)
+                    or sparse_headers
                 ):
                     raise VerificationError(
                         f"source distribution contains unsafe or unexpected "
                         f"member path {member.name!r}; every member must remain "
                         f"under {expected_root!r}"
                     )
-            extracted = source_archive.extractfile(metadata_members[0])
-            if extracted is None:
-                raise VerificationError("cannot read source distribution PKG-INFO")
-            metadata = extracted.read().decode("utf-8")
-    except (OSError, tarfile.TarError, UnicodeDecodeError) as exc:
+                if member.name in member_names:
+                    raise VerificationError(
+                        "source distribution contains duplicate member paths"
+                    )
+                if portable_name in portable_member_names:
+                    raise VerificationError(
+                        "source distribution contains portable-path collisions"
+                    )
+                member_names.add(member.name)
+                portable_member_names.add(portable_name)
+                if member.size < 0 or member.size > MAX_SDIST_MEMBER_BYTES:
+                    raise VerificationError(
+                        "source distribution member exceeds the size limit: "
+                        f"{member.name!r}"
+                    )
+                if directory and member.size != 0:
+                    raise VerificationError(
+                        "source distribution directory member has non-zero size: "
+                        f"{member.name!r}"
+                    )
+                total_size += member.size
+                if total_size > MAX_SDIST_TOTAL_BYTES:
+                    raise VerificationError(
+                        "source distribution exceeds the total-size limit"
+                    )
+                if regular_file:
+                    if top_level_metadata:
+                        metadata_count += 1
+                        extracted = source_archive.extractfile(member)
+                        if extracted is None:
+                            raise VerificationError(
+                                "cannot read source distribution PKG-INFO"
+                            )
+                        metadata_bytes = extracted.read()
+            if metadata_count != 1 or metadata_bytes is None:
+                raise VerificationError(
+                    f"source distribution must contain exactly one top-level "
+                    f"PKG-INFO; found {metadata_count}"
+                )
+            metadata = metadata_bytes.decode("utf-8")
+    except VerificationError:
+        raise
+    except (
+        OSError,
+        EOFError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+        IndexError,
+        tarfile.TarError,
+        UnicodeDecodeError,
+    ) as exc:
         raise VerificationError(
             f"cannot inspect source distribution {sdist_path.name}: {exc}"
         ) from exc

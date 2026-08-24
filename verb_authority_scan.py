@@ -559,7 +559,12 @@ def _property_type(schema: dict[str, Any]) -> str:
         return "enum"
     schema_type = schema.get("type", "string")
     if isinstance(schema_type, list):
-        schema_type = next((item for item in schema_type if item != "null"), "string")
+        non_null_types = {
+            item for item in schema_type if type(item) is str and item != "null"
+        }
+        schema_type = (
+            next(iter(non_null_types)) if len(non_null_types) == 1 else "json"
+        )
     if not isinstance(schema_type, str):
         schema_type = "string"
     value_format = schema.get("format")
@@ -909,16 +914,30 @@ def _param(name: str, schema: Any) -> Param:
     )
 
 
+def _is_direct_shape_schema(schema: Any) -> bool:
+    """Recognize SDK exports whose root maps argument names to schemas."""
+
+    return (
+        type(schema) is dict
+        and "properties" not in schema
+        and bool(schema)
+        and all(type(value) in (dict, bool) for value in schema.values())
+    )
+
+
 def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     schema = definition.input_schema
     properties = schema.get("properties")
+    direct_shape = properties is None and _is_direct_shape_schema(schema)
     if properties is None:
         # Some SDK exports expose the input shape directly rather than wrapping
         # it in a JSON Schema object. A document containing recognized schema
         # structure is still a wrapped schema, even when its caller-visible
         # properties are supplied only through an unresolved reference or
         # combinator.
-        if _SCHEMA_WRAPPER_KEYWORDS.intersection(schema):
+        if direct_shape:
+            properties = dict(schema)
+        elif _SCHEMA_WRAPPER_KEYWORDS.intersection(schema):
             properties = {}
         else:
             properties = dict(schema)
@@ -934,12 +953,19 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
                 f"tool '{definition.name}' property '{name}' must be a schema object "
                 "or boolean"
             )
-    required = schema.get("required", [])
+    required = [] if direct_shape else schema.get("required", [])
     if type(required) is not list or any(type(item) is not str for item in required):
         raise SchemaError(f"tool '{definition.name}' required must be an array of names")
     if len(required) != len(set(required)):
         raise SchemaError(f"tool '{definition.name}' required names must be unique")
     return properties, set(required)
+
+
+def _schema_closes_unknown_arguments(definition: ToolDefinition) -> bool:
+    return (
+        not _is_direct_shape_schema(definition.input_schema)
+        and definition.input_schema.get("additionalProperties") is False
+    )
 
 
 def _schema_requires_authority_review(schema: Any) -> bool:
@@ -959,6 +985,33 @@ def _schema_requires_authority_review(schema: Any) -> bool:
         return True
     if type(schema) is not dict:
         return False
+    if _is_direct_shape_schema(schema):
+        # A direct-shape argument may legitimately be named ``type``, ``enum``,
+        # or another JSON Schema keyword. Preserve every argument, but surface
+        # the unavoidable direct-vs-wrapper ambiguity for explicit review.
+        return bool(_SCHEMA_WRAPPER_KEYWORDS.intersection(schema)) or any(
+            _schema_requires_authority_review(subschema)
+            for subschema in schema.values()
+        )
+    schema_type = schema.get("type")
+    if type(schema_type) is list and (
+        len(schema_type) != 1
+        or any(type(item) is not str for item in schema_type)
+    ):
+        # The runtime policy model represents one exact JSON type. A union can
+        # make constraints type-conditional (for example, maximum does not
+        # constrain a string), so selecting one member would overstate safety.
+        return True
+    if "properties" in schema and any(
+        key not in _SCHEMA_WRAPPER_KEYWORDS
+        and key not in _SCHEMA_ANNOTATION_KEYS
+        and type(value) in (dict, bool)
+        for key, value in schema.items()
+    ):
+        # ``properties`` is the one direct-shape argument name that is
+        # structurally indistinguishable from a wrapped schema. If schema-like
+        # siblings would otherwise disappear, retain a visible review debt.
+        return True
     if (
         _SCHEMA_AUTHORITY_REVIEW_KEYWORDS.intersection(schema)
         or _SCHEMA_UNMODELED_AUTHORITY_KEYWORDS.intersection(schema)
@@ -971,12 +1024,27 @@ def _schema_requires_authority_review(schema: Any) -> bool:
     if type(schema.get("additionalProperties")) is dict:
         return True
 
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if type(required) is list:
+        modeled_properties = (
+            set(properties) if type(properties) is dict else set()
+        )
+        if any(
+            type(name) is not str or name not in modeled_properties
+            for name in required
+        ):
+            # A required name that is absent from the properties map is still
+            # caller-visible when unknown arguments remain open. The scanner
+            # cannot infer its type or authority policy, so an empty argument
+            # list must not look like a complete analysis.
+            return True
+
     # Root ``properties`` and nested object properties are the only schema map
     # this scanner actually enumerates. Follow those paths so a ref/combinator
     # inside an argument is still surfaced. Deliberately do not walk `$defs`
     # or legacy `definitions`: an unused helper definition is inert, while any
     # reference to it is already caught at the reference site.
-    properties = schema.get("properties")
     return type(properties) is dict and any(
         _schema_requires_authority_review(subschema)
         for subschema in properties.values()
@@ -1498,8 +1566,8 @@ def _declared_controls_report(
 
         tool_item = {
             "name": report_tool["name"],
-            "schema_closes_unknown_arguments": (
-                definition.input_schema.get("additionalProperties") is False
+            "schema_closes_unknown_arguments": _schema_closes_unknown_arguments(
+                definition
             ),
             "arguments": exposed_arguments,
             "unexposed_arguments": unexposed_arguments,
@@ -1714,8 +1782,8 @@ def _scan_definitions_bounded(
             "risk_conflict": risk_conflict,
             "risk_review_required": tool_name in policy_set.risk_review,
             "needs_confirmation": tool_name in policy_set.confirm,
-            "schema_closes_unknown_arguments": (
-                definition.input_schema.get("additionalProperties") is False
+            "schema_closes_unknown_arguments": _schema_closes_unknown_arguments(
+                definition
             ),
             "schema_review_required": schema_review_required,
             "annotation_conflicts": conflicts,
@@ -1857,10 +1925,25 @@ def _markdown_cell(value: Any) -> str:
             safe.append(character)
     escaped = html.escape("".join(safe), quote=False)
     markdown_safe: list[str] = []
-    for character in escaped:
-        # Escaping brackets and the image marker is sufficient to neutralize
-        # inline/reference links and images without making ordinary prose,
-        # identifiers, or parenthesized constraint text unreadable.
+    for index, character in enumerate(escaped):
+        # Link syntax is escaped below. Neutralize the remaining bare-autolink
+        # signals while preserving how cells render: scheme separators, email
+        # or mention markers, issue-reference markers, and a leading www-dot.
+        if character == ":" and escaped[index + 1 : index + 3] == "//":
+            markdown_safe.append("&#58;")
+            continue
+        if character == "@":
+            markdown_safe.append("&#64;")
+            continue
+        if character == "#":
+            markdown_safe.append("&#35;")
+            continue
+        if (
+            character == "."
+            and escaped[max(0, index - 3) : index].casefold() == "www"
+        ):
+            markdown_safe.append("&#46;")
+            continue
         if character in {"\\", "`", "!", "[", "]", "|"}:
             markdown_safe.append("\\")
         markdown_safe.append(character)
@@ -2137,7 +2220,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         report = scan_documents(
-            [load_json_path(path, allow_stdin=True) for path in args.schemas],
+            (load_json_path(path, allow_stdin=True) for path in args.schemas),
             redact_names=args.redact_names,
             control_declarations=controls,
         )

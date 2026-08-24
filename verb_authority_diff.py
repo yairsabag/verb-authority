@@ -1134,29 +1134,44 @@ def _bounds_classification(
         for bound, status in zip(after, after_status)
         if status == "enforced"
     ]
-    if len(after_enforced) < len(before_enforced):
-        return "authority_increase"
-    if len(after_enforced) > len(before_enforced):
-        return "protection_increase"
+    strength = {"trusted_party": 1, "immutable": 2}
+    before_protective = sorted(
+        strength[bound["bounds_mutability"]]
+        for bound in before_enforced
+        if bound.get("bounds_mutability") in strength
+    )
+    after_protective = sorted(
+        strength[bound["bounds_mutability"]]
+        for bound in after_enforced
+        if bound.get("bounds_mutability") in strength
+    )
 
-    before_mutability = [
-        bound.get("bounds_mutability") for bound in before_enforced
-    ]
-    after_mutability = [
-        bound.get("bounds_mutability") for bound in after_enforced
-    ]
-    if (
-        after_mutability.count("caller") > before_mutability.count("caller")
-        or after_mutability.count("immutable")
-        < before_mutability.count("immutable")
-    ):
+    def dominates(candidate: list[int], baseline: list[int]) -> bool:
+        """Whether candidate can match every fixed baseline bound in strength."""
+
+        if len(candidate) < len(baseline):
+            return False
+        candidate_index = 0
+        for required_strength in baseline:
+            while (
+                candidate_index < len(candidate)
+                and candidate[candidate_index] < required_strength
+            ):
+                candidate_index += 1
+            if candidate_index == len(candidate):
+                return False
+            candidate_index += 1
+        return True
+
+    after_dominates = dominates(after_protective, before_protective)
+    before_dominates = dominates(before_protective, after_protective)
+    if before_dominates and not after_dominates:
         return "authority_increase"
-    if (
-        after_mutability.count("caller") < before_mutability.count("caller")
-        or after_mutability.count("immutable")
-        > before_mutability.count("immutable")
-    ):
+    if after_dominates and not before_dominates:
         return "protection_increase"
+    # Caller-controlled bounds are not fixed authority controls. Adding or
+    # removing only those bounds is visible drift, but cannot establish either
+    # a protection increase or a weakening without semantic evidence.
     return "review"
 
 
@@ -1709,16 +1724,26 @@ def diff_reports(
                 continue
             if after_argument is None:
                 if before_argument["schema_exposure"] == "exposed":
+                    if after_tool["schema_closes_unknown_arguments"] is True:
+                        classification = "protection_increase"
+                        message = "A caller-visible argument was removed."
+                    else:
+                        classification = "authority_increase"
+                        message = (
+                            "A modeled argument was removed while unknown arguments "
+                            "remain caller-visible, so its authority policy no longer "
+                            "protects that input name."
+                        )
                     changes.append(
                         _change(
-                            "protection_increase",
+                            classification,
                             "argument_removed",
                             tool,
                             argument=argument,
                             field="schema_exposure",
                             before="exposed",
                             after=None,
-                            message="A caller-visible argument was removed.",
+                            message=message,
                         )
                     )
                 else:

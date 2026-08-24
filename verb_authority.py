@@ -269,8 +269,7 @@ NEEDS_CONFIRM = {Risk.UNKNOWN, Risk.FINANCIAL, Risk.DESTRUCTIVE, Risk.CODE_EXEC}
 
 
 def _tool_name_tokens(tool_name: str) -> tuple[str, ...]:
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tool_name)
-    return tuple(token.lower() for token in re.findall(r"[A-Za-z0-9]+", separated))
+    return _identifier_tokens(tool_name)
 
 
 def infer_risk(tool_name: str) -> RiskAssessment:
@@ -346,45 +345,87 @@ _AUTHORITY_SINK_TOKENS = frozenset(
     }
 )
 _COMPACT_AUTHORITY_SINK_TOKENS = frozenset({"apikey", "apikeys"})
-_SELECTOR_TOKENS = frozenset({"id", "ids", "key", "keys"})
+_SELECTOR_TOKENS = frozenset(
+    {
+        "guid",
+        "guids",
+        "id",
+        "ids",
+        "identifier",
+        "identifiers",
+        "key",
+        "keys",
+        "uuid",
+        "uuids",
+    }
+)
 _PAYLOAD_TOKENS = frozenset(
     {"body", "message", "content", "text", "summary", "reply", "note", "description"}
 )
-_KNOWN_IDENTIFIER_ACRONYM = re.compile(
-    r"(?<![A-Z])(IBAN|URL|URI|CMD|API|ID)(s?)(?=$|[A-Z][a-z]|[^A-Za-z0-9])"
-)
-
-
 def _identifier_tokens(name: str) -> tuple[str, ...]:
     """Split common schema identifier styles without substring guessing.
 
     Tool providers use snake_case, kebab-case, dotted/slashed paths,
     camelCase, and acronym suffixes interchangeably. Normalize those styles
     into complete, case-folded tokens so ``messageId`` and ``messageID`` carry
-    the same selector evidence as ``message_id`` while words such as
-    ``valid`` and ``keyboard`` do not acquire authority merely because they
-    contain the letters ``id`` or ``key``.
+    the same selector evidence as ``message_id``. Selector inference separately
+    treats a flatcase suffix as ambiguous authority; a substring that is not a
+    suffix, as in ``keyboard`` or ``guidance``, remains ordinary text.
     """
 
     if type(name) is not str:
         return ()
     normalized = unicodedata.normalize("NFKC", name)
-    # Preserve familiar acronym tokens (and their conventional lowercase-s
-    # plurals) before applying the generic camel-case boundaries. Without
-    # this step ``replyIBANs`` becomes ``reply / iba / ns`` and silently loses
-    # the authority-bearing token. The uppercase look-behind prevents a word
-    # such as ``VALID`` from being split merely because it ends in ``ID``.
-    normalized = _KNOWN_IDENTIFIER_ACRONYM.sub(
-        lambda match: f"_{match.group(1).casefold()}{match.group(2)}_",
-        normalized,
-    )
-    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
-    return tuple(
-        token.casefold()
-        for token in re.split(r"[^A-Za-z0-9]+", separated)
-        if token
-    )
+    tokens: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            tokens.append("".join(current).casefold())
+            current.clear()
+
+    length = len(normalized)
+    for index, character in enumerate(normalized):
+        is_upper = "A" <= character <= "Z"
+        is_lower = "a" <= character <= "z"
+        is_digit = "0" <= character <= "9"
+        if not (is_upper or is_lower or is_digit):
+            flush()
+            continue
+
+        if current:
+            previous = current[-1]
+            previous_upper = "A" <= previous <= "Z"
+            previous_lower = "a" <= previous <= "z"
+            previous_digit = "0" <= previous <= "9"
+            next_character = normalized[index + 1] if index + 1 < length else ""
+            next_lower = "a" <= next_character <= "z"
+            acronym_plural = (
+                next_character == "s"
+                and (
+                    index + 2 == length
+                    or "0" <= normalized[index + 2] <= "9"
+                    or "A" <= normalized[index + 2] <= "Z"
+                    or not normalized[index + 2].isascii()
+                    or not normalized[index + 2].isalnum()
+                )
+            )
+            boundary = (
+                (is_digit and not previous_digit)
+                or (not is_digit and previous_digit)
+                or (is_upper and previous_lower)
+                or (
+                    is_upper
+                    and previous_upper
+                    and next_lower
+                    and not acronym_plural
+                )
+            )
+            if boundary:
+                flush()
+        current.append(character)
+    flush()
+    return tuple(tokens)
 
 
 def _is_sink_name(name: str) -> bool:
@@ -402,13 +443,27 @@ def _is_sink_name(name: str) -> bool:
     # Preserve the existing ``*_to`` evidence for camel/kebab/dotted forms
     # such as replyTo, reply-to, and reply.to. Matching a complete final token
     # avoids false positives such as ``into`` or ``tomorrow``.
-    return tokens[-1] == "to"
+    semantic_tokens = tuple(token for token in tokens if not token.isdigit())
+    return bool(semantic_tokens and semantic_tokens[-1] == "to")
 
 
 def _is_selector_name(name: str) -> bool:
-    """Return complete-token selector evidence, never raw substrings."""
+    """Return complete-token or flatcase selector-suffix evidence.
 
-    return bool(_SELECTOR_TOKENS.intersection(_identifier_tokens(name)))
+    Flatcase exports erase the boundary in names such as ``customerid`` and
+    ``walletkey``. Treat every selector suffix as uncertain authority rather
+    than relying on a finite entity-prefix list. This is deliberately
+    conservative: an ordinary word ending in the same letters stays locked
+    until the application explicitly declares ``sink=False``.
+    """
+
+    tokens = _identifier_tokens(name)
+    semantic_tokens = tuple(token for token in tokens if not token.isdigit())
+    return bool(_SELECTOR_TOKENS.intersection(semantic_tokens)) or any(
+        token.endswith(suffix) and token != suffix
+        for token in semantic_tokens
+        for suffix in _SELECTOR_TOKENS
+    )
 
 
 def _is_payload_name(name: str) -> bool:

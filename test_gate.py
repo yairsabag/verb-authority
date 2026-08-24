@@ -1,4 +1,6 @@
 """Tests for the verb-authority gate. Run with: pytest test_gate.py -v"""
+import time
+
 import pytest
 import verb_authority as authority
 from verb_authority import (
@@ -126,12 +128,36 @@ def test_ambiguous_message_identifier_stays_locked_and_enters_review():
         "messageId",
         "message-id",
         "messageID",
+        "messageIdentifier",
+        "MESSAGEID",
+        "messageid",
+        "messageId2",
+        "messageIDs2",
+        "messageUUID",
+        "messageGuid",
+        "messageuuid",
+        "messageguid",
+        "userId1",
+        "ｍｅｓｓａｇｅｉｄ",
         "message.id",
         "message/id",
         "replyTo",
+        "replyTo2",
         "reply-to",
         "userIds",
+        "apiKey1",
+        "url2",
+        "id1",
+        "key2",
         "idempotencyKey",
+        "customerid",
+        "orderid",
+        "walletid",
+        "paymentid",
+        "auctionid",
+        "documentid",
+        "jobid",
+        "orgkey",
     ],
 )
 def test_authority_selector_tokenization_locks_common_identifier_styles(name):
@@ -157,10 +183,25 @@ def test_authority_selector_tokenization_locks_common_identifier_styles(name):
 
 @pytest.mark.parametrize(
     "name",
-    ["valid", "grid", "monkey", "liquid", "keyboard", "hockey"],
+    ["keyboard", "keynote", "guidance", "uuidification", "identity"],
 )
-def test_selector_tokenization_does_not_match_identifier_substrings(name):
+def test_selector_tokenization_does_not_match_non_suffix_substrings(name):
     policy, confidence = infer_policy(Param(name, "integer"))
+
+    assert policy is Policy.TYPED_BOUNDED
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize("name", ["valid", "grid", "monkey", "liquid", "hockey"])
+def test_ambiguous_flatcase_selector_suffixes_fail_closed(name):
+    policy, confidence = infer_policy(Param(name, "integer"))
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
+
+
+def test_explicit_non_sink_unlocks_ambiguous_flatcase_selector_suffix():
+    policy, confidence = infer_policy(Param("valid", "boolean", sink=False))
 
     assert policy is Policy.TYPED_BOUNDED
     assert confidence is Confidence.HIGH
@@ -170,7 +211,9 @@ def test_selector_tokenization_does_not_match_identifier_substrings(name):
     "name",
     [
         "primaryRecipient",
+        "recipient1",
         "backup-account",
+        "account2",
         "settlement.IBAN",
         "callbackURL",
         "backup-uri",
@@ -265,6 +308,15 @@ def test_authority_sink_tokenization_does_not_match_substrings(name):
 
     assert policy is Policy.TYPED_BOUNDED
     assert confidence is Confidence.HIGH
+
+
+def test_long_uppercase_identifier_stays_within_a_linear_resource_budget():
+    started = time.perf_counter()
+
+    tokens = authority._identifier_tokens("A" * 16_000)
+
+    assert tokens == ("a" * 16_000,)
+    assert time.perf_counter() - started < 1.0
 
 
 def test_fullwidth_authority_name_normalizes_to_a_high_confidence_sink():
