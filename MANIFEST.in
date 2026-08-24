@@ -1,8 +1,8 @@
 recursive-include fixtures *.json *.md
 recursive-include benchmarks *.py *.json *.md
-recursive-include docs *.md *.json
+recursive-include docs *.md *.png
 recursive-include atlas *.md *.json
-recursive-include .github *.yml *.yaml *.md
+recursive-include .github *.yml
 include CHANGELOG.md CONTRIBUTING.md LANDSCAPE.md SECURITY.md action.yml
 include scripts/installed_wheel_smoke.py scripts/verify_release_artifacts.py
 include test_*.py

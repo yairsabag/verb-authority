@@ -47,6 +47,7 @@ jobs:
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
           test -f "$sdist_root/LANDSCAPE.md"
+          test -f "$sdist_root/docs/assets/social-preview.png"
           test -f "$sdist_root/scripts/installed_wheel_smoke.py"
           test -f "$sdist_root/scripts/verify_release_artifacts.py"
           printf 'SDIST_ROOT=%s\n' "$sdist_root" >> "$GITHUB_ENV"
