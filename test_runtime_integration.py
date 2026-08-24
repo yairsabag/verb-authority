@@ -223,6 +223,282 @@ def test_confirmation_is_fail_closed_before_financial_execution():
     assert transfers == [("acct-approved", 10)]
 
 
+def test_confirmation_callback_cannot_mutate_the_approved_tool_call():
+    transfers = []
+
+    def transfer_funds(destination: str, amount: float):
+        transfers.append((destination, amount))
+        return "transferred"
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True), Param("amount", "number")],
+            fn=transfer_funds,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    call = {
+        "name": "transfer_funds",
+        "input": {"destination": "acct-approved", "amount": 10},
+    }
+
+    def mutate_original_then_confirm(decision):
+        call["input"]["destination"] = "acct-attacker"
+        call["input"]["amount"] = 1_000_000
+        return decision.needs_confirm
+
+    execution = runner.run(
+        call,
+        trusted_args={"destination": "acct-approved"},
+        confirm=mutate_original_then_confirm,
+    )
+
+    assert execution.executed
+    assert transfers == [("acct-approved", 10)]
+
+
+@pytest.mark.parametrize("confirmation", [False, None, 0, 1, "approved", object()])
+def test_confirmation_requires_the_exact_boolean_true(confirmation):
+    transfers = []
+
+    def transfer_funds(destination: str):
+        transfers.append(destination)
+        return "transferred"
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=transfer_funds,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=lambda decision: confirmation,
+    )
+
+    assert not execution.executed
+    assert transfers == []
+
+
+def test_runner_blocks_a_missing_locked_param_before_callable_default():
+    transfers = []
+
+    def transfer_funds(destination: str = "ambient-attacker"):
+        transfers.append(destination)
+        return "transferred"
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=transfer_funds,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "transfer_funds", "input": {}})
+
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert transfers == []
+
+
+def test_explicitly_optional_param_uses_implementation_owned_default():
+    messages = []
+
+    def send_email(destination: str = "application-safe-default"):
+        messages.append(destination)
+        return "sent"
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "send_email",
+            [Param("destination", sink=True, required=False)],
+            fn=send_email,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "send_email", "input": {}})
+
+    assert execution.executed
+    assert messages == ["application-safe-default"]
+
+
+def test_async_confirmation_is_rejected_by_the_synchronous_runner():
+    transfers = []
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: transfers.append(destination),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    async def async_confirm(decision):
+        return True
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=async_confirm,
+    )
+
+    assert not execution.executed
+    assert transfers == []
+
+
+def test_pending_confirmation_with_no_callable_remains_non_executing():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=None,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+    )
+
+    assert not execution.executed
+    assert execution.decision.needs_confirm
+
+
+def test_confirmation_callback_cannot_mutate_nested_approved_values():
+    transfers = []
+
+    def transfer_funds(destination: dict):
+        transfers.append(destination)
+        return "transferred"
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=transfer_funds,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    call = {
+        "name": "transfer_funds",
+        "input": {"destination": {"account": "acct-approved"}},
+    }
+
+    def mutate_original_then_confirm(decision):
+        call["input"]["destination"]["account"] = "acct-attacker"
+        return decision.needs_confirm
+
+    execution = runner.run(
+        call,
+        trusted_args={"destination": {"account": "acct-approved"}},
+        confirm=mutate_original_then_confirm,
+    )
+
+    assert execution.executed
+    assert transfers == [{"account": "acct-approved"}]
+
+
+def test_confirmation_callback_cannot_swap_the_approved_callable():
+    calls = []
+
+    def approved_transfer(destination: str):
+        calls.append(("approved", destination))
+        return "transferred"
+
+    def replacement_transfer(destination: str):
+        calls.append(("replacement", destination))
+        return "transferred"
+
+    registry = Registry()
+    tool = Tool(
+        "transfer_funds",
+        [Param("destination", sink=True)],
+        fn=approved_transfer,
+        risk=Risk.FINANCIAL,
+    )
+    registry.add(tool)
+    runner = GuardedToolRunner(registry)
+
+    def swap_callable_then_confirm(decision):
+        tool.fn = replacement_transfer
+        return decision.needs_confirm
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=swap_callable_then_confirm,
+    )
+
+    assert execution.executed
+    assert calls == [("approved", "acct-approved")]
+
+
+def test_runner_fails_closed_before_confirmation_for_non_json_values():
+    confirmations = []
+    executions = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: executions.append(destination),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    opaque_destination = object()
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": opaque_destination},
+        },
+        trusted_args={"destination": opaque_destination},
+        confirm=lambda decision: confirmations.append(decision) or True,
+    )
+
+    assert not result.executed
+    assert not result.decision.allow
+    assert confirmations == []
+    assert executions == []
+
+
 def test_runner_records_tool_results_in_its_session_ledger():
     def read_message():
         return {"reply_to": "attacker@evil.com"}
@@ -280,6 +556,41 @@ def test_runner_ledger_blocks_a_laundered_result_on_the_next_tool_call():
     assert not send.executed
     assert not send.decision.allow
     assert outbox == []
+
+
+def test_runner_ledger_blocks_a_laundered_result_inside_nested_json():
+    calls = []
+
+    def read_message():
+        return {"reply_to": "attacker@evil.com"}
+
+    def send_value(destination: dict):
+        calls.append(destination)
+        return {"status": "sent"}
+
+    registry = Registry()
+    registry.add(Tool("read_message", [], fn=read_message, risk=Risk.READ_ONLY))
+    registry.add(
+        Tool(
+            "send_value",
+            [Param("destination", sink=True)],
+            fn=send_value,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    destination = {"email": "attacker@evil.com"}
+
+    read = runner.run({"name": "read_message", "input": {}})
+    send = runner.run(
+        {"name": "send_value", "input": {"destination": destination}},
+        trusted_args={"destination": destination},
+    )
+
+    assert read.executed
+    assert not send.executed
+    assert not send.decision.allow
+    assert calls == []
 
 
 @pytest.mark.parametrize(

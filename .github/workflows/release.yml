@@ -44,6 +44,7 @@ jobs:
       - name: Exercise installed commands outside the checkout
         working-directory: ${{ runner.temp }}
         run: |
+          python -m verb_authority
           verb-authority scan --help
           verb-authority-scan "${{ github.workspace }}/fixtures/avp9_nexus_financial_tool.json" \
             --controls "${{ github.workspace }}/fixtures/avp9_nexus_financial_controls.json" \
@@ -52,7 +53,15 @@ jobs:
             --fail-on-increase
           verb-authority-diff authority-report.json authority-report.json \
             --format json --output authority-diff.json
-          python -c 'from verb_authority import GuardedToolRunner, TrustedChoice, TrustedResolver; assert TrustedResolver([TrustedChoice("Dana", "dana@company.com", "directory")]).resolve("dana").resolved'
+          python - <<'PY'
+          from verb_authority import GuardedToolRunner, Param, Registry, Risk, Tool, TrustedChoice, TrustedResolver
+          resolution = TrustedResolver([TrustedChoice("Dana", "dana@company.com", "directory")]).resolve("dana")
+          calls = []
+          registry = Registry()
+          registry.add(Tool("send_email", [Param("to", "email"), Param("body")], fn=lambda to, body: calls.append((to, body)) or "sent", risk=Risk.WRITE))
+          result = GuardedToolRunner(registry).run({"name": "send_email", "input": {"to": resolution.value, "body": "hello"}}, trusted_args={"to": resolution.value})
+          assert resolution.resolved and result.executed and calls == [("dana@company.com", "hello")]
+          PY
           python -c 'import json; report = json.load(open("authority-report.json")); arguments = {item["name"]: item for item in report["declared_controls"]["tools"][0]["arguments"]}; assert arguments["bidWei"]["authority"] == "constrained"'
           python -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           python -m pip check

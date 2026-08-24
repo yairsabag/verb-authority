@@ -62,7 +62,7 @@ def _load_corpus(path: Path = CORPUS_PATH) -> dict[str, Any]:
 
 
 def _param(raw: dict[str, Any]) -> Param:
-    allowed = {"name", "type", "enum", "max_len", "cap", "sink"}
+    allowed = {"name", "type", "enum", "max_len", "cap", "required", "sink"}
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"unknown Param fields: {sorted(unknown)}")

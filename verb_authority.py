@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable
+import inspect
+import math
 import re
 import sys
 
@@ -191,6 +193,8 @@ class Param:
                               # A declaration always overrides the name-based guess, so
                               # overloaded names (path, query, template) stop being
                               # guessed from the verb and are stated by the tool instead.
+    required: bool = True     # appended to preserve the public positional API;
+                              # opt out only for a safe implementation-owned default
 
 
 @dataclass
@@ -370,16 +374,114 @@ class Decision:
     needs_confirm: bool = False
 
 
-def _type_ok(p: Param, v) -> bool:
-    if p.type in ("number", "integer"):
-        return isinstance(v, (int, float)) and (p.cap is None or v <= p.cap)
-    if p.type == "enum":
-        return p.enum is not None and v in p.enum
-    if p.type == "boolean":
-        return isinstance(v, bool)
-    if p.max_len is not None and isinstance(v, str) and len(v) > p.max_len:
+def _same_authority_value(proposed: Any, trusted: Any) -> bool:
+    """Compare authority-bearing values without Python's cross-type coercion.
+
+    Tool calls are normally JSON-shaped, but the public runtime API also
+    permits application-owned Python values. Built-in containers are compared
+    recursively with exact types; unsupported objects match only by identity.
+    This prevents values such as ``True`` and ``1`` (or an object with a
+    permissive ``__eq__``) from acquiring trusted provenance accidentally.
+    """
+
+    if type(proposed) is not type(trusted):
         return False
-    return True
+    if proposed is None:
+        return True
+    if type(proposed) in (str, bytes, bool, int):
+        return proposed == trusted
+    if type(proposed) is float:
+        return math.isfinite(proposed) and proposed == trusted
+    if type(proposed) in (list, tuple):
+        return len(proposed) == len(trusted) and all(
+            _same_authority_value(left, right)
+            for left, right in zip(proposed, trusted)
+        )
+    if type(proposed) is dict:
+        if not all(type(key) is str for key in proposed):
+            return proposed is trusted
+        if proposed.keys() != trusted.keys():
+            return False
+        return all(
+            _same_authority_value(proposed[key], trusted[key])
+            for key in proposed
+        )
+    return proposed is trusted
+
+
+def _snapshot_json_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Copy one provider-shaped value without invoking application methods."""
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("non-finite numbers are not valid tool-call JSON")
+        return value
+    if type(value) not in (list, dict):
+        raise TypeError("tool calls must contain only JSON-compatible values")
+
+    seen = set() if seen is None else seen
+    identity = id(value)
+    if identity in seen:
+        raise ValueError("cyclic tool-call values are not supported")
+    seen.add(identity)
+    try:
+        if type(value) is list:
+            return [_snapshot_json_value(item, seen) for item in value]
+        if not all(type(key) is str for key in value):
+            raise TypeError("tool-call object keys must be strings")
+        return {
+            key: _snapshot_json_value(item, seen)
+            for key, item in value.items()
+        }
+    finally:
+        seen.remove(identity)
+
+
+def _snapshot_tool_call(
+    tool_use: Any,
+    trusted_args: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Create the exact immutable-by-isolation inputs the runner will gate."""
+
+    if type(tool_use) is not dict:
+        raise TypeError("tool call must be a dictionary")
+    name = tool_use.get("name")
+    if type(name) is not str or not name:
+        raise ValueError("tool call must include a non-empty string name")
+    tool_input = tool_use.get("input")
+    if type(tool_input) is not dict:
+        raise TypeError("tool call input must be a dictionary")
+    if trusted_args is not None and type(trusted_args) is not dict:
+        raise TypeError("trusted_args must be a dictionary")
+    return (
+        {"name": name, "input": _snapshot_json_value(tool_input)},
+        None if trusted_args is None else _snapshot_json_value(trusted_args),
+    )
+
+
+def _type_ok(p: Param, v) -> bool:
+    if p.type == "number":
+        numeric = type(v) in (int, float)
+        finite = type(v) is int or (type(v) is float and math.isfinite(v))
+        return numeric and finite and (p.cap is None or v <= p.cap)
+    if p.type == "integer":
+        integer = type(v) is int or (
+            type(v) is float and math.isfinite(v) and v.is_integer()
+        )
+        return integer and (p.cap is None or v <= p.cap)
+    if p.type == "enum":
+        return p.enum is not None and any(
+            _same_authority_value(v, member) for member in p.enum
+        )
+    if p.type == "boolean":
+        return type(v) is bool
+    if p.type in ("string", "email", "uri"):
+        return type(v) is str and (
+            p.max_len is None or len(v) <= p.max_len
+        )
+    return False
 
 
 # Homograph / mixed-script detection.
@@ -403,22 +505,53 @@ def _has_mixed_script(v) -> bool:
     return bool(_LATIN.search(v) and _CONFUSABLE.search(v))
 
 
+def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
+    """Inspect built-in JSON containers for homographs without cycling."""
+
+    if isinstance(value, str):
+        return _has_mixed_script(value)
+    if type(value) not in (dict, list, tuple):
+        return False
+
+    seen = set() if seen is None else seen
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    try:
+        if type(value) is dict:
+            return any(
+                (isinstance(key, str) and _has_mixed_script(key))
+                or _contains_mixed_script(item, seen)
+                for key, item in value.items()
+            )
+        return any(_contains_mixed_script(item, seen) for item in value)
+    finally:
+        seen.remove(identity)
+
+
 def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) -> Decision:
     if tool not in reg.tools:
         return Decision(False, f"verb '{tool}' is not in the registry")
     by_name = {p.name: p for p in reg.tools[tool].params}
     pol = ps.policy[tool]
+    for name, param in by_name.items():
+        if param.required and name not in args:
+            return Decision(False, f"required param '{name}' is missing")
     for name, val in args.items():
         if name not in pol:
             return Decision(False, f"unknown param '{name}'")
         # Structural check first: a mixed-script value in a locked sink is a
         # homograph impersonation regardless of declared provenance.
-        if pol[name] is Policy.TRUSTED_FIXED and _has_mixed_script(val):
+        if pol[name] is Policy.TRUSTED_FIXED and _contains_mixed_script(val):
             return Decision(False, f"param '{name}' mixes scripts (homograph); rejected as impersonation")
         prov = provenance.get(name, "data")
         if pol[name] is Policy.TRUSTED_FIXED and prov == "data":
             return Decision(False, f"param '{name}' is a locked sink; data may not author it")
-        if pol[name] is Policy.TYPED_BOUNDED and not _type_ok(by_name[name], val):
+        if (
+            pol[name] in (Policy.TYPED_BOUNDED, Policy.OUTBOUND_PAYLOAD)
+            and not _type_ok(by_name[name], val)
+        ):
             return Decision(False, f"param '{name}' failed its type/bounds check")
     if tool in ps.confirm:
         return Decision(True, f"risk policy ({ps.risk[tool].value}); needs human confirmation",
@@ -493,9 +626,40 @@ class ProvenanceLedger:
     def is_tainted(self, value: Any) -> bool:
         """True if value is a tool-result value (exact), a risk-shaped value
         extracted from a blob (contained), or a CANONICAL match -- the same
-        risk-shaped value in disguise (homograph, uppercase, spaced)."""
-        if not isinstance(value, str):
+        risk-shaped value in disguise (homograph, uppercase, spaced).
+
+        JSON-shaped containers are checked recursively. A cycle is treated as
+        tainted so the direct dispatch API fails closed instead of recursing.
+        """
+
+        return self._is_tainted_value(value, set())
+
+    def _is_tainted_value(self, value: Any, seen: set[int]) -> bool:
+        if isinstance(value, str):
+            return self._is_tainted_string(value)
+        if type(value) not in (dict, list, tuple):
             return False
+
+        identity = id(value)
+        if identity in seen:
+            return True
+        seen.add(identity)
+        try:
+            if type(value) is dict:
+                return any(
+                    (
+                        isinstance(key, str)
+                        and _has_risk_shaped_form(key)
+                        and self._is_tainted_string(key)
+                    )
+                    or self._is_tainted_value(item, seen)
+                    for key, item in value.items()
+                )
+            return any(self._is_tainted_value(item, seen) for item in value)
+        finally:
+            seen.remove(identity)
+
+    def _is_tainted_string(self, value: str) -> bool:
         v = value.strip()
         if not v:
             return False
@@ -554,16 +718,43 @@ def _is_risk_shaped(v: str) -> bool:
     return bool(_EMAIL_RE.fullmatch(v) or _URL_RE.search(v))
 
 
-def _iter_strings(obj: Any):
-    """Yield all string leaves from a nested dict/list/str result."""
+def _has_risk_shaped_form(v: str) -> bool:
+    """True when the original or lexical canonical form is an email/URL."""
+
+    stripped = v.strip()
+    return _is_risk_shaped(stripped) or _is_risk_shaped(_canonical(stripped))
+
+
+def _iter_strings(obj: Any, seen: set[int] | None = None):
+    """Yield string value leaves and risk-shaped keys from a tool result.
+
+    Ordinary object keys (``email``, ``url``, ``content``) describe structure,
+    not tool-authored data. Recording all of them would taint every later
+    object with the same schema. A key that is itself an email address or URL,
+    however, can carry the same authority as a value and must be recorded.
+    """
     if isinstance(obj, str):
         yield obj
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            yield from _iter_strings(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            yield from _iter_strings(v)
+        return
+    if not isinstance(obj, (dict, list, tuple)):
+        return
+
+    seen = set() if seen is None else seen
+    identity = id(obj)
+    if identity in seen:
+        return
+    seen.add(identity)
+    try:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(key, str) and _has_risk_shaped_form(key):
+                    yield key
+                yield from _iter_strings(value, seen)
+        else:
+            for value in obj:
+                yield from _iter_strings(value, seen)
+    finally:
+        seen.remove(identity)
 
 
 # === drop-in dispatcher (the 5-line integration point) ===================
@@ -582,14 +773,28 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
     overriding `trusted_args` -- this is what stops a laundered tool result
     from reaching a locked sink. Returns a Decision.
     """
-    trusted_args = trusted_args or {}
-    tool, args = tool_use["name"], tool_use["input"]
+    if not isinstance(tool_use, dict):
+        return Decision(False, "tool call must be a dictionary")
+    tool = tool_use.get("name")
+    args = tool_use.get("input")
+    if not isinstance(tool, str) or not tool:
+        return Decision(False, "tool call must include a non-empty string name")
+    if not isinstance(args, dict):
+        return Decision(False, "tool call input must be a dictionary")
+    if trusted_args is None:
+        trusted_args = {}
+    if not isinstance(trusted_args, dict):
+        return Decision(False, "trusted_args must be a dictionary")
     provenance = {}
     for n in args:
         if ledger is not None and ledger.is_tainted(args.get(n)):
             provenance[n] = "data"            # ledger overrides any dev declaration
-        elif n in trusted_args and args.get(n) == trusted_args[n]:
-            provenance[n] = "trusted"
+        elif n in trusted_args:
+            try:
+                matches_trusted = _same_authority_value(args[n], trusted_args[n])
+            except Exception:
+                matches_trusted = False
+            provenance[n] = "trusted" if matches_trusted else "data"
         else:
             provenance[n] = "data"
     return gate(reg, ps, tool, args, provenance)
@@ -632,25 +837,40 @@ class GuardedToolRunner:
         trusted_args: dict | None = None,
         confirm: Callable[[Decision], bool] | None = None,
     ) -> ExecutionResult:
+        try:
+            approved_call, approved_trusted_args = _snapshot_tool_call(
+                tool_use,
+                trusted_args,
+            )
+        except Exception:
+            return ExecutionResult(
+                Decision(False, "tool call could not be snapshotted safely"),
+                executed=False,
+            )
         decision = dispatch(
             self.registry,
             self.policy_set,
-            tool_use,
-            trusted_args=trusted_args,
+            approved_call,
+            trusted_args=approved_trusted_args,
             ledger=self.ledger,
         )
         if not decision.allow:
             return ExecutionResult(decision, executed=False)
-        if decision.needs_confirm and (
-            confirm is None or not confirm(decision)
-        ):
-            return ExecutionResult(decision, executed=False)
 
-        tool_name = tool_use["name"]
+        tool_name = approved_call["name"]
         implementation = self.registry.tools[tool_name].fn
+        if decision.needs_confirm:
+            if confirm is None:
+                return ExecutionResult(decision, executed=False)
+            confirmation = confirm(decision)
+            if inspect.iscoroutine(confirmation):
+                confirmation.close()
+            if confirmation is not True:
+                return ExecutionResult(decision, executed=False)
         if implementation is None:
             raise RuntimeError(f"verb '{tool_name}' has no registered implementation")
-        result = implementation(**tool_use["input"])
+
+        result = implementation(**approved_call["input"])
         self.ledger.record_result(result)
         return ExecutionResult(decision, executed=True, result=result)
 
@@ -659,7 +879,9 @@ class GuardedToolRunner:
 def demo() -> None:
     reg = Registry()
     reg.add(Tool("send_email", [
-        Param("to", "email"), Param("subject", "string"), Param("body", "string")
+        Param("to", "email"),
+        Param("subject", "string", required=False),
+        Param("body", "string"),
     ], risk=Risk.WRITE))
     reg.add(Tool("search_web", [
         Param("query", "string"), Param("num_results", "integer")

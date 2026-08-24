@@ -28,12 +28,13 @@ disabling the entire `send_email` tool after untrusted content enters context.
 
 This is a research-grade boundary, not a claim that prompt injection is
 impossible. The optional ledger catches exact reuse, emails and URLs extracted
-from returned text, and several lexical disguises. It does **not** follow a
-value through semantic reconstruction—for example, turning “attacker at evil
-dot com” into an address. A developer can also defeat the guarantee by marking
-untrusted input as trusted without using the ledger. Systems such as CaMeL and
-FIDES use interpreter- or planner-level information-flow tracking to cover that
-deeper boundary.
+from returned text, nested JSON value leaves or risk-shaped object keys, and
+several lexical disguises. It does **not** follow a value through semantic
+reconstruction—for example,
+turning “attacker at evil dot com” into an address. A developer can also defeat
+the guarantee by marking untrusted input as trusted without using the ledger.
+Systems such as CaMeL and FIDES use interpreter- or planner-level
+information-flow tracking to cover that deeper boundary.
 
 ## Install
 
@@ -41,14 +42,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.6"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.7"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.6 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6)
+The [beta.7 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.7)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
@@ -108,6 +109,19 @@ It calls `dispatch` immediately before the registered function, fails closed
 when required confirmation is unavailable, and records successful results in
 one session ledger. Provider-specific calls still need to be normalized to the
 small `name`/`input` shape shown above.
+
+The runner accepts plain built-in JSON-shaped values (`dict`, `list`, strings,
+finite numbers, booleans, and `None`). Normalize framework containers before
+calling it. It snapshots the tool call and trusted arguments and captures the
+registered callable before asking for confirmation, then executes exactly that
+approved snapshot. A synchronous confirmation callback approves only by
+returning the exact boolean `True`; mutating the original call cannot rewrite
+what runs. Malformed or unsupported runtime values fail closed.
+
+Runtime parameters are required by default. Set `Param(..., required=False)`
+only when omission intentionally selects a safe implementation-owned default.
+Free outbound payloads may be authored by data, but they still must satisfy
+their declared runtime type and bounds such as `max_len`.
 
 When a model supplies a human label such as a contact name, resolve that label
 against an application-owned catalog first. `TrustedResolver` implements only
@@ -317,7 +331,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.6
+- uses: yairsabag/verb-authority@v0.10.0-beta.7
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -350,13 +364,15 @@ The project is one importable module with five cooperating pieces:
   and require review plus confirmation. A complete-token name heuristic is
   reported only as caller-mutable evidence; it never establishes authority.
 - **Optional provenance ledger.** Values returned by tools are recorded as
-  untrusted. Exact reuse, contained email/URL extraction, and canonicalized
-  lexical variants are forced back to data provenance even if
-  `trusted_args` was wired incorrectly.
+  untrusted. Exact reuse, nested JSON value leaves and canonical risk-shaped
+  object keys, contained email/URL extraction, and canonicalized lexical
+  variants are forced back to data provenance even if `trusted_args` was wired
+  incorrectly. Mixed-script homographs are rejected recursively in locked JSON
+  values.
 
-The gate rejects unknown tools and unknown arguments. It does not replace your
-tool schema's required-field validation or the tool implementation's own
-authorization checks.
+The gate rejects unknown tools and unknown arguments and enforces the runtime
+registry's explicit `Param.required` flags. It does not replace complete JSON
+Schema validation or the tool implementation's own authorization checks.
 
 ## Integrating a tool loop
 
@@ -398,8 +414,9 @@ ledger.record_result(result)
 
 Thread one ledger through the session and record each result immediately after
 the tool returns. The ledger is a containment layer, not sound taint tracking:
-it recognizes values and selected lexical forms, not arbitrary transformations
-or control flow.
+it recognizes values (including risk-shaped keys and value leaves nested in
+JSON) and selected lexical forms, not arbitrary transformations or control
+flow.
 
 ## Evidence and demos
 
@@ -491,7 +508,7 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.6 is the public beta for the
+v0.9.0 is the latest stable release. v0.10.0-beta.7 is the public beta for the
 local schema scanner, control evidence, Authority Diff, and Tool Authority
 Atlas. This remains early, research-grade work and is not described as
 production-ready. The schema scanner has been externally exercised. The

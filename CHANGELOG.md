@@ -5,6 +5,8 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.7]
+
 ### Runtime integration
 
 - Add a synchronous guarded runner that enforces the decision immediately
@@ -19,9 +21,30 @@ dates are added when a GitHub release is actually published.
 - Pin the approved-choice control-flow limit in documentation and regression
   tests: untrusted content may still influence which already approved catalog
   entry is selected even though it cannot author the resulting destination.
+- Snapshot plain built-in JSON-shaped tool inputs and capture the registered
+  callable before confirmation, so callback-side mutation cannot change the
+  call that passed the gate.
+- Compare trusted values recursively with exact types instead of Python's
+  coercive equality, preventing `True`, `1`, and `1.0` from sharing authority;
+  enforce finite number, integer, boolean, enum, and bounded-string types.
+- Fail closed on malformed normalized calls and on values outside the runner's
+  plain built-in JSON-shaped boundary.
+- Make runtime parameters required by default with an explicit
+  `required=False` opt-out for safe implementation-owned defaults; accept a
+  confirmation callback only when it returns the exact boolean `True`.
+- Enforce declared type and length bounds on outbound payloads without
+  changing their data-authorable authority.
+- Propagate ledger taint through nested JSON value leaves and canonical
+  risk-shaped object keys; reject mixed-script homographs recursively inside
+  locked JSON values; and fail closed on cyclic containers in direct dispatch.
 - Add a source-pinned, non-executing AgentDojo schema exporter and record the
   first static scan across all four public tool suites (74 suite exposures,
   118 parameters) without presenting it as an attack or utility benchmark.
+
+### Distribution
+
+- Exercise the installed wheel through the full trusted resolver, gate, and
+  registered-callable path in CI and release smoke tests.
 
 ### Documentation
 
@@ -169,7 +192,8 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.6...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.7...HEAD
+[0.10.0-beta.7]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.7
 [0.10.0-beta.6]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6
 [0.10.0-beta.5]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5
 [0.10.0-beta.4]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4

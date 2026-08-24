@@ -9,7 +9,7 @@
         "name": "send_email",
         "params": [
           {"name": "to", "type": "email"},
-          {"name": "subject", "type": "string"},
+          {"name": "subject", "type": "string", "required": false},
           {"name": "body", "type": "string", "max_len": 10000}
         ]
       },
