@@ -70,6 +70,7 @@ jobs:
             --fail-on-increase
           verb-authority-diff authority-report.json authority-report.json \
             --format json --output authority-diff.json
+          python -c 'from verb_authority import GuardedToolRunner, TrustedChoice, TrustedResolver; assert TrustedResolver([TrustedChoice("Dana", "dana@company.com", "directory")]).resolve("dana").resolved'
           python -c 'import json; assert json.load(open("authority-report.json"))["summary"]["tools"] == 10'
           python -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           python -m pip check

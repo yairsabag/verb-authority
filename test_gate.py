@@ -201,6 +201,14 @@ def test_dispatch_allows_when_arg_matches_trusted():
     d = dispatch(reg, ps, tool_use, trusted_args={"to":"alice@company.com"})
     assert d.allow
 
+def test_dispatch_does_not_promote_missing_trusted_key_when_value_is_none():
+    # dict.get() used to make a missing trusted key compare equal to a proposed
+    # None value. Trust requires both explicit key membership and equality.
+    reg, ps = _setup()
+    tool_use = {"name":"send_email", "input":{"to":None,"body":"x"}}
+    d = dispatch(reg, ps, tool_use, trusted_args={})
+    assert not d.allow and "locked sink" in d.reason
+
 # --- provenance ledger (partial chain-propagation) --------------------------
 
 def test_ledger_blocks_laundered_tool_result():

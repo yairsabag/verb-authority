@@ -1,1 +1,3 @@
 recursive-include fixtures *.json *.md
+recursive-include benchmarks *.py *.json *.md
+include trusted_choice_demo.py

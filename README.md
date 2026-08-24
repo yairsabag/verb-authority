@@ -14,6 +14,18 @@ tool-call arguments—without classifying prompts.
 > enforced before the tool runs; the gate does not try to decide whether a
 > prompt is malicious.
 
+> **Control-flow boundary:** Verb Authority constrains who may author a
+> sensitive argument's value. It does not prevent untrusted content from
+> influencing whether a tool is called or which member of an already approved
+> set is selected. If an untrusted email says “send this to Dana” and Dana is
+> in the application's trusted contact directory, the current value-level gate
+> can allow the directory-supplied address. Preventing that control-flow
+> influence requires planner- or session-level information-flow control.
+
+The per-argument boundary is the intended utility tradeoff: an application can
+lock `to` while still allowing untrusted text to fill `body`, instead of
+disabling the entire `send_email` tool after untrusted content enters context.
+
 This is a research-grade boundary, not a claim that prompt injection is
 impossible. The optional ledger catches exact reuse, emails and URLs extracted
 from returned text, and several lexical disguises. It does **not** follow a
@@ -88,6 +100,63 @@ print(decision.reason)  # param 'to' is a locked sink; data may not author it
 Call `dispatch` immediately before tool execution. Execute only when
 `decision.allow` is true, and request human approval when
 `decision.needs_confirm` is true.
+
+## Execute tools and resolve trusted choices
+
+`GuardedToolRunner` is the synchronous integration point for a real tool loop.
+It calls `dispatch` immediately before the registered function, fails closed
+when required confirmation is unavailable, and records successful results in
+one session ledger. Provider-specific calls still need to be normalized to the
+small `name`/`input` shape shown above.
+
+When a model supplies a human label such as a contact name, resolve that label
+against an application-owned catalog first. `TrustedResolver` implements only
+an exact `key -> (value, evidence)` lookup after trimming and case-folding. It
+does not perform fuzzy matching, authorization, endpoint policy, or path/prefix
+checks. Unknown and ambiguous keys remain unresolved.
+
+```python
+from verb_authority import (
+    GuardedToolRunner, Param, Registry, Risk, Tool,
+    TrustedChoice, TrustedResolver,
+)
+
+contacts = TrustedResolver([
+    TrustedChoice(
+        "Dana",
+        "dana@company.com",
+        "authenticated company directory: contact-17",
+    ),
+])
+
+registry = Registry()
+registry.add(Tool(
+    "send_email",
+    [Param("to", "email"), Param("body", "string")],
+    fn=send_email,
+    risk=Risk.WRITE,
+))
+runner = GuardedToolRunner(registry)
+
+resolution = contacts.resolve(model_selected_contact)
+if not resolution.resolved:
+    return {"error": resolution.status.value}
+
+tool_call = {
+    "name": "send_email",
+    "input": {"to": resolution.value, "body": model_generated_body},
+}
+execution = runner.run(
+    tool_call,
+    trusted_args={"to": resolution.value},
+)
+```
+
+The application must populate the catalog from a genuinely trusted source;
+the `evidence` string is retained for review but is not verified by Verb
+Authority. The lookup key may itself be influenced by untrusted content. The
+control-flow example at the top of this page is therefore an explicit product
+boundary, not an inference that the request was user-authorized.
 
 ## Scan your tool schemas locally
 
@@ -350,6 +419,7 @@ python chain_demo.py     # laundering without vs. with the ledger
 python adversarial.py    # known successes and failures by attack family
 python adaptive.py       # adaptive resistance depth and first observed break
 python capability_demo.py
+python trusted_choice_demo.py  # trusted lookup -> gate -> actual local function
 ```
 
 The adaptive evaluation found a mixed-script homograph bypass in the earlier
@@ -371,6 +441,10 @@ This project deliberately publishes its failure modes:
 - **Semantic rewrites are not tracked.** The ledger matches exact values,
   contained risk-shaped strings, and canonicalized lexical variants. It cannot
   track a value the model interprets and reconstructs.
+- **Approved-choice control flow is not tracked.** Untrusted content can still
+  influence whether a tool runs or which already approved catalog entry is
+  selected. The gate constrains the resulting value; it does not establish
+  that the user's intent selected that key.
 - **Integrity, not confidentiality.** The gate controls whether untrusted data
   can author sensitive arguments. It does not track secrets or stop private
   data from leaving through an otherwise authorized channel.
@@ -401,7 +475,8 @@ existing tool loop.
 The closest structural approaches make different tradeoffs:
 
 - **CaMeL** tracks taint through a custom interpreter.
-- **FIDES** tracks integrity and confidentiality through a dedicated planner.
+- **FIDES** propagates content-level integrity and confidentiality labels
+  through Agent Framework middleware and enforces policy at sensitive tools.
 - **Progent** enforces a policy over tool calls; it is complementary to this
   project's value-provenance question.
 - **NeuroTaint** performs semantic taint analysis offline rather than blocking
@@ -419,7 +494,9 @@ those deeper systems rather than this module.
 v0.9.0 is the latest stable release. v0.10.0-beta.6 is the public beta for the
 local schema scanner, control evidence, Authority Diff, and Tool Authority
 Atlas. This remains early, research-grade work and is not described as
-production-ready. See
+production-ready. The schema scanner has been externally exercised. The
+runtime gate is extensively tested locally and is now entering integration
+validation. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 

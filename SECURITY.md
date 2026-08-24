@@ -23,5 +23,6 @@ experiments are not maintained as separate supported versions.
 
 Never include live secrets, customer data, or third-party targets. Reports are
 evaluated against the documented boundary: semantic rewrites, confidentiality
-tracking, and output-side manipulation are currently known limitations, though
-new reductions or practical examples are still useful.
+tracking, approved-choice control-flow influence, and output-side manipulation
+are currently known limitations, though new reductions or practical examples
+are still useful.

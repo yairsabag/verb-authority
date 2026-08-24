@@ -5,7 +5,8 @@ PRINCIPLE: data selects, never authors.
 We do not classify whether content is "malicious". We constrain which ACTIONS
 run and which PARAMETERS untrusted data may fill. Under the gate's provenance
 model, data cannot author parameters whose policy is trusted_fixed; semantic
-rewrites remain outside this drop-in gate's tracking boundary.
+rewrites and influence over which already-approved value is selected remain
+outside this drop-in gate's tracking boundary.
 
 Built on the security model behind Google DeepMind's CaMeL
 ("Defeating Prompt Injections by Design", arXiv:2503.18813, Apache-2.0).
@@ -15,7 +16,7 @@ unsure, and scales scrutiny to each verb's risk.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 import re
 import sys
 
@@ -30,6 +31,113 @@ class Policy(str, Enum):
 class Confidence(str, Enum):
     HIGH = "high"
     UNCERTAIN = "uncertain"
+
+
+# === trusted choice resolution ============================================
+class ResolutionStatus(str, Enum):
+    """Outcome of an exact lookup in an application-owned trusted catalog."""
+
+    RESOLVED = "resolved"
+    NOT_FOUND = "not_found"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class TrustedChoice:
+    """One application-owned key/value pair and its evidence label.
+
+    The application, not the model, must construct these entries from a
+    trusted source such as an authenticated contact directory. `evidence` is
+    retained for logging and review; Verb Authority does not verify the claim.
+    """
+
+    key: str
+    value: Any
+    evidence: str
+
+
+@dataclass(frozen=True)
+class TrustedResolution:
+    """A fail-closed result returned by :class:`TrustedResolver`."""
+
+    requested_key: str
+    status: ResolutionStatus
+    value: Any = None
+    evidence: str | None = None
+    matches: int = 0
+
+    @property
+    def resolved(self) -> bool:
+        return self.status is ResolutionStatus.RESOLVED
+
+
+def _normalize_choice_key(key: str) -> str:
+    """Conservative matching for human labels: trim and case-fold only."""
+
+    return key.strip().casefold()
+
+
+class TrustedResolver:
+    """Resolve a key to a canonical value from a closed trusted catalog.
+
+    This primitive deliberately does not perform fuzzy matching, path/prefix
+    policy, endpoint validation, or authorization. It only implements
+    ``key -> (value, evidence)``. Unknown and ambiguous keys fail closed.
+
+    The selected *value* comes from the trusted catalog, never from the lookup
+    key. The key may still have been influenced by untrusted content; that is
+    control-flow influence and remains outside this value-level boundary.
+    """
+
+    def __init__(
+        self,
+        choices: Iterable[TrustedChoice],
+        *,
+        normalize_key: Callable[[str], str] | None = None,
+    ) -> None:
+        self._normalize_key = normalize_key or _normalize_choice_key
+        self._choices: dict[str, list[TrustedChoice]] = {}
+        for choice in choices:
+            if not isinstance(choice, TrustedChoice):
+                raise TypeError("choices must contain TrustedChoice instances")
+            if not isinstance(choice.key, str) or not choice.key.strip():
+                raise ValueError("trusted choice keys must be non-empty strings")
+            if not isinstance(choice.evidence, str) or not choice.evidence.strip():
+                raise ValueError("trusted choice evidence must be non-empty text")
+            if choice.value is None:
+                raise ValueError("trusted choice values must not be None")
+            normalized = self._normalize_key(choice.key)
+            if not isinstance(normalized, str) or not normalized:
+                raise ValueError(
+                    "normalized trusted choice keys must be non-empty strings"
+                )
+            self._choices.setdefault(normalized, []).append(choice)
+
+    def resolve(self, key: str) -> TrustedResolution:
+        """Return one trusted catalog value, or an explicit closed failure."""
+
+        if not isinstance(key, str) or not key.strip():
+            return TrustedResolution(str(key), ResolutionStatus.NOT_FOUND)
+        normalized = self._normalize_key(key)
+        if not isinstance(normalized, str) or not normalized:
+            return TrustedResolution(key, ResolutionStatus.NOT_FOUND)
+        matches = self._choices.get(normalized, [])
+        if not matches:
+            return TrustedResolution(key, ResolutionStatus.NOT_FOUND)
+        if len(matches) != 1:
+            return TrustedResolution(
+                key,
+                ResolutionStatus.AMBIGUOUS,
+                matches=len(matches),
+            )
+        choice = matches[0]
+        return TrustedResolution(
+            key,
+            ResolutionStatus.RESOLVED,
+            value=choice.value,
+            evidence=choice.evidence,
+            matches=1,
+        )
 
 
 # The risk tiers below are inspired by the tiered-risk access model proposed in
@@ -480,11 +588,71 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
     for n in args:
         if ledger is not None and ledger.is_tainted(args.get(n)):
             provenance[n] = "data"            # ledger overrides any dev declaration
-        elif args.get(n) == trusted_args.get(n):
+        elif n in trusted_args and args.get(n) == trusted_args[n]:
             provenance[n] = "trusted"
         else:
             provenance[n] = "data"
     return gate(reg, ps, tool, args, provenance)
+
+
+@dataclass
+class ExecutionResult:
+    """The policy decision and whether the underlying tool actually ran."""
+
+    decision: Decision
+    executed: bool
+    result: Any = None
+
+
+class GuardedToolRunner:
+    """Execute registered callables only after Verb Authority allows the call.
+
+    The runner is intentionally synchronous and provider-neutral. Applications
+    normalize a provider tool call to ``{"name": ..., "input": ...}``, then
+    call :meth:`run`. A confirmation callback is required for any decision with
+    ``needs_confirm=True``; without one, the runner does not execute the tool.
+    Successful tool results are recorded in the session ledger automatically.
+    """
+
+    def __init__(
+        self,
+        registry: Registry,
+        policy_set: PolicySet | None = None,
+        *,
+        ledger: ProvenanceLedger | None = None,
+    ) -> None:
+        self.registry = registry
+        self.policy_set = policy_set or build_policy(registry)
+        self.ledger = ledger if ledger is not None else ProvenanceLedger()
+
+    def run(
+        self,
+        tool_use: dict,
+        *,
+        trusted_args: dict | None = None,
+        confirm: Callable[[Decision], bool] | None = None,
+    ) -> ExecutionResult:
+        decision = dispatch(
+            self.registry,
+            self.policy_set,
+            tool_use,
+            trusted_args=trusted_args,
+            ledger=self.ledger,
+        )
+        if not decision.allow:
+            return ExecutionResult(decision, executed=False)
+        if decision.needs_confirm and (
+            confirm is None or not confirm(decision)
+        ):
+            return ExecutionResult(decision, executed=False)
+
+        tool_name = tool_use["name"]
+        implementation = self.registry.tools[tool_name].fn
+        if implementation is None:
+            raise RuntimeError(f"verb '{tool_name}' has no registered implementation")
+        result = implementation(**tool_use["input"])
+        self.ledger.record_result(result)
+        return ExecutionResult(decision, executed=True, result=result)
 
 
 # === demo =================================================================

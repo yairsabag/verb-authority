@@ -5,6 +5,24 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Runtime integration
+
+- Add a synchronous guarded runner that enforces the decision immediately
+  before a registered callable, fails closed when confirmation is unavailable,
+  and records successful results in the session ledger.
+- Require explicit trusted-map membership before an argument can be promoted;
+  a proposed `None` no longer matches an absent trusted key through two
+  `dict.get()` defaults.
+- Add a minimal trusted-choice resolver for exact
+  `key -> (value, evidence)` lookups, with explicit not-found and ambiguous
+  outcomes and no fuzzy, path, endpoint, or authorization policy.
+- Pin the approved-choice control-flow limit in documentation and regression
+  tests: untrusted content may still influence which already approved catalog
+  entry is selected even though it cannot author the resulting destination.
+- Add a source-pinned, non-executing AgentDojo schema exporter and record the
+  first static scan across all four public tool suites (74 suite exposures,
+  118 parameters) without presenting it as an attack or utility benchmark.
+
 ### Documentation
 
 - Add a reproducible external-beta case study covering the beta.4 name-derived

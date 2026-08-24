@@ -32,14 +32,15 @@ model can't talk its way past. Every system below is a version of this.
 |---|---|---|---|---|
 | **CaMeL** (DeepMind) | Custom Python interpreter around the agent | Full data-flow taint through arbitrary control flow | Rewrite the agent loop into the interpreter | High — tracks transforms |
 | **PACT** | Runtime monitor before tools | Semantic argument roles + cross-step value provenance | Define trust contracts and supply or infer provenance | Deterministic enforcement; deployment depends on contract/provenance fidelity |
-| **FIDES** (Microsoft) | A planner that runs the agent | Confidentiality **and** integrity labels through execution | Adopt the planner | High — formal IFC |
+| **FIDES** (Microsoft) | Experimental Agent Framework middleware | Content-level confidentiality **and** integrity labels propagated to sensitive tools | Adopt the framework middleware and its security-aware components | Formal IFC model; current integration is experimental |
 | **Progent** (UC Berkeley) | A module between agent and tools | A policy (DSL) over tool names + arguments | Minimal — wraps the loop; you write/generate policies | Deterministic on the *call*, not the value's origin |
 | **NeuroTaint** | Offline audit of execution traces | Semantic taint incl. transformation + causal influence | Runs offline, post-hoc | High — semantic, but not a runtime gate |
 | **verb-authority** (this) | A gate before each tool call | Per-call provenance (trusted vs data) + verbatim/contained tool-result taint | Minimal — ~5 lines, policy auto-inferred | Partial — verbatim + extraction; **not** transforms |
 
 Reference links: [CaMeL](https://arxiv.org/abs/2503.18813) ·
 [PACT](https://arxiv.org/abs/2605.11039) ·
-[FIDES](https://arxiv.org/abs/2505.23643) ·
+[FIDES paper](https://arxiv.org/abs/2505.23643) ·
+[FIDES framework integration](https://devblogs.microsoft.com/agent-framework/fides/) ·
 [Progent](https://arxiv.org/abs/2504.11703) ·
 [NeuroTaint](https://arxiv.org/abs/2604.23374) ·
 [Operationalizing CaMeL](https://arxiv.org/abs/2505.22852).
@@ -71,7 +72,12 @@ the agent *rewrites or obfuscates* slips (documented in Known Limitations).
 That means it can block an injection from authoring an action, but it does **not**
 prevent exfiltration of genuinely private data through a legitimate channel. If
 you need confidentiality tracking, you need FIDES (or CaMeL), not this. (This gap
-was pointed out by a reviewer and is now explicit in Known Limitations.)
+was pointed out by a reviewer and is now explicit in Known Limitations.) FIDES
+propagates labels at the content/framework level and enforces them when a
+sensitive tool is about to run. Verb Authority's narrower distinction is
+per-argument: it can lock `to` while leaving `body` data-fillable. That preserves
+more utility in this specific shape, but it also misses control-flow influence
+among already approved recipients—the explicit “send to Dana” boundary.
 
 **vs. Progent.** Progent enforces a *policy over the call* — is `send_email` with these
 arguments permitted by the rules? It is deterministic, drop-in, and resilient to
