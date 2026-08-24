@@ -5,7 +5,11 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
-## [0.10.0-beta.7]
+## [0.10.0-beta.8]
+
+`0.10.0-beta.7` was an unpublished release candidate. It was withheld after
+an independent pre-release audit found runtime and diff-contract blockers; no
+tag or GitHub release was created, and the version is intentionally not reused.
 
 ### Runtime integration
 
@@ -21,30 +25,113 @@ dates are added when a GitHub release is actually published.
 - Pin the approved-choice control-flow limit in documentation and regression
   tests: untrusted content may still influence which already approved catalog
   entry is selected even though it cannot author the resulting destination.
+- State the separate compositional-authority boundary: independently valid
+  recipient, account, amount, and purpose values do not establish that their
+  action-instance combination is authorized; surrounding policy must enforce
+  cross-argument and sequence rules.
 - Snapshot plain built-in JSON-shaped tool inputs and capture the registered
   callable before confirmation, so callback-side mutation cannot change the
   call that passed the gate.
+- Bind confirmation to an immutable request containing canonical
+  `arguments_json`, effective and declared risk evidence, conflict state,
+  registration and executable identities, ledger version, and an action
+  identity. Serialize arguments as canonical ASCII-escaped JSON for stable
+  transport. A trusted confirmation renderer must neutralize bidi/control
+  characters and escape its output context; without one, display the canonical
+  ASCII-escaped JSON verbatim rather than decoded fields.
+  The public executable identity is an address-free code/signature digest, and
+  the action identity is a content commitment rather than a nonce or replay
+  control.
+  Visible registered metadata/policy changes, callable object/code replacement,
+  and confirmation-time ledger drift deny execution instead of applying a
+  stale decision; configuration drift requires a new runner. Derived risk,
+  evidence, conflict, and minimum-confirmation state cannot be weakened in a
+  caller-supplied `PolicySet`; only derived parameter-review entries may be
+  overridden, while confirmation may be made stricter. Ledger stores are
+  private exact built-ins, omitted from `repr`, and bound against replacement.
+  Callable globals,
+  closure contents, and bound-instance state remain trusted application state,
+  not semantically frozen action material.
 - Compare trusted values recursively with exact types instead of Python's
   coercive equality, preventing `True`, `1`, and `1.0` from sharing authority;
-  enforce finite number, integer, boolean, enum, and bounded-string types.
+  enforce finite number, integer, boolean, enum, and bounded-string checks for
+  every authority policy, including `trusted_fixed`.
 - Fail closed on malformed normalized calls and on values outside the runner's
-  plain built-in JSON-shaped boundary.
-- Make runtime parameters required by default with an explicit
-  `required=False` opt-out for safe implementation-owned defaults; accept a
-  confirmation callback only when it returns the exact boolean `True`.
+  plain built-in JSON-shaped boundary. Bound paths to 64 list/dict containers
+  and integers to 512 decimal digits before confirmation serialization;
+  overdeep or oversized tool results become `unsupported_result` after
+  invocation rather than escaping as encoder/recursion exceptions.
+- Require every registered runtime parameter to be explicit. The application
+  must materialize provider or callable defaults before gating and must also
+  place protected materialized values in `trusted_args`; `required=False`
+  remains beta schema/API metadata and no longer authorizes implicit defaults.
+- Validate callable signatures against the registration, reject coroutine and
+  async-generator implementations before invocation, reject awaitable results,
+  safely close native coroutine results without invoking arbitrary awaitable
+  hooks, and require successful results to be plain finite JSON.
+  Limit beta.8 implementations to exact plain Python functions; reject forged
+  signature metadata, bound methods, callable objects/classes, builtins, and
+  partials whose hidden state is not represented by declared arguments.
+  Add `invoked` and `contract_violation` to `ExecutionResult` so a callable-side
+  contract failure is distinct from successful execution and ledger recording.
+  Convert ordinary implementation exceptions to a generic
+  `invocation_exception` result while leaving confirmation-callback exceptions
+  and process-control `BaseException` subclasses to propagate.
 - Enforce declared type and length bounds on outbound payloads without
   changing their data-authorable authority.
-- Propagate ledger taint through nested JSON value leaves and canonical
-  risk-shaped object keys; reject mixed-script homographs recursively inside
-  locked JSON values; and fail closed on cyclic containers in direct dispatch.
+- Propagate ledger taint through exact type-tagged JSON scalar leaves, every
+  exact object key, and exact list/object containers including empty values;
+  keep non-exact containment/canonical matching restricted to risk-shaped
+  strings; recognize anchored HTTP(S),
+  FTP, WS(S), protocol-relative, and `www.` URI forms; cover Unicode Cyrillic
+  supplement/extended characters after NFKC normalization; reject mixed-script
+  homographs recursively inside locked JSON; and fail closed on cyclic or
+  polymorphic containers.
 - Add a source-pinned, non-executing AgentDojo schema exporter and record the
   first static scan across all four public tool suites (74 suite exposures,
   118 parameters) without presenting it as an attack or utility benchmark.
 
 ### Distribution
 
-- Exercise the installed wheel through the full trusted resolver, gate, and
-  registered-callable path in CI and release smoke tests.
+- Build the wheel from the extracted source distribution, run the complete
+  suite from that extracted source, and copy the installed-wheel smoke outside
+  the checkout so source imports cannot mask missing package contents.
+- Exercise all audited pre-release blocker families from the installed wheel,
+  plus report-v2 migration rejection and diff
+  `--fail-on-increase`/`--fail-on-review` thresholds; assert the installed
+  version and module locations.
+- Fail a release before checksumming or upload unless its tag normalizes to the
+  project version and exactly one wheel plus one source distribution carry the
+  expected name and version; refuse unexpected local or pre-existing release
+  assets.
+- Include the research landscape, installed-wheel audit smoke, and release
+  identity verifier in the source distribution.
+
+### Scanner and Authority Diff
+
+- Introduce report format v3 and diff format v2. Named reports now retain exact
+  `maximum` and `maxLength` values plus enum-member SHA-256 fingerprints, and
+  their global, per-tool, and per-argument schema-material fingerprints commit
+  to full validation material after annotations are removed. Separate
+  unmodeled-schema fingerprints keep unsupported validation changes visible.
+- Treat numeric/string-bound and enum widening or removal as authority
+  increases, tightening as protection, and incomparable enum replacements as
+  review. Unsupported or ambiguously ordered schema changes still require
+  independent review; Authority Diff is not a complete JSON Schema checker.
+- Add an independent diff `--fail-on-review` threshold and expose it through
+  the composite action as `fail_on_review`. Both action thresholds default to
+  fail closed and validate their `true`/`false` inputs independently.
+- Refuse legacy report v2 inputs because their omitted constraints cannot be
+  migrated safely; users must rescan the original schemas under v3.
+- Make redacted v3 reports shape-only for these constraints: presence and enum
+  count are retained, while exact numeric values, enum hashes, and exact schema
+  material fingerprints are omitted. Named enum and schema hashes omit raw
+  values but remain dictionary-guessable and correlatable for low-entropy
+  material.
+- Replace the ambiguous `examples_or_values_included` privacy field with
+  explicit examples/defaults/runtime-value booleans and publish whether schema
+  material and unmodeled-schema fingerprints are present, dictionary-guessable,
+  and scoped to full named validation material or redacted modeled shape.
 
 ### Documentation
 
@@ -192,8 +279,8 @@ dates are added when a GitHub release is actually published.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.7...HEAD
-[0.10.0-beta.7]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.7
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.8...HEAD
+[0.10.0-beta.8]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8
 [0.10.0-beta.6]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6
 [0.10.0-beta.5]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5
 [0.10.0-beta.4]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.4

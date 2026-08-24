@@ -9,13 +9,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
-from verb_authority_scan import REPORT_VERSION, SchemaError, scan_documents
+from verb_authority_scan import (
+    REPORT_VERSION,
+    SchemaError,
+    load_json_path,
+    scan_documents,
+    validate_plain_json,
+)
 
 
-DIFF_VERSION = 1
+DIFF_VERSION = 2
 
 _CLASSIFICATION_ORDER = {
     "authority_increase": 0,
@@ -39,15 +46,20 @@ _RISK_RANK = {
     "destructive": 2,
     "code_exec": 2,
 }
+_POLICIES = frozenset(_POLICY_RANK)
+_DECLARED_AUTHORITIES = frozenset(_DECLARED_AUTHORITY_RANK)
+_RISKS = frozenset({"unknown", *_RISK_RANK})
+_RISK_SOURCES = frozenset(
+    {"safe_default", "control_declaration", "conflict_safe_default"}
+)
+_EVIDENCE = frozenset({"observed", "declared", "attested"})
+_BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
+_BOUND_STATUS = frozenset({"enforced", "specified", "not_stated"})
+_HEX = frozenset("0123456789abcdef")
 
 
 class DiffError(ValueError):
     """Raised when reports cannot be correlated safely."""
-
-
-def _load_json(path: str) -> Any:
-    with Path(path).open(encoding="utf-8") as source:
-        return json.load(source)
 
 
 def _is_report(document: Any) -> bool:
@@ -59,25 +71,425 @@ def _is_report(document: Any) -> bool:
     )
 
 
+def _require_object(value: Any, *, field: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise DiffError(f"{field} must be an object")
+    return value
+
+
+def _require_array(value: Any, *, field: str) -> list[Any]:
+    if type(value) is not list:
+        raise DiffError(f"{field} must be an array")
+    return value
+
+
+def _require_text(value: Any, *, field: str) -> str:
+    if type(value) is not str or not value:
+        raise DiffError(f"{field} must be non-empty text")
+    return value
+
+
+def _require_bool(value: Any, *, field: str) -> bool:
+    if type(value) is not bool:
+        raise DiffError(f"{field} must be a boolean")
+    return value
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in _HEX for character in value)
+    )
+
+
+def _require_sha256(value: Any, *, field: str) -> str:
+    if not _is_sha256(value):
+        raise DiffError(f"{field} must be a lowercase SHA-256 fingerprint")
+    return value
+
+
+def _require_string_array(value: Any, *, field: str) -> list[str]:
+    items = _require_array(value, field=field)
+    if any(type(item) is not str for item in items):
+        raise DiffError(f"{field} must contain only text")
+    return items
+
+
+def _validate_declared_risk(value: Any, *, field: str) -> None:
+    if value is None:
+        return
+    risk = _require_object(value, field=field)
+    if risk.get("tier") not in _RISKS - {"unknown"}:
+        raise DiffError(f"{field}.tier is invalid")
+    if risk.get("evidence") not in _EVIDENCE:
+        raise DiffError(f"{field}.evidence is invalid")
+    effects = _require_string_array(risk.get("effects"), field=f"{field}.effects")
+    if not effects or len(effects) != len(set(effects)):
+        raise DiffError(f"{field}.effects must be non-empty and unique")
+    if "note" in risk:
+        _require_text(risk["note"], field=f"{field}.note")
+
+
+def _validate_report_argument(
+    value: Any,
+    *,
+    tool: str,
+    seen: set[str],
+    require_fingerprints: bool,
+) -> None:
+    argument = _require_object(value, field=f"tool '{tool}' argument")
+    name = _require_text(argument.get("name"), field=f"tool '{tool}' argument name")
+    if name in seen:
+        raise DiffError(f"report contains duplicate argument name: {tool}.{name}")
+    seen.add(name)
+    _require_text(argument.get("type"), field=f"argument {tool}.{name}.type")
+    _require_bool(argument.get("required"), field=f"argument {tool}.{name}.required")
+    if argument.get("policy") not in _POLICIES:
+        raise DiffError(f"argument {tool}.{name}.policy is invalid")
+    _require_text(
+        argument.get("confidence"), field=f"argument {tool}.{name}.confidence"
+    )
+    _require_bool(
+        argument.get("review_required"),
+        field=f"argument {tool}.{name}.review_required",
+    )
+    _require_text(argument.get("reason"), field=f"argument {tool}.{name}.reason")
+    _validated_constraints(argument.get("constraints"), tool=tool, argument=name)
+    for fingerprint_field in (
+        "schema_material_fingerprint_sha256",
+        "unmodeled_schema_fingerprint_sha256",
+    ):
+        if require_fingerprints:
+            _require_sha256(
+                argument.get(fingerprint_field),
+                field=f"argument {tool}.{name}.{fingerprint_field}",
+            )
+        elif fingerprint_field in argument:
+            raise DiffError(
+                f"redacted argument {tool}.{name} exposes an exact schema fingerprint"
+            )
+
+
+def _validate_report_tool(
+    value: Any,
+    *,
+    seen: set[str],
+    require_fingerprints: bool,
+) -> tuple[str, set[str]]:
+    tool = _require_object(value, field="report tool")
+    name = _require_text(tool.get("name"), field="report tool name")
+    if name in seen:
+        raise DiffError(f"report contains duplicate tool name: {name}")
+    seen.add(name)
+    if tool.get("risk") not in _RISKS:
+        raise DiffError(f"tool '{name}' has invalid risk")
+    if tool.get("risk_source") not in _RISK_SOURCES:
+        raise DiffError(f"tool '{name}' has invalid risk source")
+    risk_evidence = tool.get("risk_evidence")
+    if risk_evidence is not None and risk_evidence not in _EVIDENCE:
+        raise DiffError(f"tool '{name}' has invalid risk evidence")
+    if tool.get("inferred_risk") not in _RISKS:
+        raise DiffError(f"tool '{name}' has invalid inferred risk")
+    _require_object(tool.get("risk_inference"), field=f"tool '{name}' risk inference")
+    _validate_declared_risk(tool.get("declared_risk"), field=f"tool '{name}' risk")
+    for boolean_field in (
+        "risk_conflict",
+        "risk_review_required",
+        "needs_confirmation",
+        "schema_closes_unknown_arguments",
+    ):
+        _require_bool(tool.get(boolean_field), field=f"tool '{name}' {boolean_field}")
+    _require_string_array(
+        tool.get("annotation_conflicts"),
+        field=f"tool '{name}' annotation conflicts",
+    )
+    for fingerprint_field in (
+        "schema_material_fingerprint_sha256",
+        "unmodeled_schema_fingerprint_sha256",
+    ):
+        if require_fingerprints:
+            _require_sha256(
+                tool.get(fingerprint_field),
+                field=f"tool '{name}' {fingerprint_field}",
+            )
+        elif fingerprint_field in tool:
+            raise DiffError(
+                f"redacted tool '{name}' exposes an exact schema fingerprint"
+            )
+
+    argument_names: set[str] = set()
+    for argument in _require_array(
+        tool.get("arguments"), field=f"tool '{name}' arguments"
+    ):
+        _validate_report_argument(
+            argument,
+            tool=name,
+            seen=argument_names,
+            require_fingerprints=require_fingerprints,
+        )
+    return name, argument_names
+
+
+def _validate_bound(value: Any, *, field: str) -> None:
+    bound = _require_object(value, field=field)
+    _require_text(bound.get("source"), field=f"{field}.source")
+    if bound.get("bounds_mutability") not in _BOUND_MUTABILITY:
+        raise DiffError(f"{field}.bounds_mutability is invalid")
+    if bound.get("operational_status") not in _BOUND_STATUS:
+        raise DiffError(f"{field}.operational_status is invalid")
+    if "enforcement" in bound:
+        _require_text(bound["enforcement"], field=f"{field}.enforcement")
+
+
+def _validate_declared_controls(
+    value: Any,
+    *,
+    report_arguments: dict[str, set[str]],
+) -> None:
+    declared = _require_object(value, field="declared_controls")
+    if type(declared.get("version")) is not int or declared.get("version") != 1:
+        raise DiffError("declared_controls.version is invalid")
+    _require_text(
+        declared.get("verification_notice"),
+        field="declared_controls.verification_notice",
+    )
+    tools_seen: set[str] = set()
+    for raw_tool in _require_array(
+        declared.get("tools"), field="declared_controls.tools"
+    ):
+        tool = _require_object(raw_tool, field="declared control tool")
+        name = _require_text(tool.get("name"), field="declared control tool name")
+        if name in tools_seen:
+            raise DiffError(f"declared controls contain duplicate tool name: {name}")
+        tools_seen.add(name)
+        if name not in report_arguments:
+            raise DiffError(f"declared controls reference unknown report tool: {name}")
+        _require_bool(
+            tool.get("schema_closes_unknown_arguments"),
+            field=f"declared control tool '{name}' schema closure",
+        )
+        if "risk" in tool:
+            _validate_declared_risk(tool["risk"], field=f"declared tool '{name}' risk")
+
+        argument_names: set[str] = set()
+        for raw_argument in _require_array(
+            tool.get("arguments"), field=f"declared tool '{name}' arguments"
+        ):
+            argument = _require_object(
+                raw_argument, field=f"declared argument for '{name}'"
+            )
+            argument_name = _require_text(
+                argument.get("name"), field=f"declared argument name for '{name}'"
+            )
+            if argument_name in argument_names:
+                raise DiffError(
+                    f"declared controls contain duplicate argument name: "
+                    f"{name}.{argument_name}"
+                )
+            argument_names.add(argument_name)
+            if argument_name not in report_arguments[name]:
+                raise DiffError(
+                    f"declared controls reference unknown argument: "
+                    f"{name}.{argument_name}"
+                )
+            if argument.get("authority") not in _DECLARED_AUTHORITIES:
+                raise DiffError(f"declared authority is invalid: {name}.{argument_name}")
+            if argument.get("evidence") not in _EVIDENCE:
+                raise DiffError(f"declared evidence is invalid: {name}.{argument_name}")
+            for index, bound in enumerate(
+                _require_array(
+                    argument.get("bounds", []),
+                    field=f"declared bounds for {name}.{argument_name}",
+                ),
+                start=1,
+            ):
+                _validate_bound(
+                    bound,
+                    field=f"declared bound {index} for {name}.{argument_name}",
+                )
+
+        for raw_argument in _require_array(
+            tool.get("unexposed_arguments"),
+            field=f"declared tool '{name}' unexposed arguments",
+        ):
+            argument = _require_object(
+                raw_argument, field=f"unexposed control for '{name}'"
+            )
+            argument_name = _require_text(
+                argument.get("name"), field=f"unexposed control name for '{name}'"
+            )
+            if argument_name in argument_names:
+                raise DiffError(
+                    f"declared controls contain duplicate argument name: "
+                    f"{name}.{argument_name}"
+                )
+            argument_names.add(argument_name)
+            if argument_name in report_arguments[name]:
+                raise DiffError(
+                    f"argument is both exposed and unexposed: {name}.{argument_name}"
+                )
+            if argument.get("exposure") != "server_fixed":
+                raise DiffError(f"unexposed control is invalid: {name}.{argument_name}")
+            if argument.get("evidence") not in _EVIDENCE:
+                raise DiffError(f"unexposed evidence is invalid: {name}.{argument_name}")
+            _require_text(
+                argument.get("enforced_by"),
+                field=f"unexposed control enforcement for {name}.{argument_name}",
+            )
+
+
 def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
+    try:
+        validate_plain_json(report, field=label)
+    except SchemaError as exc:
+        raise DiffError(str(exc)) from exc
     if not _is_report(report):
         raise DiffError(f"{label} is not a Verb Authority JSON report")
-    if report.get("report_version") != REPORT_VERSION:
+    report_version = report.get("report_version")
+    if report_version == 2:
+        raise DiffError(
+            f"{label} uses legacy report version 2, which omitted schema "
+            "constraint values; rescan the original schema with report "
+            f"version {REPORT_VERSION} before diffing"
+        )
+    if type(report_version) is not int or report_version != REPORT_VERSION:
         raise DiffError(
             f"{label} uses unsupported report version "
-            f"{report.get('report_version')!r}; expected {REPORT_VERSION}"
+            f"{report_version!r}; expected {REPORT_VERSION}"
         )
-    privacy = report.get("privacy")
-    if not isinstance(privacy, dict):
-        raise DiffError(f"{label} is missing report privacy metadata")
-    if privacy.get("names_redacted") is True:
+    _require_sha256(
+        report.get("schema_fingerprint_sha256"),
+        field=f"{label} schema_fingerprint_sha256",
+    )
+    privacy = _require_object(
+        report.get("privacy"), field=f"{label} privacy metadata"
+    )
+    names_redacted = privacy.get("names_redacted")
+    if type(names_redacted) is not bool:
+        raise DiffError(f"{label} has invalid report privacy metadata")
+    exact_constraints_included = not names_redacted
+    expected_fingerprint_scope = (
+        "modeled_presence_and_enum_count_only"
+        if names_redacted
+        else "full_validation_material_excluding_annotations"
+    )
+    if (
+        privacy.get("network_used") is not False
+        or privacy.get("server_executed") is not False
+        or privacy.get("descriptions_included") is not False
+        or privacy.get("examples_included") is not False
+        or privacy.get("defaults_included") is not False
+        or privacy.get("runtime_values_included") is not False
+        or privacy.get("enum_values_included") is not False
+        or privacy.get("schema_constraint_values_included")
+        is not exact_constraints_included
+        or privacy.get("enum_value_fingerprints_included")
+        is not exact_constraints_included
+        or privacy.get("enum_value_fingerprints_dictionary_guessable")
+        is not exact_constraints_included
+        or privacy.get("schema_material_fingerprints_included")
+        is not exact_constraints_included
+        or privacy.get("schema_material_fingerprints_dictionary_guessable")
+        is not exact_constraints_included
+        or privacy.get("unmodeled_schema_fingerprints_included")
+        is not exact_constraints_included
+        or privacy.get("schema_fingerprint_material_scope")
+        != expected_fingerprint_scope
+        or type(privacy.get("control_declarations_included")) is not bool
+    ):
+        raise DiffError(f"{label} has invalid constraint privacy metadata")
+
+    tools = _require_array(report.get("tools"), field=f"{label} tools")
+    tool_names: set[str] = set()
+    report_arguments: dict[str, set[str]] = {}
+    for raw_tool in tools:
+        tool_name, argument_names = _validate_report_tool(
+            raw_tool,
+            seen=tool_names,
+            require_fingerprints=not names_redacted,
+        )
+        report_arguments[tool_name] = argument_names
+
+    controls_included = privacy["control_declarations_included"]
+    if controls_included:
+        if "declared_controls" not in report:
+            raise DiffError(f"{label} is missing declared_controls")
+        _require_sha256(
+            report.get("control_declaration_fingerprint_sha256"),
+            field=f"{label} control declaration fingerprint",
+        )
+        _validate_declared_controls(
+            report["declared_controls"],
+            report_arguments=report_arguments,
+        )
+    elif "declared_controls" in report or "control_declaration_fingerprint_sha256" in report:
+        raise DiffError(f"{label} has inconsistent declared control metadata")
+
+    if names_redacted is True:
         raise DiffError(
             f"{label} has redacted names; diff requires stable tool and argument "
             "names. Compare non-redacted local reports instead."
         )
-    if not isinstance(report.get("tools"), list):
-        raise DiffError(f"{label} has an invalid tools list")
     return report
+
+
+def _validated_constraints(
+    value: Any, *, tool: str, argument: str
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise DiffError(f"argument constraints must be an object: {tool}.{argument}")
+    unknown = sorted(set(value) - {"maximum", "max_length", "enum"})
+    if unknown:
+        raise DiffError(
+            f"argument constraints contain unsupported fields: {tool}.{argument}"
+        )
+
+    normalized: dict[str, Any] = {}
+    if "maximum" in value:
+        maximum = value["maximum"]
+        if not (
+            type(maximum) is int
+            or (type(maximum) is float and math.isfinite(maximum))
+        ):
+            raise DiffError(f"argument maximum is invalid: {tool}.{argument}")
+        normalized["maximum"] = maximum
+
+    if "max_length" in value:
+        max_length = value["max_length"]
+        if type(max_length) is not int or max_length < 0:
+            raise DiffError(f"argument max_length is invalid: {tool}.{argument}")
+        normalized["max_length"] = max_length
+
+    if "enum" in value:
+        enum = value["enum"]
+        if not isinstance(enum, dict) or set(enum) != {
+            "count",
+            "value_fingerprints_sha256",
+        }:
+            raise DiffError(f"argument enum constraint is invalid: {tool}.{argument}")
+        count = enum["count"]
+        fingerprints = enum["value_fingerprints_sha256"]
+        if type(count) is not int or count < 0 or not isinstance(fingerprints, list):
+            raise DiffError(f"argument enum constraint is invalid: {tool}.{argument}")
+        if (
+            len(fingerprints) != count
+            or fingerprints != sorted(set(fingerprints))
+            or any(
+                not isinstance(item, str)
+                or len(item) != 64
+                or any(character not in "0123456789abcdef" for character in item)
+                for item in fingerprints
+            )
+        ):
+            raise DiffError(f"argument enum constraint is invalid: {tool}.{argument}")
+        normalized["enum"] = {
+            "count": count,
+            "value_fingerprints_sha256": list(fingerprints),
+        }
+    return normalized
 
 
 def load_report_or_schema(
@@ -88,7 +500,7 @@ def load_report_or_schema(
 ) -> dict[str, Any]:
     """Load a report, or scan a raw schema export before diffing it."""
 
-    document = _load_json(path)
+    document = load_json_path(path)
     if _is_report(document):
         if controls_path is not None:
             raise DiffError(
@@ -96,7 +508,7 @@ def load_report_or_schema(
             )
         return _validate_report(document, label=label)
 
-    controls = _load_json(controls_path) if controls_path is not None else None
+    controls = load_json_path(controls_path) if controls_path is not None else None
     report = scan_documents([document], control_declarations=controls)
     return _validate_report(report, label=label)
 
@@ -120,6 +532,17 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "review_required": raw_argument.get("review_required"),
                 "type": raw_argument.get("type"),
                 "required": raw_argument.get("required"),
+                "constraints": _validated_constraints(
+                    raw_argument.get("constraints"),
+                    tool=name,
+                    argument=argument_name,
+                ),
+                "schema_material_fingerprint_sha256": raw_argument[
+                    "schema_material_fingerprint_sha256"
+                ],
+                "unmodeled_schema_fingerprint_sha256": raw_argument[
+                    "unmodeled_schema_fingerprint_sha256"
+                ],
             }
         indexed[name] = {
             "risk": raw_tool.get("risk"),
@@ -135,6 +558,12 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "schema_closes_unknown_arguments": raw_tool.get(
                 "schema_closes_unknown_arguments"
             ),
+            "schema_material_fingerprint_sha256": raw_tool[
+                "schema_material_fingerprint_sha256"
+            ],
+            "unmodeled_schema_fingerprint_sha256": raw_tool[
+                "unmodeled_schema_fingerprint_sha256"
+            ],
             "arguments": arguments,
         }
 
@@ -295,6 +724,149 @@ def _bounds_classification(
     return "review"
 
 
+def _compare_upper_constraint(
+    changes: list[dict[str, Any]],
+    *,
+    tool: str,
+    argument: str,
+    field: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    before_present = field in before
+    after_present = field in after
+    if before_present == after_present and (
+        not before_present or before[field] == after[field]
+    ):
+        return
+
+    before_value = before.get(field)
+    after_value = after.get(field)
+    if before_present and not after_present:
+        classification = "authority_increase"
+        message = f"The schema {field.replace('_', ' ')} was removed."
+    elif not before_present and after_present:
+        classification = "protection_increase"
+        message = f"The schema gained a {field.replace('_', ' ')}."
+    elif after_value > before_value:
+        classification = "authority_increase"
+        message = f"The schema {field.replace('_', ' ')} was widened."
+    else:
+        classification = "protection_increase"
+        message = f"The schema {field.replace('_', ' ')} was tightened."
+    changes.append(
+        _change(
+            classification,
+            f"{field}_changed",
+            tool,
+            argument=argument,
+            field=f"constraints.{field}",
+            before=before_value,
+            after=after_value,
+            message=message,
+        )
+    )
+
+
+def _compare_enum_constraint(
+    changes: list[dict[str, Any]],
+    *,
+    tool: str,
+    argument: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    before_enum = before.get("enum")
+    after_enum = after.get("enum")
+    if before_enum == after_enum:
+        return
+
+    if before_enum is None:
+        classification = "protection_increase"
+        message = "The schema gained an enum constraint."
+    elif after_enum is None:
+        classification = "authority_increase"
+        message = "The schema enum constraint was removed."
+    else:
+        before_values = set(before_enum["value_fingerprints_sha256"])
+        after_values = set(after_enum["value_fingerprints_sha256"])
+        if before_values < after_values:
+            classification = "authority_increase"
+            message = "The schema enum added caller-selectable values."
+        elif after_values < before_values:
+            classification = "protection_increase"
+            message = "The schema enum removed caller-selectable values."
+        else:
+            classification = "review"
+            message = "The schema enum changed without a strict set relationship."
+    changes.append(
+        _change(
+            classification,
+            "enum_changed",
+            tool,
+            argument=argument,
+            field="constraints.enum",
+            before=before_enum,
+            after=after_enum,
+            message=message,
+        )
+    )
+
+
+def _compare_schema_constraints(
+    changes: list[dict[str, Any]],
+    *,
+    tool: str,
+    argument: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    for field in ("maximum", "max_length"):
+        _compare_upper_constraint(
+            changes,
+            tool=tool,
+            argument=argument,
+            field=field,
+            before=before,
+            after=after,
+        )
+    _compare_enum_constraint(
+        changes,
+        tool=tool,
+        argument=argument,
+        before=before,
+        after=after,
+    )
+
+
+def _compare_unmodeled_schema(
+    changes: list[dict[str, Any]],
+    *,
+    tool: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    argument: str | None = None,
+) -> None:
+    field = "unmodeled_schema_fingerprint_sha256"
+    if before[field] == after[field]:
+        return
+    changes.append(
+        _change(
+            "review",
+            "unmodeled_schema_changed",
+            tool,
+            argument=argument,
+            field=field,
+            before=before[field],
+            after=after[field],
+            message=(
+                "Schema validation material outside the explicitly modeled "
+                "constraint vocabulary changed; inspect the original schemas."
+            ),
+        )
+    )
+
+
 def _compare_exposed_argument(
     changes: list[dict[str, Any]],
     tool: str,
@@ -408,6 +980,21 @@ def _compare_exposed_argument(
                 message=messages[classification],
             )
         )
+
+    _compare_schema_constraints(
+        changes,
+        tool=tool,
+        argument=argument,
+        before=before.get("constraints", {}),
+        after=after.get("constraints", {}),
+    )
+    _compare_unmodeled_schema(
+        changes,
+        tool=tool,
+        argument=argument,
+        before=before,
+        after=after,
+    )
 
     for field in ("type", "required", "review_required"):
         if before.get(field) != after.get(field):
@@ -609,6 +1196,13 @@ def diff_reports(
                     message="MCP annotation conflicts changed.",
                 )
             )
+
+        _compare_unmodeled_schema(
+            changes,
+            tool=tool,
+            before=before_tool,
+            after=after_tool,
+        )
 
         before_arguments = before_tool["arguments"]
         after_arguments = after_tool["arguments"]
@@ -824,6 +1418,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit with status 2 when caller authority increases",
     )
+    parser.add_argument(
+        "--fail-on-review",
+        action="store_true",
+        help="exit with status 2 when a change requires review",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -851,6 +1450,8 @@ def main(argv: list[str] | None = None) -> int:
         print(rendered, end="")
 
     if args.fail_on_increase and diff["summary"]["authority_increases"]:
+        return 2
+    if args.fail_on_review and diff["summary"]["reviews"]:
         return 2
     return 0
 

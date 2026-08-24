@@ -6,8 +6,10 @@ is no production-support or response-time commitment.
 
 ## Supported versions
 
-Security fixes are made on the latest `0.9.x` source when practical. Earlier
-experiments are not maintained as separate supported versions.
+Security fixes target the latest published beta and the current `main` branch.
+Critical fixes may be backported to the latest stable `0.9.x` release when
+practical. Earlier experiments and withheld release candidates are not
+maintained as supported versions.
 
 ## Reporting
 
@@ -23,6 +25,6 @@ experiments are not maintained as separate supported versions.
 
 Never include live secrets, customer data, or third-party targets. Reports are
 evaluated against the documented boundary: semantic rewrites, confidentiality
-tracking, approved-choice control-flow influence, and output-side manipulation
-are currently known limitations, though new reductions or practical examples
-are still useful.
+tracking, approved-choice control-flow influence, compositional/action-instance
+authorization, and output-side manipulation are currently known limitations,
+though new reductions or practical examples are still useful.

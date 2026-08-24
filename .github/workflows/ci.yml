@@ -48,8 +48,37 @@ jobs:
       - name: Install build frontend
         run: python -m pip install "build>=1.2,<2"
 
-      - name: Build source and wheel distributions
-        run: python -m build
+      - name: Build source distribution
+        run: python -m build --sdist
+
+      - name: Extract and inspect source distribution
+        run: |
+          mkdir -p "${{ runner.temp }}/verb-authority-sdist"
+          sdist_archive=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          test -n "$sdist_archive"
+          tar -xzf "$sdist_archive" -C "${{ runner.temp }}/verb-authority-sdist"
+          sdist_root=$(find "${{ runner.temp }}/verb-authority-sdist" \
+            -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -n "$sdist_root"
+          test -f "$sdist_root/LANDSCAPE.md"
+          test -f "$sdist_root/scripts/installed_wheel_smoke.py"
+          test -f "$sdist_root/scripts/verify_release_artifacts.py"
+          printf 'SDIST_ROOT=%s\n' "$sdist_root" >> "$GITHUB_ENV"
+
+      - name: Test extracted source distribution
+        run: |
+          python -m pip install "$SDIST_ROOT[dev]"
+          cd "$SDIST_ROOT"
+          python -m pytest -v
+
+      - name: Build wheel from extracted source distribution
+        run: python -m build --wheel --outdir "${{ github.workspace }}/dist" "$SDIST_ROOT"
+
+      - name: Verify distribution identities
+        run: |
+          python "$SDIST_ROOT/scripts/verify_release_artifacts.py" artifacts \
+            --project "$SDIST_ROOT/pyproject.toml" \
+            --dist "${{ github.workspace }}/dist"
 
       - name: Generate and verify SHA-256 checksums
         working-directory: dist
@@ -65,21 +94,18 @@ jobs:
         run: |
           python -m verb_authority
           verb-authority scan --help
-          verb-authority-scan "${{ github.workspace }}/atlas/public_mcp_schemas.json" \
+          verb-authority-scan "$SDIST_ROOT/atlas/public_mcp_schemas.json" \
             --format json --output authority-report.json
           verb-authority diff authority-report.json authority-report.json \
             --fail-on-increase
           verb-authority-diff authority-report.json authority-report.json \
             --format json --output authority-diff.json
-          python - <<'PY'
-          from verb_authority import GuardedToolRunner, Param, Registry, Risk, Tool, TrustedChoice, TrustedResolver
-          resolution = TrustedResolver([TrustedChoice("Dana", "dana@company.com", "directory")]).resolve("dana")
-          calls = []
-          registry = Registry()
-          registry.add(Tool("send_email", [Param("to", "email"), Param("body")], fn=lambda to, body: calls.append((to, body)) or "sent", risk=Risk.WRITE))
-          result = GuardedToolRunner(registry).run({"name": "send_email", "input": {"to": resolution.value, "body": "hello"}}, trusted_args={"to": resolution.value})
-          assert resolution.resolved and result.executed and calls == [("dana@company.com", "hello")]
-          PY
+          cp "$SDIST_ROOT/scripts/installed_wheel_smoke.py" installed_wheel_smoke.py
+          expected_version=$(python -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$SDIST_ROOT/pyproject.toml")
+          python installed_wheel_smoke.py \
+            --expected-version "$expected_version" \
+            --forbid-root "${{ github.workspace }}" \
+            --forbid-root "$SDIST_ROOT"
           python -c 'import json; assert json.load(open("authority-report.json"))["summary"]["tools"] == 10'
           python -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           python -m pip check
@@ -89,6 +115,8 @@ jobs:
         with:
           before: ${{ runner.temp }}/authority-report.json
           after: ${{ runner.temp }}/authority-report.json
+          fail_on_increase: "true"
+          fail_on_review: "true"
 
       - name: Preserve distributions
         uses: actions/upload-artifact@v7
@@ -96,3 +124,70 @@ jobs:
           name: python-distributions
           path: dist/
           if-no-files-found: error
+
+  action-shadowing:
+    name: Composite action ignores consumer module shadowing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out action below the consumer workspace
+        uses: actions/checkout@v7
+        with:
+          path: verb-authority-action
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Create a hostile consumer module and a widening schema diff
+        shell: bash
+        run: |
+          printf '%s\n' \
+            'from pathlib import Path' \
+            'Path("shadow-imported.marker").write_text("consumer module ran", encoding="utf-8")' \
+            'raise SystemExit(0)' \
+            > verb_authority.py
+          printf '%s\n' \
+            '{"tools":[{"name":"set_limit","inputSchema":{"type":"object","properties":{"amount":{"type":"number","maximum":10}},"required":["amount"]}}]}' \
+            > before.json
+          printf '%s\n' \
+            '{"tools":[{"name":"set_limit","inputSchema":{"type":"object","properties":{"amount":{"type":"number","maximum":100}},"required":["amount"]}}]}' \
+            > after.json
+          printf '%s\n' \
+            '{"tools":[{"name":"set_limit","inputSchema":{"type":"object","properties":{"amount":{"type":"number","minimum":0}},"required":["amount"]}}]}' \
+            > review-before.json
+          printf '%s\n' \
+            '{"tools":[{"name":"set_limit","inputSchema":{"type":"object","properties":{"amount":{"type":"number","minimum":-100}},"required":["amount"]}}]}' \
+            > review-after.json
+
+      - name: Run the composite action from the hostile workspace
+        id: authority-diff
+        continue-on-error: true
+        uses: ./verb-authority-action
+        with:
+          before: before.json
+          after: after.json
+          fail_on_increase: "true"
+          fail_on_review: "false"
+
+      - name: Run the composite action on review-only drift
+        id: authority-review
+        continue-on-error: true
+        uses: ./verb-authority-action
+        with:
+          before: review-before.json
+          after: review-after.json
+          fail_on_increase: "false"
+          fail_on_review: "true"
+
+      - name: Verify the installed CLI enforced both real thresholds
+        if: always()
+        shell: bash
+        env:
+          INCREASE_OUTCOME: ${{ steps.authority-diff.outcome }}
+          REVIEW_OUTCOME: ${{ steps.authority-review.outcome }}
+        run: |
+          test "$INCREASE_OUTCOME" = "failure"
+          test "$REVIEW_OUTCOME" = "failure"
+          test ! -e shadow-imported.marker

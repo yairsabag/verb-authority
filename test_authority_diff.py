@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 import verb_authority
-from verb_authority_diff import DiffError, diff_reports, main, render_text
+from verb_authority_diff import (
+    DIFF_VERSION,
+    DiffError,
+    diff_reports,
+    main,
+    render_text,
+)
 from verb_authority_scan import scan_documents
 
 
@@ -24,6 +30,49 @@ def _avp9_report():
     return scan_documents([schema], control_declarations=controls)
 
 
+def _constraint_document(maximum, max_length, enum):
+    return {
+        "tools": [
+            {
+                "name": "set_policy",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number", "maximum": maximum},
+                        "message": {
+                            "type": "string",
+                            "maxLength": max_length,
+                        },
+                        "mode": {"type": "string", "enum": enum},
+                    },
+                },
+            }
+        ]
+    }
+
+
+def _constraint_report(maximum, max_length, enum):
+    return scan_documents([_constraint_document(maximum, max_length, enum)])
+
+
+def _single_argument_report(property_schema):
+    return scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "set_value",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"value": property_schema},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+
 def test_identical_reports_have_no_authority_changes():
     report = _avp9_report()
 
@@ -37,6 +86,391 @@ def test_identical_reports_have_no_authority_changes():
         "protection_increases": 0,
     }
     assert "No authority-relevant changes detected" in render_text(diff)
+
+
+def test_daybreak_constraint_widening_is_an_authority_increase():
+    before = _constraint_report(100, 40, ["safe"])
+    after = _constraint_report(10**12, 10**9, ["safe", "unrestricted"])
+
+    diff = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] != after[
+        "schema_fingerprint_sha256"
+    ]
+    assert DIFF_VERSION == 2
+    assert diff["diff_version"] == 2
+    assert diff["summary"] == {
+        "changes": 3,
+        "changed_tools": 1,
+        "authority_increases": 3,
+        "reviews": 0,
+        "protection_increases": 0,
+    }
+    assert {change["kind"] for change in diff["changes"]} == {
+        "maximum_changed",
+        "max_length_changed",
+        "enum_changed",
+    }
+    assert all(
+        change["classification"] == "authority_increase"
+        for change in diff["changes"]
+    )
+
+
+def test_cli_fails_on_simultaneous_constraint_widening(tmp_path):
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(
+        json.dumps(_constraint_document(100, 40, ["safe"])), encoding="utf-8"
+    )
+    after_path.write_text(
+        json.dumps(
+            _constraint_document(
+                10**12,
+                10**9,
+                ["safe", "unrestricted"],
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            str(before_path),
+            str(after_path),
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+            "--fail-on-increase",
+        ]
+    )
+
+    assert exit_code == 2
+    diff = json.loads(output_path.read_text(encoding="utf-8"))
+    assert diff["summary"]["authority_increases"] == 3
+
+
+def test_cli_can_fail_closed_on_unmodeled_schema_review(tmp_path):
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "set_value",
+                        "inputSchema": {
+                            "properties": {
+                                "value": {"type": "number", "minimum": 0}
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    after_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "set_value",
+                        "inputSchema": {
+                            "properties": {
+                                "value": {
+                                    "type": "number",
+                                    "minimum": -(10**12),
+                                }
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-increase",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+    diff = json.loads(output_path.read_text(encoding="utf-8"))
+    assert diff["summary"]["authority_increases"] == 0
+    assert diff["summary"]["reviews"] == 1
+    assert diff["changes"][0]["kind"] == "unmodeled_schema_changed"
+
+
+def test_constraint_tightening_is_a_protection_increase():
+    before = _constraint_report(10**12, 10**9, ["safe", "unrestricted"])
+    after = _constraint_report(100, 40, ["safe"])
+
+    diff = diff_reports(before, after)
+
+    assert diff["summary"]["protection_increases"] == 3
+    assert diff["summary"]["authority_increases"] == 0
+    assert all(
+        change["classification"] == "protection_increase"
+        for change in diff["changes"]
+    )
+
+
+def test_removing_schema_constraints_is_an_authority_increase():
+    before_document = _constraint_document(100, 40, ["safe"])
+    after_document = copy.deepcopy(before_document)
+    properties = after_document["tools"][0]["inputSchema"]["properties"]
+    properties["amount"].pop("maximum")
+    properties["message"].pop("maxLength")
+    properties["mode"].pop("enum")
+
+    diff = diff_reports(
+        scan_documents([before_document]), scan_documents([after_document])
+    )
+
+    assert diff["summary"]["authority_increases"] == 3
+    assert diff["summary"]["reviews"] == 2
+    assert any(
+        change["kind"] == "type_changed"
+        and change["classification"] == "review"
+        for change in diff["changes"]
+    )
+
+
+def test_enum_replacement_without_set_relationship_requires_review():
+    before = _constraint_report(100, 40, ["safe", "legacy"])
+    after = _constraint_report(100, 40, ["safe", "reviewed"])
+
+    diff = diff_reports(before, after)
+
+    assert diff["summary"]["reviews"] == 1
+    assert diff["summary"]["authority_increases"] == 0
+    assert diff["changes"][0]["kind"] == "enum_changed"
+    assert diff["changes"][0]["classification"] == "review"
+
+
+def test_legacy_v2_reports_require_rescanning_instead_of_lossy_migration():
+    legacy = _constraint_report(100, 40, ["safe"])
+    legacy["report_version"] = 2
+    for argument in legacy["tools"][0]["arguments"]:
+        argument.pop("constraints", None)
+
+    with pytest.raises(DiffError, match="legacy report version 2.*rescan"):
+        diff_reports(legacy, copy.deepcopy(legacy))
+
+
+def test_malformed_v3_constraint_metadata_is_rejected():
+    report = _constraint_report(100, 40, ["safe"])
+    mode = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "mode"
+    )
+    mode["constraints"]["enum"]["count"] = 2
+
+    with pytest.raises(DiffError, match="enum constraint is invalid"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "before_schema, after_schema",
+    [
+        (False, True),
+        (
+            {"allOf": [{"type": "number", "maximum": 100}]},
+            {"allOf": [{"type": "number", "maximum": 10**12}]},
+        ),
+        (
+            {"type": "number", "minimum": 0},
+            {"type": "number", "minimum": -(10**12)},
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string", "enum": ["approved"]}
+                },
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "enum": ["approved", "attacker"],
+                    }
+                },
+                "additionalProperties": True,
+            },
+        ),
+    ],
+    ids=("boolean-schema", "all-of", "minimum", "nested-object"),
+)
+def test_unmodeled_schema_widening_requires_exactly_one_review(
+    before_schema, after_schema
+):
+    before = _single_argument_report(before_schema)
+    after = _single_argument_report(after_schema)
+
+    diff = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] != after[
+        "schema_fingerprint_sha256"
+    ]
+    assert diff["summary"] == {
+        "changes": 1,
+        "changed_tools": 1,
+        "authority_increases": 0,
+        "reviews": 1,
+        "protection_increases": 0,
+    }
+    assert diff["changes"][0]["kind"] == "unmodeled_schema_changed"
+    assert diff["changes"][0]["argument"] == "value"
+    assert diff["changes"][0]["classification"] == "review"
+
+
+def test_modeled_and_unmodeled_changes_each_emit_one_classification():
+    before = _single_argument_report(
+        {"type": "number", "maximum": 100, "minimum": 0}
+    )
+    after = _single_argument_report(
+        {"type": "number", "maximum": 10**12, "minimum": -(10**12)}
+    )
+
+    diff = diff_reports(before, after)
+
+    assert diff["summary"]["authority_increases"] == 1
+    assert diff["summary"]["reviews"] == 1
+    assert [change["kind"] for change in diff["changes"]].count(
+        "unmodeled_schema_changed"
+    ) == 1
+    assert [change["kind"] for change in diff["changes"]].count(
+        "maximum_changed"
+    ) == 1
+
+
+def test_annotation_only_changes_do_not_create_schema_drift_noise():
+    before = _single_argument_report(
+        {"type": "number", "maximum": 100, "description": "old text"}
+    )
+    after = _single_argument_report(
+        {"type": "number", "maximum": 100, "description": "new text"}
+    )
+
+    diff = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] == after[
+        "schema_fingerprint_sha256"
+    ]
+    assert diff["summary"]["changes"] == 0
+
+
+def test_duplicate_argument_names_are_rejected_before_indexing():
+    before = _single_argument_report({"type": "number", "maximum": 100})
+    after = copy.deepcopy(before)
+    widened = copy.deepcopy(after["tools"][0]["arguments"][0])
+    widened["constraints"]["maximum"] = 10**12
+    after["tools"][0]["arguments"].insert(0, widened)
+
+    with pytest.raises(DiffError, match="duplicate argument name"):
+        diff_reports(before, after)
+
+
+@pytest.mark.parametrize("malformation", ("tool", "arguments", "argument"))
+def test_malformed_report_containers_raise_clean_diff_errors(malformation):
+    before = _single_argument_report({"type": "number", "maximum": 100})
+    after = copy.deepcopy(before)
+    if malformation == "tool":
+        after["tools"] = ["not-an-object"]
+    elif malformation == "arguments":
+        after["tools"][0]["arguments"] = {"value": {}}
+    else:
+        after["tools"][0]["arguments"] = ["not-an-object"]
+
+    with pytest.raises(DiffError):
+        diff_reports(before, after)
+
+
+def test_invalid_schema_fingerprint_is_rejected():
+    report = _single_argument_report({"type": "number", "maximum": 100})
+    report["tools"][0]["unmodeled_schema_fingerprint_sha256"] = "not-a-hash"
+
+    with pytest.raises(DiffError, match="lowercase SHA-256"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_duplicate_declared_control_tools_are_rejected():
+    report = _avp9_report()
+    report["declared_controls"]["tools"].append(
+        copy.deepcopy(report["declared_controls"]["tools"][0])
+    )
+
+    with pytest.raises(DiffError, match="duplicate tool name"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_duplicate_declared_control_arguments_are_rejected():
+    report = _avp9_report()
+    arguments = report["declared_controls"]["tools"][0]["arguments"]
+    arguments.append(copy.deepcopy(arguments[0]))
+
+    with pytest.raises(DiffError, match="duplicate argument name"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_duplicate_unexposed_control_arguments_are_rejected():
+    report = _avp9_report()
+    arguments = report["declared_controls"]["tools"][0]["unexposed_arguments"]
+    arguments.append(copy.deepcopy(arguments[0]))
+
+    with pytest.raises(DiffError, match="duplicate argument name"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_cli_rejects_malformed_report_with_exit_two(tmp_path, capsys):
+    before = _single_argument_report({"type": "number", "maximum": 100})
+    after = copy.deepcopy(before)
+    after["tools"][0]["arguments"].append(
+        copy.deepcopy(after["tools"][0]["arguments"][0])
+    )
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path)])
+
+    assert exc_info.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "duplicate argument name" in stderr
+    assert "Traceback" not in stderr
 
 
 def test_declared_risk_effect_change_requires_review():
@@ -94,17 +528,22 @@ def test_server_fixed_argument_becoming_exposed_is_an_authority_increase():
     before = _avp9_report()
     after = copy.deepcopy(before)
     tool = after["tools"][0]
-    tool["arguments"].append(
-        {
-            "name": "destination",
-            "type": "string",
-            "required": True,
-            "policy": "trusted_fixed",
-            "confidence": "high",
-            "review_required": False,
-            "reason": "authority-bearing name",
-        }
+    destination_report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "replacement",
+                        "inputSchema": {
+                            "properties": {"destination": {"type": "string"}},
+                            "required": ["destination"],
+                        },
+                    }
+                ]
+            }
+        ]
     )
+    tool["arguments"].append(destination_report["tools"][0]["arguments"][0])
     declared_tool = after["declared_controls"]["tools"][0]
     declared_tool["unexposed_arguments"] = []
     declared_tool["arguments"].append(
@@ -194,29 +633,25 @@ def test_specified_bound_mutability_change_requires_review_but_does_not_fail():
 
 
 def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():
-    before = scan_documents(
+    pay_tool = {
+        "name": "pay_invoice",
+        "inputSchema": {"properties": {"amount": {"type": "integer"}}},
+    }
+    before = scan_documents([{"tools": [pay_tool]}])
+    after = scan_documents(
         [
             {
                 "tools": [
+                    pay_tool,
                     {
-                        "name": "pay_invoice",
-                        "inputSchema": {"properties": {"amount": {"type": "integer"}}},
-                    }
+                        "name": "send_message",
+                        "inputSchema": {"properties": {}},
+                    },
                 ]
             }
         ]
     )
-    after = copy.deepcopy(before)
     after["tools"][0]["needs_confirmation"] = False
-    after["tools"].append(
-        {
-            "name": "send_message",
-            "risk": "write",
-            "needs_confirmation": False,
-            "annotation_conflicts": [],
-            "arguments": [],
-        }
-    )
 
     diff = diff_reports(before, after)
 

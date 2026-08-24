@@ -5,12 +5,179 @@ import pytest
 
 import verb_authority
 from verb_authority_scan import (
+    REPORT_VERSION,
     SchemaError,
     main,
     parse_tool_definitions,
     render_markdown,
     scan_documents,
 )
+
+
+def _constraint_schema(maximum, max_length, enum):
+    return {
+        "tools": [
+            {
+                "name": "set_policy",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number", "maximum": maximum},
+                        "message": {
+                            "type": "string",
+                            "maxLength": max_length,
+                        },
+                        "mode": {"type": "string", "enum": enum},
+                    },
+                },
+            }
+        ]
+    }
+
+
+def test_report_v3_preserves_constraints_without_disclosing_enum_members():
+    document = _constraint_schema(100, 40, ["safe", "reviewed"])
+
+    report = scan_documents([document])
+    arguments = {
+        argument["name"]: argument for argument in report["tools"][0]["arguments"]
+    }
+
+    assert REPORT_VERSION == 3
+    assert report["report_version"] == 3
+    assert arguments["amount"]["constraints"] == {"maximum": 100}
+    assert arguments["message"]["constraints"] == {"max_length": 40}
+    enum = arguments["mode"]["constraints"]["enum"]
+    assert enum["count"] == 2
+    assert len(enum["value_fingerprints_sha256"]) == 2
+    assert all(len(value) == 64 for value in enum["value_fingerprints_sha256"])
+    assert report["privacy"]["schema_constraint_values_included"] is True
+    assert report["privacy"]["enum_values_included"] is False
+    assert report["privacy"]["enum_value_fingerprints_dictionary_guessable"] is True
+    assert report["privacy"]["schema_material_fingerprints_included"] is True
+    assert "examples_or_values_included" not in report["privacy"]
+    assert report["privacy"]["examples_included"] is False
+    assert report["privacy"]["defaults_included"] is False
+    assert report["privacy"]["runtime_values_included"] is False
+    assert report["privacy"]["schema_fingerprint_material_scope"] == (
+        "full_validation_material_excluding_annotations"
+    )
+    assert len(report["tools"][0]["schema_material_fingerprint_sha256"]) == 64
+    assert len(report["tools"][0]["unmodeled_schema_fingerprint_sha256"]) == 64
+    assert all(
+        len(argument["schema_material_fingerprint_sha256"]) == 64
+        and len(argument["unmodeled_schema_fingerprint_sha256"]) == 64
+        for argument in arguments.values()
+    )
+    assert '"safe"' not in json.dumps(report, sort_keys=True)
+
+    markdown = render_markdown(report)
+    assert "maximum: 100" in markdown
+    assert "max length: 40" in markdown
+    assert "enum: 2 fingerprinted member(s)" in markdown
+
+
+def test_redacted_constraint_report_uses_only_presence_and_count_sentinels():
+    before = _constraint_schema(100, 40, ["safe", "reviewed"])
+    changed_values = _constraint_schema(10**12, 10**9, ["open", "unrestricted"])
+
+    before_report = scan_documents([before], redact_names=True)
+    changed_report = scan_documents([changed_values], redact_names=True)
+    arguments = before_report["tools"][0]["arguments"]
+
+    assert arguments[0]["constraints"] == {"maximum_present": True}
+    assert arguments[1]["constraints"] == {"max_length_present": True}
+    assert arguments[2]["constraints"] == {
+        "enum": {"count": 2, "values_redacted": True}
+    }
+    assert before_report["privacy"]["schema_constraint_values_included"] is False
+    assert before_report["privacy"]["enum_value_fingerprints_included"] is False
+    assert (
+        before_report["privacy"]["enum_value_fingerprints_dictionary_guessable"]
+        is False
+    )
+    assert before_report["privacy"]["schema_material_fingerprints_included"] is False
+    assert before_report["privacy"]["unmodeled_schema_fingerprints_included"] is False
+    assert before_report["privacy"]["schema_fingerprint_material_scope"] == (
+        "modeled_presence_and_enum_count_only"
+    )
+    assert "schema_material_fingerprint_sha256" not in before_report["tools"][0]
+    assert "unmodeled_schema_fingerprint_sha256" not in before_report["tools"][0]
+    assert all(
+        "schema_material_fingerprint_sha256" not in argument
+        and "unmodeled_schema_fingerprint_sha256" not in argument
+        for argument in arguments
+    )
+    assert before_report["schema_fingerprint_sha256"] == changed_report[
+        "schema_fingerprint_sha256"
+    ]
+    assert scan_documents([before])["schema_fingerprint_sha256"] != scan_documents(
+        [changed_values]
+    )["schema_fingerprint_sha256"]
+
+    markdown = render_markdown(before_report)
+    assert "maximum: redacted" in markdown
+    assert "max length: redacted" in markdown
+    assert "enum: 2 redacted member(s)" in markdown
+    assert "Redacted reports omit exact constraint values" in markdown
+    assert "all exact schema hashes" in markdown
+
+
+@pytest.mark.parametrize(
+    "property_schema, message",
+    [
+        ({"type": "number", "maximum": float("inf")}, "finite number"),
+        ({"type": "string", "maxLength": -1}, "non-negative integer"),
+        ({"type": "string", "enum": "safe"}, "enum must be an array"),
+        ({"type": "string", "enum": ["safe", "safe"]}, "must be unique"),
+    ],
+)
+def test_invalid_modeled_constraints_are_rejected(property_schema, message):
+    document = {
+        "tools": [
+            {
+                "name": "set_value",
+                "inputSchema": {"properties": {"value": property_schema}},
+            }
+        ]
+    }
+
+    with pytest.raises(SchemaError, match=message):
+        scan_documents([document])
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"tools": ["not-an-object"]},
+        {
+            "tools": [
+                {
+                    "name": "set_value",
+                    "inputSchema": {"properties": {"value": ("tuple",)}},
+                }
+            ]
+        },
+        {"tools": [], "non_finite": float("nan")},
+    ],
+)
+def test_scanner_rejects_non_plain_or_malformed_json_shapes(document):
+    with pytest.raises(SchemaError):
+        scan_documents([document])
+
+
+def test_cli_rejects_duplicate_json_object_keys_cleanly(tmp_path, capsys):
+    schema_path = tmp_path / "duplicate.json"
+    schema_path.write_text(
+        '{"tools":[{"name":"one","name":"two","inputSchema":{}}]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path), "--format", "json"])
+
+    assert exc_info.value.code == 2
+    assert "duplicate object key: name" in capsys.readouterr().err
 
 
 def test_scans_mcp_tools_list_result():
@@ -211,6 +378,42 @@ def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
     assert report["summary"]["risk_review_required_tools"] == 0
 
 
+def test_destructive_hint_false_conflicts_with_declared_destructive_risk():
+    document = {
+        "tools": [
+            {
+                "name": "erase_store",
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                },
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "erase_store": {
+                "risk": {
+                    "tier": "destructive",
+                    "evidence": "attested",
+                    "effects": ["deletes_store"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+
+    assert tool["annotation_conflicts"] == [
+        "destructiveHint=false conflicts with effective risk"
+    ]
+    assert report["summary"]["annotation_conflicts"] == 1
+    assert tool["needs_confirmation"] is True
+
+
 def test_declared_lower_risk_conflict_keeps_confirmation_fail_safe():
     document = {
         "tools": [
@@ -298,7 +501,7 @@ def test_public_atlas_baseline_is_reproducible():
         "annotation_conflicts": 8,
     }
     assert report["schema_fingerprint_sha256"] == (
-        "1f0540357dd957e75ccff824560ddf0fb2de0107ee4a4bcff34ebbd1d3d2f3fb"
+        "cd706cd542612e359452daccbcf49af52274fea8ee6b59501c2e0fb2a321128f"
     )
 
 

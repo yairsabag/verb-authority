@@ -25,6 +25,10 @@ inputs:
     description: Fail the step when caller authority increases.
     required: false
     default: "true"
+  fail_on_review:
+    description: Fail the step when a change requires human review.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -41,6 +45,7 @@ runs:
         VA_BEFORE_CONTROLS: ${{ inputs.before_controls }}
         VA_AFTER_CONTROLS: ${{ inputs.after_controls }}
         VA_FAIL_ON_INCREASE: ${{ inputs.fail_on_increase }}
+        VA_FAIL_ON_REVIEW: ${{ inputs.fail_on_review }}
       run: |
         va_args=("$VA_BEFORE" "$VA_AFTER")
         if [[ -n "$VA_BEFORE_CONTROLS" ]]; then
@@ -55,4 +60,10 @@ runs:
           echo "fail_on_increase must be true or false" >&2
           exit 2
         fi
-        python -m verb_authority diff "${va_args[@]}"
+        if [[ "$VA_FAIL_ON_REVIEW" == "true" ]]; then
+          va_args+=(--fail-on-review)
+        elif [[ "$VA_FAIL_ON_REVIEW" != "false" ]]; then
+          echo "fail_on_review must be true or false" >&2
+          exit 2
+        fi
+        verb-authority diff "${va_args[@]}"

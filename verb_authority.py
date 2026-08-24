@@ -16,11 +16,20 @@ unsure, and scales scrutiny to each verb's risk.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Callable, Iterable
+import asyncio
+import functools
+import hashlib
 import inspect
+import json
+import marshal
 import math
 import re
 import sys
+import threading
+import unicodedata
+from types import FunctionType, MethodType
 
 
 # === roles a parameter value may play =====================================
@@ -182,8 +191,9 @@ class RiskAssessment:
 @dataclass
 class Param:
     name: str
-    type: str = "string"      # string|number|integer|email|uri|enum|boolean
-    enum: list[str] | None = None
+    type: str = "string"      # string|number|integer|email|uri|enum|boolean|
+                              # object|array|json
+    enum: list[Any] | None = None
     max_len: int | None = None
     cap: float | None = None
     sink: bool | None = None  # declared capability (DylanWang's point):
@@ -193,8 +203,9 @@ class Param:
                               # A declaration always overrides the name-based guess, so
                               # overloaded names (path, query, template) stop being
                               # guessed from the verb and are stated by the tool instead.
-    required: bool = True     # appended to preserve the public positional API;
-                              # opt out only for a safe implementation-owned default
+    required: bool = True     # retained for beta API compatibility. Runtime
+                              # gates require every value explicitly; Python
+                              # callable defaults are never implicit authority.
 
 
 @dataclass
@@ -208,9 +219,17 @@ class Tool:
 @dataclass
 class Registry:
     tools: dict[str, Tool] = field(default_factory=dict)
+    _version: int = field(default=0, init=False, repr=False, compare=False)
 
     def add(self, t: Tool) -> None:
         self.tools[t.name] = t
+        self._version += 1
+
+    @property
+    def version(self) -> int:
+        """Monotonic version for registrations performed through :meth:`add`."""
+
+        return self._version
 
 
 # === verb risk (a reviewable heuristic over complete name tokens) =========
@@ -317,6 +336,8 @@ class PolicySet:
     risk_inference: dict
     risk_review: list
     risk_conflicts: list
+    registry_binding: str | None = None
+    registry_version: int | None = None
 
 
 def build_policy(reg: Registry) -> PolicySet:
@@ -355,6 +376,7 @@ def build_policy(reg: Registry) -> PolicySet:
                 else:
                     review.append((name, p.name))    # keep locked + surface for review
             policy[name][p.name] = pol
+    registry_binding, registry_version = _policy_registry_source(reg)
     return PolicySet(
         policy,
         risk,
@@ -363,15 +385,55 @@ def build_policy(reg: Registry) -> PolicySet:
         risk_inference,
         risk_review,
         risk_conflicts,
+        registry_binding,
+        registry_version,
     )
 
 
 # === the gate (call before every tool execution) =========================
-@dataclass
+@dataclass(frozen=True)
 class Decision:
     allow: bool
     reason: str
     needs_confirm: bool = False
+
+
+@dataclass(frozen=True)
+class ConfirmationRequest:
+    """Immutable description of the exact private action awaiting approval.
+
+    ``arguments_json`` is the canonical ASCII-escaped JSON encoding of the same
+    isolated argument snapshot the runner will execute. Confirmation UIs
+    should parse and render it as structured fields, not inject it into markup.
+    ``action_id`` commits that exact encoding to the frozen registration,
+    effective risk, and executable.
+    Compatibility properties retain the small ``Decision`` callback surface
+    used by beta callers while making the approved action inspectable.
+    """
+
+    decision: Decision
+    tool_name: str
+    arguments_json: str
+    risk: Risk
+    risk_assessment: RiskAssessment
+    declared_risk: Risk | None
+    risk_conflict: bool
+    registration_id: str
+    executable_id: str
+    ledger_version: int
+    action_id: str
+
+    @property
+    def allow(self) -> bool:
+        return self.decision.allow
+
+    @property
+    def reason(self) -> str:
+        return self.decision.reason
+
+    @property
+    def needs_confirm(self) -> bool:
+        return self.decision.needs_confirm
 
 
 def _same_authority_value(proposed: Any, trusted: Any) -> bool:
@@ -409,10 +471,45 @@ def _same_authority_value(proposed: Any, trusted: Any) -> bool:
     return proposed is trusted
 
 
-def _snapshot_json_value(value: Any, seen: set[int] | None = None) -> Any:
-    """Copy one provider-shaped value without invoking application methods."""
+def _has_lone_surrogate(value: str) -> bool:
+    """True when text contains a UTF-16 surrogate rather than a Unicode scalar."""
 
-    if value is None or type(value) in (str, bool, int):
+    return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+
+
+MAX_JSON_DEPTH = 64
+"""Maximum list/dict containers on one root-to-leaf JSON path."""
+
+MAX_JSON_INTEGER_DIGITS = 512
+"""Maximum decimal digits accepted for an integer at a runtime boundary."""
+
+_MAX_JSON_INTEGER_ABS = 10 ** MAX_JSON_INTEGER_DIGITS
+
+
+def _snapshot_json_value(
+    value: Any,
+    seen: set[int] | None = None,
+    *,
+    _depth: int = 0,
+) -> Any:
+    """Copy one provider-shaped value without invoking application methods.
+
+    Lone UTF-16 surrogates are rejected at the boundary. They are not Unicode
+    scalar values and otherwise produce encoder/UI-dependent behavior. JSON
+    is also bounded to :data:`MAX_JSON_DEPTH` containers per path and
+    :data:`MAX_JSON_INTEGER_DIGITS` decimal integer digits so later recursive
+    checks and canonical serialization cannot escape as runtime exceptions.
+    """
+
+    if type(value) is str:
+        if _has_lone_surrogate(value):
+            raise ValueError("lone surrogates are not valid tool-call text")
+        return value
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        if not (-_MAX_JSON_INTEGER_ABS < value < _MAX_JSON_INTEGER_ABS):
+            raise ValueError("tool-call integers exceed the portable JSON limit")
         return value
     if type(value) is float:
         if not math.isfinite(value):
@@ -420,6 +517,8 @@ def _snapshot_json_value(value: Any, seen: set[int] | None = None) -> Any:
         return value
     if type(value) not in (list, dict):
         raise TypeError("tool calls must contain only JSON-compatible values")
+    if _depth >= MAX_JSON_DEPTH:
+        raise ValueError("tool-call JSON exceeds the maximum nesting depth")
 
     seen = set() if seen is None else seen
     identity = id(value)
@@ -428,11 +527,17 @@ def _snapshot_json_value(value: Any, seen: set[int] | None = None) -> Any:
     seen.add(identity)
     try:
         if type(value) is list:
-            return [_snapshot_json_value(item, seen) for item in value]
-        if not all(type(key) is str for key in value):
+            return [
+                _snapshot_json_value(item, seen, _depth=_depth + 1)
+                for item in value
+            ]
+        if not all(
+            type(key) is str and not _has_lone_surrogate(key)
+            for key in value
+        ):
             raise TypeError("tool-call object keys must be strings")
         return {
-            key: _snapshot_json_value(item, seen)
+            key: _snapshot_json_value(item, seen, _depth=_depth + 1)
             for key, item in value.items()
         }
     finally:
@@ -461,7 +566,61 @@ def _snapshot_tool_call(
     )
 
 
+def _canonical_json_value(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+_PARAM_TYPES = frozenset(
+    {
+        "string",
+        "number",
+        "integer",
+        "email",
+        "uri",
+        "enum",
+        "boolean",
+        "object",
+        "array",
+        "json",
+    }
+)
+
+
+def _param_constraints_valid(p: Param) -> bool:
+    """Fail closed when a declaration would silently ignore a constraint."""
+
+    if type(p.type) is not str or p.type not in _PARAM_TYPES:
+        return False
+    if p.type == "enum":
+        if p.enum is None or type(p.enum) not in (list, tuple):
+            return False
+    elif p.enum is not None:
+        return False
+    if p.max_len is not None:
+        if type(p.max_len) is not int or p.max_len < 0:
+            return False
+        if p.type not in {"string", "email", "uri", "object", "array"}:
+            return False
+    if p.cap is not None:
+        if not (
+            type(p.cap) in (int, float)
+            and (type(p.cap) is int or math.isfinite(p.cap))
+        ):
+            return False
+        if p.type not in {"number", "integer"}:
+            return False
+    return True
+
+
 def _type_ok(p: Param, v) -> bool:
+    if not _param_constraints_valid(p):
+        return False
     if p.type == "number":
         numeric = type(v) in (int, float)
         finite = type(v) is int or (type(v) is float and math.isfinite(v))
@@ -472,43 +631,67 @@ def _type_ok(p: Param, v) -> bool:
         )
         return integer and (p.cap is None or v <= p.cap)
     if p.type == "enum":
-        return p.enum is not None and any(
-            _same_authority_value(v, member) for member in p.enum
-        )
+        try:
+            return p.enum is not None and any(
+                (
+                    _canonical_json_value(v) == member.canonical_json
+                    if isinstance(member, _FrozenEnumMember)
+                    else _same_authority_value(v, member)
+                )
+                for member in p.enum
+            )
+        except Exception:
+            return False
     if p.type == "boolean":
         return type(v) is bool
     if p.type in ("string", "email", "uri"):
         return type(v) is str and (
             p.max_len is None or len(v) <= p.max_len
         )
+    if p.type == "object":
+        return type(v) is dict and (
+            p.max_len is None or len(v) <= p.max_len
+        )
+    if p.type == "array":
+        return type(v) is list and (
+            p.max_len is None or len(v) <= p.max_len
+        )
+    if p.type == "json":
+        try:
+            _snapshot_json_value(v)
+        except Exception:
+            return False
+        return True
     return False
 
 
-# Homograph / mixed-script detection.
-# A value that mixes Latin letters with visually-confusable letters from
-# another script (Cyrillic, Greek) is almost always an impersonation attempt:
-# "аpple.com" with a Cyrillic 'а' renders identically to "apple.com" but is a
-# different string. This is a STRUCTURAL property of the value, independent of
-# where it came from -- so we check it in the gate, before provenance even
-# matters. Found by the adaptive attacker in adaptive.py: a homograph slipped
-# past both the sink rule (dev mis-declared it trusted) and the ledger (no
-# verbatim match), because neither normalizes characters.
-_LATIN = re.compile(r"[a-zA-Z]")
-_CONFUSABLE = re.compile(
-    r"[\u0400-\u04FF\u0370-\u03FF]"   # Cyrillic + Greek blocks
-)
+# Homograph / mixed-script detection. Unicode script blocks are not contiguous:
+# Cyrillic Supplement and the Extended blocks sit outside U+0400-U+04FF. The
+# stdlib character names cover those additions without maintaining a partial
+# range table. NFKC first exposes compatibility-width Latin characters.
+def _unicode_script(character: str) -> str | None:
+    name = unicodedata.name(character, "")
+    for script in ("LATIN", "GREEK", "CYRILLIC"):
+        if name.startswith(f"{script} "):
+            return script
+    return None
 
 
-def _has_mixed_script(v) -> bool:
-    if not isinstance(v, str):
+def _has_mixed_script(v: Any) -> bool:
+    if type(v) is not str:
         return False
-    return bool(_LATIN.search(v) and _CONFUSABLE.search(v))
+    scripts = {
+        script
+        for character in unicodedata.normalize("NFKC", v)
+        if (script := _unicode_script(character)) is not None
+    }
+    return len(scripts) > 1
 
 
 def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
     """Inspect built-in JSON containers for homographs without cycling."""
 
-    if isinstance(value, str):
+    if type(value) is str:
         return _has_mixed_script(value)
     if type(value) not in (dict, list, tuple):
         return False
@@ -521,7 +704,7 @@ def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
     try:
         if type(value) is dict:
             return any(
-                (isinstance(key, str) and _has_mixed_script(key))
+                (type(key) is str and _has_mixed_script(key))
                 or _contains_mixed_script(item, seen)
                 for key, item in value.items()
             )
@@ -531,13 +714,53 @@ def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
 
 
 def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) -> Decision:
+    if type(tool) is not str or not tool:
+        return Decision(False, "tool name must be a non-empty string")
+    if type(args) is not dict:
+        return Decision(False, "tool arguments must be a plain dictionary")
+    if type(provenance) is not dict:
+        return Decision(False, "argument provenance must be a plain dictionary")
+    try:
+        args = _snapshot_json_value(args)
+    except Exception:
+        return Decision(
+            False,
+            "tool arguments must contain only finite, plain JSON values",
+        )
+    if not all(
+        type(name) is str
+        and type(source) is str
+        and source in ("data", "trusted")
+        for name, source in provenance.items()
+    ):
+        return Decision(False, "argument provenance is malformed")
+    provenance = dict(provenance)
+    current_binding, current_version = _policy_registry_source(reg)
+    expected_binding = getattr(ps, "registry_binding", None)
+    expected_version = getattr(ps, "registry_version", None)
+    if expected_binding is not None and expected_binding != current_binding:
+        return Decision(False, "registry and policy registration diverged")
+    if expected_version is not None and expected_version != current_version:
+        return Decision(False, "registry and policy registration diverged")
     if tool not in reg.tools:
         return Decision(False, f"verb '{tool}' is not in the registry")
     by_name = {p.name: p for p in reg.tools[tool].params}
+    implementation = reg.tools[tool].fn
+    if implementation is not None:
+        try:
+            _validate_callable_signature(tool, set(by_name), implementation)
+        except Exception as exc:
+            return Decision(False, f"registered implementation is incompatible: {exc}")
     pol = ps.policy[tool]
     for name, param in by_name.items():
-        if param.required and name not in args:
-            return Decision(False, f"required param '{name}' is missing")
+        if name not in args:
+            if param.required:
+                return Decision(False, f"required param '{name}' is missing")
+            return Decision(
+                False,
+                f"param '{name}' has an implicit optional default; "
+                "materialize and validate it before gating",
+            )
     for name, val in args.items():
         if name not in pol:
             return Decision(False, f"unknown param '{name}'")
@@ -548,10 +771,9 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
         prov = provenance.get(name, "data")
         if pol[name] is Policy.TRUSTED_FIXED and prov == "data":
             return Decision(False, f"param '{name}' is a locked sink; data may not author it")
-        if (
-            pol[name] in (Policy.TYPED_BOUNDED, Policy.OUTBOUND_PAYLOAD)
-            and not _type_ok(by_name[name], val)
-        ):
+        # Provenance decides who may author the value; it never waives the
+        # registered type, enum, length, or numeric cap.
+        if not _type_ok(by_name[name], val):
             return Decision(False, f"param '{name}' failed its type/bounds check")
     if tool in ps.confirm:
         return Decision(True, f"risk policy ({ps.risk[tool].value}); needs human confirmation",
@@ -582,12 +804,32 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
 # verbatim propagation -- the common, naive case -- not arbitrary control flow.
 # Honest verdict: closes the laundering path it can SEE; the transform path
 # still needs the dev to be careful (or a real interpreter).
+def _json_leaf_token(value: Any) -> tuple[str, Any] | None:
+    """Return a hashable token preserving the exact JSON scalar type."""
+
+    if value is None:
+        return ("null", None)
+    if type(value) is str:
+        return ("string", value)
+    if type(value) is bool:
+        return ("boolean", value)
+    if type(value) is int:
+        return ("integer", value)
+    if type(value) is float and math.isfinite(value):
+        return ("number", value)
+    return None
+
+
 @dataclass
 class ProvenanceLedger:
     """Remembers values that originated from tool results within one session.
 
     Thread one ledger through an agent's tool-use loop. Call `record_result`
     after each tool returns; pass the ledger to `dispatch` on each call.
+    Ledger reads and writes are serialized. :class:`GuardedToolRunner` also
+    holds this same re-entrant session lock from its final revalidation through
+    invocation and result recording, so another thread cannot insert taint in
+    the decision-to-execution gap.
 
     Two layers of matching:
       1. exact   -- a value equal to something a tool returned verbatim.
@@ -609,19 +851,54 @@ class ProvenanceLedger:
     no verbatim substring in the tainted text, so it escapes. That needs real
     dataflow tracking through transforms (CaMeL's interpreter), not matching.
     """
-    _tainted: set[str] = field(default_factory=set)
-    _blobs: list[str] = field(default_factory=list)
-    _canon_blobs: list[str] = field(default_factory=list)
+    _tainted: set[tuple[str, Any]] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _tainted_containers: set[tuple[str, str]] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _blobs: list[str] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
+    _canon_blobs: list[str] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
+    _version: int = field(default=0, init=False, repr=False, compare=False)
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
 
     def record_result(self, result: Any) -> None:
-        """Register every string a tool returned: exact values + full blobs,
-        plus a canonicalized copy of each blob for disguise-resistant matching."""
-        for s in _iter_strings(result):
-            stripped = s.strip()
-            if stripped:
-                self._tainted.add(stripped)
-                self._blobs.append(s)
-                self._canon_blobs.append(_canonical(s))
+        """Register every typed JSON leaf, container, and object key."""
+
+        normalized_result = _snapshot_json_value(result)
+        taint_values = list(_iter_json_taint_values(normalized_result))
+        container_tokens = {
+            token
+            for container in _iter_json_containers(normalized_result)
+            if (token := _json_container_token(container)) is not None
+        }
+        with self._lock:
+            for leaf, is_key in taint_values:
+                token = _json_leaf_token(leaf)
+                if token is None:
+                    continue
+                self._tainted.add(token)
+                if type(leaf) is str and (
+                    not is_key or _has_risk_shaped_form(leaf)
+                ):
+                    self._blobs.append(leaf)
+                    self._canon_blobs.append(_canonical(leaf))
+            self._tainted_containers.update(container_tokens)
+            self._version += 1
 
     def is_tainted(self, value: Any) -> bool:
         """True if value is a tool-result value (exact), a risk-shaped value
@@ -632,13 +909,36 @@ class ProvenanceLedger:
         tainted so the direct dispatch API fails closed instead of recursing.
         """
 
-        return self._is_tainted_value(value, set())
+        try:
+            normalized_value = _snapshot_json_value(value)
+        except Exception:
+            return True
+        with self._lock:
+            return self._is_tainted_value(normalized_value, set(), 0)
 
-    def _is_tainted_value(self, value: Any, seen: set[int]) -> bool:
-        if isinstance(value, str):
-            return self._is_tainted_string(value)
+    def _is_tainted_value(
+        self,
+        value: Any,
+        seen: set[int],
+        depth: int,
+    ) -> bool:
+        token = _json_leaf_token(value)
+        if token is not None:
+            if token in self._tainted:
+                return True
+            if type(value) is str:
+                return self._is_tainted_string(value)
+            return False
         if type(value) not in (dict, list, tuple):
             return False
+        if depth >= MAX_JSON_DEPTH:
+            return True
+        container_token = _json_container_token(value)
+        if (
+            container_token is None
+            or container_token in self._tainted_containers
+        ):
+            return True
 
         identity = id(value)
         if identity in seen:
@@ -648,23 +948,31 @@ class ProvenanceLedger:
             if type(value) is dict:
                 return any(
                     (
-                        isinstance(key, str)
-                        and _has_risk_shaped_form(key)
-                        and self._is_tainted_string(key)
+                        type(key) is str
+                        and (
+                            ("string", key) in self._tainted
+                            or (
+                                _has_risk_shaped_form(key)
+                                and self._is_tainted_string(key)
+                            )
+                        )
                     )
-                    or self._is_tainted_value(item, seen)
+                    or self._is_tainted_value(item, seen, depth + 1)
                     for key, item in value.items()
                 )
-            return any(self._is_tainted_value(item, seen) for item in value)
+            return any(
+                self._is_tainted_value(item, seen, depth + 1)
+                for item in value
+            )
         finally:
             seen.remove(identity)
 
     def _is_tainted_string(self, value: str) -> bool:
+        if ("string", value) in self._tainted:            # layer 1: exact
+            return True
         v = value.strip()
         if not v:
             return False
-        if v in self._tainted:                         # layer 1: exact
-            return True
         if _is_risk_shaped(v):                          # layer 2: contained
             if any(v in blob for blob in self._blobs):
                 return True
@@ -676,6 +984,31 @@ class ProvenanceLedger:
         if _is_risk_shaped(cv) and any(cv in cb for cb in self._canon_blobs):
             return True
         return False
+
+
+_RLOCK_TYPE = type(threading.RLock())
+
+
+def _ledger_internal_binding(ledger: ProvenanceLedger) -> tuple[int, ...]:
+    """Validate and bind the exact mutable stores behind one session ledger."""
+
+    if (
+        type(ledger._tainted) is not set
+        or type(ledger._tainted_containers) is not set
+        or type(ledger._blobs) is not list
+        or type(ledger._canon_blobs) is not list
+        or type(ledger._lock) is not _RLOCK_TYPE
+        or type(ledger._version) is not int
+        or ledger._version < 0
+    ):
+        raise TypeError("ledger internals must be pristine built-in stores")
+    return (
+        id(ledger._tainted),
+        id(ledger._tainted_containers),
+        id(ledger._blobs),
+        id(ledger._canon_blobs),
+        id(ledger._lock),
+    )
 
 
 # Canonicalization: fold a value to a single disguise-free form so that
@@ -692,13 +1025,12 @@ class ProvenanceLedger:
 # com" written as words the agent reads and reconstructs is no longer the same
 # string in disguise, it is content the model understood. That still needs
 # interpreter-level dataflow tracking (CaMeL/FIDES), not normalization.
-import unicodedata
 
 _DISGUISE = re.compile(r"[\s\[\](){}<>]+")
 
 
 def _canonical(s: str) -> str:
-    if not isinstance(s, str):
+    if type(s) is not str:
         return ""
     n = unicodedata.normalize("NFKC", s)
     n = n.casefold()
@@ -709,13 +1041,16 @@ def _canonical(s: str) -> str:
 
 
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+_URI_RE = re.compile(
+    r"(?:(?:https?|ftp|wss?)://|//|www\.)[^\s]+",
+    re.IGNORECASE,
+)
 
 
 def _is_risk_shaped(v: str) -> bool:
     """A value that can author exfiltration: an email address or a URL.
     Containment matching is restricted to these to bound false positives."""
-    return bool(_EMAIL_RE.fullmatch(v) or _URL_RE.search(v))
+    return bool(_EMAIL_RE.fullmatch(v) or _URI_RE.fullmatch(v))
 
 
 def _has_risk_shaped_form(v: str) -> bool:
@@ -725,18 +1060,32 @@ def _has_risk_shaped_form(v: str) -> bool:
     return _is_risk_shaped(stripped) or _is_risk_shaped(_canonical(stripped))
 
 
-def _iter_strings(obj: Any, seen: set[int] | None = None):
-    """Yield string value leaves and risk-shaped keys from a tool result.
+def _json_container_token(value: Any) -> tuple[str, str] | None:
+    """Return a bounded exact-content token for a plain JSON container."""
 
-    Ordinary object keys (``email``, ``url``, ``content``) describe structure,
-    not tool-authored data. Recording all of them would taint every later
-    object with the same schema. A key that is itself an email address or URL,
-    however, can carry the same authority as a value and must be recorded.
+    if type(value) is dict:
+        kind = "object"
+    elif type(value) is list:
+        kind = "array"
+    else:
+        return None
+    material = _canonical_json_value(value).encode("ascii")
+    return (kind, hashlib.sha256(material).hexdigest())
+
+
+def _iter_json_taint_values(obj: Any, seen: set[int] | None = None):
+    """Yield ``(scalar, is_object_key)`` pairs from one tool result.
+
+    Every JSON object key is itself an exact tool-authored string and may be
+    copied into a later locked sink (for example an account identifier used as
+    a map key). All keys therefore receive exact type-tagged taint. Only
+    risk-shaped key strings join the blob/canonical indexes, so non-exact
+    containment remains limited to email/URI values.
     """
-    if isinstance(obj, str):
-        yield obj
+    if _json_leaf_token(obj) is not None:
+        yield obj, False
         return
-    if not isinstance(obj, (dict, list, tuple)):
+    if type(obj) not in (dict, list, tuple):
         return
 
     seen = set() if seen is None else seen
@@ -745,14 +1094,33 @@ def _iter_strings(obj: Any, seen: set[int] | None = None):
         return
     seen.add(identity)
     try:
-        if isinstance(obj, dict):
+        if type(obj) is dict:
             for key, value in obj.items():
-                if isinstance(key, str) and _has_risk_shaped_form(key):
-                    yield key
-                yield from _iter_strings(value, seen)
+                if type(key) is str:
+                    yield key, True
+                yield from _iter_json_taint_values(value, seen)
         else:
             for value in obj:
-                yield from _iter_strings(value, seen)
+                yield from _iter_json_taint_values(value, seen)
+    finally:
+        seen.remove(identity)
+
+
+def _iter_json_containers(obj: Any, seen: set[int] | None = None):
+    """Yield every plain JSON container for exact propagation tracking."""
+
+    if type(obj) not in (dict, list):
+        return
+    seen = set() if seen is None else seen
+    identity = id(obj)
+    if identity in seen:
+        return
+    seen.add(identity)
+    try:
+        yield obj
+        values = obj.values() if type(obj) is dict else obj
+        for value in values:
+            yield from _iter_json_containers(value, seen)
     finally:
         seen.remove(identity)
 
@@ -773,18 +1141,31 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
     overriding `trusted_args` -- this is what stops a laundered tool result
     from reaching a locked sink. Returns a Decision.
     """
-    if not isinstance(tool_use, dict):
-        return Decision(False, "tool call must be a dictionary")
+    if type(tool_use) is not dict:
+        return Decision(False, "tool call must be a plain dictionary")
     tool = tool_use.get("name")
     args = tool_use.get("input")
-    if not isinstance(tool, str) or not tool:
+    if type(tool) is not str or not tool:
         return Decision(False, "tool call must include a non-empty string name")
-    if not isinstance(args, dict):
-        return Decision(False, "tool call input must be a dictionary")
+    if type(args) is not dict:
+        return Decision(False, "tool call input must be a plain dictionary")
     if trusted_args is None:
         trusted_args = {}
-    if not isinstance(trusted_args, dict):
-        return Decision(False, "trusted_args must be a dictionary")
+    if type(trusted_args) is not dict:
+        return Decision(False, "trusted_args must be a plain dictionary")
+    try:
+        approved_call, approved_trusted_args = _snapshot_tool_call(
+            tool_use,
+            trusted_args,
+        )
+    except Exception:
+        return Decision(
+            False,
+            "tool call and trusted_args must contain only finite, plain JSON values",
+        )
+    tool = approved_call["name"]
+    args = approved_call["input"]
+    trusted_args = approved_trusted_args or {}
     provenance = {}
     for n in args:
         if ledger is not None and ledger.is_tainted(args.get(n)):
@@ -800,13 +1181,788 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
     return gate(reg, ps, tool, args, provenance)
 
 
+@dataclass(frozen=True)
+class _FrozenEnumMember:
+    canonical_json: str
+
+
+@dataclass(frozen=True)
+class _FrozenParam:
+    name: str
+    type: str
+    enum: tuple[_FrozenEnumMember, ...] | None
+    max_len: int | None
+    cap: float | int | None
+    sink: bool | None
+    required: bool
+    source_id: int
+    enum_source_id: int | None
+
+
+@dataclass(frozen=True)
+class _FrozenTool:
+    name: str
+    params: tuple[_FrozenParam, ...]
+    fn: Callable[..., Any] | None
+    risk: Risk | None
+    source_id: int
+    params_source_id: int
+
+
+@dataclass(frozen=True)
+class _FrozenRegistry:
+    tools: Any
+    source_tools_id: int
+
+
+@dataclass(frozen=True)
+class _FrozenPolicySet:
+    policy: Any
+    risk: Any
+    review: tuple[tuple[str, str], ...]
+    confirm: tuple[str, ...]
+    risk_inference: Any
+    risk_review: tuple[str, ...]
+    risk_conflicts: tuple[str, ...]
+    registry_binding: str | None
+    registry_version: int | None
+
+
+@dataclass(frozen=True)
+class _RegistrationBundle:
+    registry: _FrozenRegistry
+    policy_set: _FrozenPolicySet
+    registration_id: str
+    source_state: tuple[int, str]
+
+
+def _normalize_declared_risk(value: Risk | str | None) -> Risk | None:
+    if value is None:
+        return None
+    if isinstance(value, Risk):
+        return value
+    if type(value) is str:
+        return Risk(value)
+    raise TypeError("tool risk must be a Risk, string, or None")
+
+
+@dataclass(frozen=True)
+class _CallableShape:
+    target: FunctionType
+    signature: inspect.Signature
+    kind: str
+    invocation_id: int
+    owner_id: int | None
+
+
+_MISSING_STATIC_ATTRIBUTE = object()
+
+
+def _raw_callable_shape(
+    tool_name: str,
+    implementation: Callable[..., Any],
+) -> _CallableShape:
+    """Inspect only the Python callable that ``**kwargs`` will really enter.
+
+    ``inspect.signature`` normally honors caller-controlled ``__signature__``
+    and follows ``__wrapped__``. Neither is execution evidence. Explicit
+    ``__signature__`` metadata is rejected and wrapping is deliberately not
+    followed. Beta.8 accepts only exact Python functions. Bound methods,
+    callable objects, and opaque builtin/extension callables carry receiver or
+    implementation state that is not a declared tool argument, so they fail
+    closed.
+    """
+
+    if isinstance(implementation, functools.partial):
+        raise TypeError(
+            f"implementation for '{tool_name}' cannot hide bound partial arguments"
+        )
+
+    try:
+        advertised_signature = inspect.getattr_static(
+            implementation,
+            "__signature__",
+            _MISSING_STATIC_ATTRIBUTE,
+        )
+    except Exception as exc:
+        raise TypeError(
+            f"implementation for '{tool_name}' has unsafe signature metadata"
+        ) from exc
+    if advertised_signature is not _MISSING_STATIC_ATTRIBUTE:
+        raise TypeError(
+            f"implementation for '{tool_name}' cannot define __signature__"
+        )
+
+    if type(implementation) is MethodType:
+        raise TypeError(
+            f"implementation for '{tool_name}' cannot be a bound method; "
+            "materialize receiver state as declared arguments"
+        )
+    if type(implementation) is not FunctionType:
+        raise TypeError(
+            f"implementation for '{tool_name}' must be an exact Python function"
+        )
+    target = implementation
+    kind = "function"
+    invocation_id = id(implementation)
+    owner_id: int | None = None
+
+    if inspect.getattr_static(
+        target,
+        "__signature__",
+        _MISSING_STATIC_ATTRIBUTE,
+    ) is not _MISSING_STATIC_ATTRIBUTE:
+        raise TypeError(
+            f"implementation for '{tool_name}' cannot define __signature__"
+        )
+    try:
+        signature = inspect.signature(target, follow_wrapped=False)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"implementation for '{tool_name}' must have an inspectable signature"
+        ) from exc
+
+    return _CallableShape(
+        target=target,
+        signature=signature,
+        kind=kind,
+        invocation_id=invocation_id,
+        owner_id=owner_id,
+    )
+
+
+def _validate_callable_signature(
+    tool_name: str,
+    param_names: set[str],
+    implementation: Callable[..., Any],
+) -> None:
+    shape = _raw_callable_shape(tool_name, implementation)
+
+    explicit: set[str] = set()
+    accepts_extra_keywords = False
+    for parameter in shape.signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            raise TypeError(
+                f"implementation for '{tool_name}' cannot use positional-only "
+                "or variadic positional parameters"
+            )
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            accepts_extra_keywords = True
+            continue
+        explicit.add(parameter.name)
+
+    undeclared = explicit - param_names
+    if undeclared:
+        names = ", ".join(sorted(undeclared))
+        raise ValueError(
+            f"implementation for '{tool_name}' consumes undeclared params: {names}"
+        )
+    unaccepted = param_names - explicit
+    if unaccepted and not accepts_extra_keywords:
+        names = ", ".join(sorted(unaccepted))
+        raise ValueError(
+            f"implementation for '{tool_name}' does not accept params: {names}"
+        )
+
+
+def _raw_signature_material(signature: inspect.Signature) -> list[dict[str, Any]]:
+    """Binding-relevant raw signature, without invoking arbitrary ``repr``."""
+
+    return [
+        {
+            "name": parameter.name,
+            "kind": parameter.kind.name,
+            "has_default": parameter.default is not inspect.Parameter.empty,
+        }
+        for parameter in signature.parameters.values()
+    ]
+
+
+def _code_content_sha256(code: Any) -> str:
+    try:
+        encoded = marshal.dumps(code)
+    except Exception as exc:
+        raise TypeError("registered implementation code cannot be fingerprinted") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _freeze_registry(
+    registry: Registry,
+    *,
+    validate_callable: bool = True,
+) -> _FrozenRegistry:
+    if type(registry.tools) is not dict:
+        raise TypeError("registry tools must be a plain dictionary")
+
+    frozen_tools: dict[str, _FrozenTool] = {}
+    for registered_name, tool in registry.tools.items():
+        if type(registered_name) is not str or not registered_name:
+            raise ValueError("registered tool names must be non-empty strings")
+        if type(tool) is not Tool:
+            raise TypeError("registry entries must be Tool instances")
+        if tool.name != registered_name:
+            raise ValueError("registry key and Tool.name must match")
+        if type(tool.params) is not list:
+            raise TypeError("Tool.params must be a plain list")
+
+        params: list[_FrozenParam] = []
+        seen_names: set[str] = set()
+        for param in tool.params:
+            if type(param) is not Param:
+                raise TypeError("Tool.params must contain Param instances")
+            if type(param.name) is not str or not param.name:
+                raise ValueError("parameter names must be non-empty strings")
+            if param.name in seen_names:
+                raise ValueError(f"duplicate parameter '{param.name}'")
+            seen_names.add(param.name)
+            if type(param.type) is not str or param.type not in _PARAM_TYPES:
+                raise ValueError(
+                    "parameter type must be one of: "
+                    + ", ".join(sorted(_PARAM_TYPES))
+                )
+            if param.enum is not None and type(param.enum) is not list:
+                raise TypeError("parameter enums must be plain lists")
+            if param.type == "enum" and param.enum is None:
+                raise ValueError("enum parameters must declare a plain JSON enum")
+            if param.type != "enum" and param.enum is not None:
+                raise ValueError("enum values require parameter type 'enum'")
+            frozen_enum = None
+            if param.enum is not None:
+                frozen_enum = tuple(
+                    _FrozenEnumMember(
+                        _canonical_json_value(_snapshot_json_value(member))
+                    )
+                    for member in param.enum
+                )
+            if param.max_len is not None and (
+                type(param.max_len) is not int or param.max_len < 0
+            ):
+                raise ValueError("parameter max_len must be a non-negative integer")
+            if param.max_len is not None and param.type not in {
+                "string",
+                "email",
+                "uri",
+                "object",
+                "array",
+            }:
+                raise ValueError(
+                    "parameter max_len requires a string, object, or array type"
+                )
+            if param.cap is not None and not (
+                type(param.cap) in (int, float)
+                and (type(param.cap) is int or math.isfinite(param.cap))
+            ):
+                raise ValueError("parameter cap must be a finite number")
+            if param.cap is not None and param.type not in {"number", "integer"}:
+                raise ValueError("parameter cap requires a number or integer type")
+            if param.sink is not None and type(param.sink) is not bool:
+                raise TypeError("parameter sink must be a boolean or None")
+            if type(param.required) is not bool:
+                raise TypeError("parameter required must be a boolean")
+            params.append(
+                _FrozenParam(
+                    name=param.name,
+                    type=param.type,
+                    enum=frozen_enum,
+                    max_len=param.max_len,
+                    cap=param.cap,
+                    sink=param.sink,
+                    required=param.required,
+                    source_id=id(param),
+                    enum_source_id=None if param.enum is None else id(param.enum),
+                )
+            )
+
+        if tool.fn is not None and not callable(tool.fn):
+            raise TypeError("registered implementations must be callable or None")
+        if validate_callable and tool.fn is None:
+            raise TypeError(
+                f"registered implementation for '{tool.name}' must be callable"
+            )
+        if tool.fn is not None and validate_callable:
+            _validate_callable_signature(tool.name, seen_names, tool.fn)
+        frozen_tools[registered_name] = _FrozenTool(
+            name=tool.name,
+            params=tuple(params),
+            fn=tool.fn,
+            risk=_normalize_declared_risk(tool.risk),
+            source_id=id(tool),
+            params_source_id=id(tool.params),
+        )
+    return _FrozenRegistry(MappingProxyType(frozen_tools), id(registry.tools))
+
+
+def _freeze_policy_set(
+    policy_set: PolicySet,
+    registry: _FrozenRegistry,
+) -> _FrozenPolicySet:
+    tool_names = set(registry.tools)
+    if type(policy_set.policy) is not dict or set(policy_set.policy) != tool_names:
+        raise ValueError("policy tools must exactly match the frozen registry")
+    if type(policy_set.risk) is not dict or set(policy_set.risk) != tool_names:
+        raise ValueError("risk tools must exactly match the frozen registry")
+    if (
+        type(policy_set.risk_inference) is not dict
+        or set(policy_set.risk_inference) != tool_names
+    ):
+        raise ValueError("risk evidence must exactly match the frozen registry")
+
+    expected_policies: dict[str, dict[str, Policy]] = {}
+    expected_risks: dict[str, Risk] = {}
+    expected_assessments: dict[str, RiskAssessment] = {}
+    expected_review: list[tuple[str, str]] = []
+    expected_confirm: list[str] = []
+    expected_risk_review: list[str] = []
+    expected_risk_conflicts: list[str] = []
+    for tool_name, tool in registry.tools.items():
+        inferred = infer_risk(tool_name)
+        conflict = (
+            tool.risk is not None
+            and inferred.risk is not Risk.UNKNOWN
+            and tool.risk is not inferred.risk
+        )
+        effective_risk = (
+            Risk.UNKNOWN if tool.risk is None or conflict else tool.risk
+        )
+        expected_risks[tool_name] = effective_risk
+        expected_assessments[tool_name] = inferred
+        if tool.risk is None or conflict:
+            expected_risk_review.append(tool_name)
+        if conflict:
+            expected_risk_conflicts.append(tool_name)
+        if effective_risk in NEEDS_CONFIRM or (
+            conflict and inferred.risk in NEEDS_CONFIRM
+        ):
+            expected_confirm.append(tool_name)
+
+        expected_policies[tool_name] = {}
+        for param in tool.params:
+            inferred_policy, confidence = infer_policy(param)
+            if confidence is Confidence.UNCERTAIN:
+                if effective_risk is Risk.READ_ONLY:
+                    inferred_policy = Policy.TYPED_BOUNDED
+                else:
+                    expected_review.append((tool_name, param.name))
+            expected_policies[tool_name][param.name] = inferred_policy
+
+    expected_review_set = set(expected_review)
+    policies: dict[str, Any] = {}
+    risks: dict[str, Risk] = {}
+    assessments: dict[str, RiskAssessment] = {}
+    for tool_name, tool in registry.tools.items():
+        raw_params = policy_set.policy[tool_name]
+        expected_params = {param.name for param in tool.params}
+        if type(raw_params) is not dict or set(raw_params) != expected_params:
+            raise ValueError(
+                f"policy params for '{tool_name}' must match its registration"
+            )
+        normalized_params = {
+            name: value if isinstance(value, Policy) else Policy(value)
+            for name, value in raw_params.items()
+        }
+        for param_name, actual_policy in normalized_params.items():
+            if (
+                (tool_name, param_name) not in expected_review_set
+                and actual_policy
+                is not expected_policies[tool_name][param_name]
+            ):
+                raise ValueError(
+                    "parameter policy may differ from inference only for "
+                    "entries in the derived review queue"
+                )
+        policies[tool_name] = MappingProxyType(normalized_params)
+        risk_value = policy_set.risk[tool_name]
+        risks[tool_name] = (
+            risk_value if isinstance(risk_value, Risk) else Risk(risk_value)
+        )
+        assessment = policy_set.risk_inference[tool_name]
+        if type(assessment) is not RiskAssessment:
+            raise TypeError("risk evidence must contain RiskAssessment values")
+        if (
+            not isinstance(assessment.risk, Risk)
+            or not isinstance(assessment.confidence, RiskConfidence)
+            or type(assessment.source) is not str
+            or type(assessment.mutability) is not str
+            or type(assessment.matched_tokens) is not tuple
+            or not all(type(token) is str for token in assessment.matched_tokens)
+            or type(assessment.review_required) is not bool
+        ):
+            raise TypeError("risk evidence fields must be immutable typed values")
+        assessments[tool_name] = RiskAssessment(
+            risk=assessment.risk,
+            source=assessment.source,
+            confidence=assessment.confidence,
+            mutability=assessment.mutability,
+            matched_tokens=tuple(assessment.matched_tokens),
+            review_required=assessment.review_required,
+        )
+
+    review = tuple(tuple(item) for item in policy_set.review)
+    if not all(
+        len(item) == 2
+        and item[0] in tool_names
+        and item[1] in policies[item[0]]
+        for item in review
+    ):
+        raise ValueError("parameter review entries must match the frozen policy")
+    confirm = tuple(policy_set.confirm)
+    risk_review = tuple(policy_set.risk_review)
+    risk_conflicts = tuple(policy_set.risk_conflicts)
+    if not all(name in tool_names for name in confirm + risk_review + risk_conflicts):
+        raise ValueError("risk lists must reference frozen registered tools")
+    if review != tuple(expected_review):
+        raise ValueError("parameter review queue must match the derived policy")
+    if risks != expected_risks:
+        raise ValueError("effective risk must match the registered declaration")
+    if assessments != expected_assessments:
+        raise ValueError("risk evidence must match the derived name evidence")
+    if (
+        risk_review != tuple(expected_risk_review)
+        or risk_conflicts != tuple(expected_risk_conflicts)
+    ):
+        raise ValueError("risk review and conflict state must match derived evidence")
+    if len(confirm) != len(set(confirm)) or not set(expected_confirm).issubset(confirm):
+        raise ValueError("confirmation policy cannot remove a derived requirement")
+
+    frozen_binding, _ = _policy_registry_source(registry)
+    return _FrozenPolicySet(
+        policy=MappingProxyType(policies),
+        risk=MappingProxyType(risks),
+        review=review,
+        confirm=confirm,
+        risk_inference=MappingProxyType(assessments),
+        risk_review=risk_review,
+        risk_conflicts=risk_conflicts,
+        registry_binding=frozen_binding,
+        registry_version=None,
+    )
+
+
+def _callable_identity(implementation: Callable[..., Any] | None) -> str:
+    """Public content/signature digest; contains no process memory addresses."""
+
+    if implementation is None:
+        return "none"
+    shape = _raw_callable_shape("<identity>", implementation)
+    target = shape.target
+    return "sha256:" + _material_sha256(
+        {
+            "kind": shape.kind,
+            "module": target.__module__,
+            "qualname": target.__qualname__,
+            "code_sha256": _code_content_sha256(target.__code__),
+            "signature": _raw_signature_material(shape.signature),
+        }
+    )
+
+
+def _private_callable_binding(
+    implementation: Callable[..., Any] | None,
+) -> dict[str, Any] | None:
+    """Live drift token; raw identities stay inside hashed registry material."""
+
+    if implementation is None:
+        return None
+    shape = _raw_callable_shape("<binding>", implementation)
+    return {
+        "invocation_id": shape.invocation_id,
+        "owner_id": shape.owner_id,
+        "code_sha256": _code_content_sha256(shape.target.__code__),
+        "signature": _raw_signature_material(shape.signature),
+    }
+
+
+def _registry_material(registry: _FrozenRegistry) -> list[dict[str, Any]]:
+    material = [{"source_tools_id": registry.source_tools_id}]
+    for name in sorted(registry.tools):
+        tool = registry.tools[name]
+        material.append(
+            {
+                "name": name,
+                "params": [
+                    {
+                        "name": param.name,
+                        "type": param.type,
+                        "enum": (
+                            None
+                            if param.enum is None
+                            else [member.canonical_json for member in param.enum]
+                        ),
+                        "max_len": param.max_len,
+                        "cap": param.cap,
+                        "sink": param.sink,
+                        "required": param.required,
+                        "source_id": param.source_id,
+                        "enum_source_id": param.enum_source_id,
+                    }
+                    for param in tool.params
+                ],
+                "risk": None if tool.risk is None else tool.risk.value,
+                "executable": _callable_identity(tool.fn),
+                "private_executable_binding": _private_callable_binding(tool.fn),
+                "source_id": tool.source_id,
+                "params_source_id": tool.params_source_id,
+            }
+        )
+    return material
+
+
+def _risk_assessment_material(assessment: RiskAssessment) -> dict[str, Any]:
+    return {
+        "risk": assessment.risk.value,
+        "source": assessment.source,
+        "confidence": assessment.confidence.value,
+        "mutability": assessment.mutability,
+        "matched_tokens": assessment.matched_tokens,
+        "review_required": assessment.review_required,
+    }
+
+
+def _policy_material(policy_set: _FrozenPolicySet) -> dict[str, Any]:
+    return {
+        "policy": {
+            tool: {
+                name: policy.value
+                for name, policy in sorted(policy_set.policy[tool].items())
+            }
+            for tool in sorted(policy_set.policy)
+        },
+        "risk": {
+            tool: policy_set.risk[tool].value for tool in sorted(policy_set.risk)
+        },
+        "review": sorted(policy_set.review),
+        "confirm": sorted(policy_set.confirm),
+        "risk_inference": {
+            tool: _risk_assessment_material(policy_set.risk_inference[tool])
+            for tool in sorted(policy_set.risk_inference)
+        },
+        "risk_review": sorted(policy_set.risk_review),
+        "risk_conflicts": sorted(policy_set.risk_conflicts),
+        "registry_binding": policy_set.registry_binding,
+        "registry_version": policy_set.registry_version,
+    }
+
+
+def _material_sha256(material: Any) -> str:
+    encoded = json.dumps(
+        material,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _policy_registry_source(registry: Any) -> tuple[str | None, int | None]:
+    """Bind a PolicySet to the exact registration it was derived from."""
+
+    try:
+        if isinstance(registry, _FrozenRegistry):
+            frozen = registry
+            version = None
+        elif type(registry) is Registry:
+            frozen = _freeze_registry(registry, validate_callable=False)
+            version = registry.version
+        else:
+            return None, None
+        return _material_sha256(_registry_material(frozen)), version
+    except Exception:
+        return None, getattr(registry, "version", None)
+
+
+def _make_registration_bundle(
+    registry: Registry,
+    policy_set: PolicySet | None,
+) -> _RegistrationBundle:
+    frozen_registry = _freeze_registry(registry)
+    registry_fingerprint = _material_sha256(_registry_material(frozen_registry))
+    if policy_set is not None and (
+        policy_set.registry_binding != registry_fingerprint
+        or policy_set.registry_version != registry.version
+    ):
+        raise ValueError(
+            "policy_set was built for a different registry registration"
+        )
+    source_policy = policy_set or build_policy(frozen_registry)
+    frozen_policy = _freeze_policy_set(source_policy, frozen_registry)
+    registration_id = _material_sha256(
+        {
+            "registry": _registry_material(frozen_registry),
+            "policy": _policy_material(frozen_policy),
+        }
+    )
+    return _RegistrationBundle(
+        registry=frozen_registry,
+        policy_set=frozen_policy,
+        registration_id=registration_id,
+        source_state=(registry.version, registry_fingerprint),
+    )
+
+
+def _live_registry_state(registry: Registry) -> tuple[int, str] | None:
+    try:
+        frozen = _freeze_registry(registry)
+        return registry.version, _material_sha256(_registry_material(frozen))
+    except Exception:
+        return None
+
+
+def _live_policy_state(
+    policy_set: PolicySet,
+    registry: _FrozenRegistry,
+) -> str | None:
+    try:
+        frozen = _freeze_policy_set(policy_set, registry)
+        return _material_sha256(
+            {
+                "material": _policy_material(frozen),
+                "source_binding": policy_set.registry_binding,
+                "source_version": policy_set.registry_version,
+                "objects": {
+                    "policy_set": id(policy_set),
+                    "policy": id(policy_set.policy),
+                    "policy_tools": {
+                        tool: id(policy_set.policy[tool])
+                        for tool in sorted(policy_set.policy)
+                    },
+                    "risk": id(policy_set.risk),
+                    "review": id(policy_set.review),
+                    "confirm": id(policy_set.confirm),
+                    "risk_inference": id(policy_set.risk_inference),
+                    "risk_review": id(policy_set.risk_review),
+                    "risk_conflicts": id(policy_set.risk_conflicts),
+                },
+            }
+        )
+    except Exception:
+        return None
+
+
+def _canonical_arguments(arguments: dict[str, Any]) -> str:
+    """Canonical, ASCII-only JSON for safe transport to confirmation UIs."""
+
+    return json.dumps(
+        arguments,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _confirmation_request(
+    bundle: _RegistrationBundle,
+    decision: Decision,
+    approved_call: dict[str, Any],
+    ledger: ProvenanceLedger,
+) -> ConfirmationRequest:
+    tool_name = approved_call["name"]
+    tool = bundle.registry.tools[tool_name]
+    arguments_json = _canonical_arguments(approved_call["input"])
+    effective_risk = bundle.policy_set.risk[tool_name]
+    executable_id = _callable_identity(tool.fn)
+    ledger_version = ledger.version
+    action_id = _material_sha256(
+        {
+            "tool": tool_name,
+            "arguments_json": arguments_json,
+            "risk": effective_risk.value,
+            "registration_id": bundle.registration_id,
+            "executable_id": executable_id,
+            "ledger_version": ledger_version,
+        }
+    )
+    return ConfirmationRequest(
+        decision=decision,
+        tool_name=tool_name,
+        arguments_json=arguments_json,
+        risk=effective_risk,
+        risk_assessment=bundle.policy_set.risk_inference[tool_name],
+        declared_risk=tool.risk,
+        risk_conflict=tool_name in bundle.policy_set.risk_conflicts,
+        registration_id=bundle.registration_id,
+        executable_id=executable_id,
+        ledger_version=ledger_version,
+        action_id=action_id,
+    )
+
+
+def _is_async_callable(implementation: Callable[..., Any]) -> bool:
+    shape = _raw_callable_shape("<async-check>", implementation)
+    return inspect.iscoroutinefunction(shape.target) or inspect.isasyncgenfunction(
+        shape.target
+    )
+
+
+def _close_awaitable(value: Any) -> None:
+    """Close native coroutine/generator awaitables without calling user hooks.
+
+    ``inspect.isawaitable`` also accepts arbitrary objects implementing
+    ``__await__``.  Looking up and invoking a ``close`` attribute on such an
+    unsupported result would execute one more caller-defined method after the
+    runner had already rejected the result.  Native coroutine and generator
+    objects have interpreter-provided ``close`` methods and are safe to close
+    to suppress resource warnings; other awaitables are rejected untouched.
+    """
+
+    if not (inspect.iscoroutine(value) or inspect.isgenerator(value)):
+        return
+    try:
+        value.close()
+    except Exception:
+        pass
+
+
+def _close_async_generator(value: Any) -> None:
+    """Close an async-generator result even when called inside a running loop."""
+
+    try:
+        close_awaitable = value.aclose()
+    except Exception:
+        return
+
+    def close_in_fresh_loop() -> None:
+        async def await_close() -> None:
+            await close_awaitable
+
+        try:
+            asyncio.run(await_close())
+        except Exception:
+            _close_awaitable(close_awaitable)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        close_in_fresh_loop()
+        return
+
+    closer = threading.Thread(target=close_in_fresh_loop, daemon=True)
+    closer.start()
+    closer.join()
+
+
 @dataclass
 class ExecutionResult:
-    """The policy decision and whether the underlying tool actually ran."""
+    """Outcome of gating and synchronous implementation completion.
+
+    ``invoked`` becomes true as soon as the callable is entered. ``executed``
+    is stricter: the callable completed synchronously with a plain JSON result
+    that was isolated and recorded in the provenance ledger. If entering the
+    implementation raises ``Exception``, the exception is not exposed or
+    propagated: the result reports ``invoked=True``, ``executed=False``, and
+    ``contract_violation='invocation_exception'``. Process-control
+    ``BaseException`` subclasses still propagate.
+    """
 
     decision: Decision
     executed: bool
     result: Any = None
+    invoked: bool = False
+    contract_violation: str | None = None
 
 
 class GuardedToolRunner:
@@ -817,6 +1973,15 @@ class GuardedToolRunner:
     call :meth:`run`. A confirmation callback is required for any decision with
     ``needs_confirm=True``; without one, the runner does not execute the tool.
     Successful tool results are recorded in the session ledger automatically.
+    One per-ledger re-entrant lock serializes the final gate, invocation, and
+    result publication. Human confirmation runs outside that lock; after it
+    returns, configuration and ledger state are revalidated while locked.
+
+    The registration identity commits Python code content and its raw binding
+    signature. It does not snapshot mutable globals, closure cells, or bound
+    instance/callable-object state. Implementations and confirmation callbacks
+    are trusted application code; applications must keep that semantic state
+    stable (or externally synchronize it) for the duration of a call.
     """
 
     def __init__(
@@ -826,17 +1991,129 @@ class GuardedToolRunner:
         *,
         ledger: ProvenanceLedger | None = None,
     ) -> None:
+        if type(registry) is not Registry:
+            raise TypeError("registry must be an exact Registry instance")
+        if policy_set is not None and type(policy_set) is not PolicySet:
+            raise TypeError("policy_set must be an exact PolicySet instance")
+        if ledger is not None and type(ledger) is not ProvenanceLedger:
+            raise TypeError("ledger must be an exact ProvenanceLedger instance")
         self.registry = registry
-        self.policy_set = policy_set or build_policy(registry)
-        self.ledger = ledger if ledger is not None else ProvenanceLedger()
+        self._session_ledger = ledger if ledger is not None else ProvenanceLedger()
+        self._ledger_internal_binding = _ledger_internal_binding(
+            self._session_ledger
+        )
+        # Public beta compatibility. Replacing this alias is detected before
+        # execution; all approved work remains bound to _session_ledger.
+        self.ledger = self._session_ledger
+        self._bundle = _make_registration_bundle(registry, policy_set)
+        self.policy_set = self._bundle.policy_set
+        self._source_policy = policy_set
+        self._source_policy_state = (
+            None
+            if policy_set is None
+            else _live_policy_state(policy_set, self._bundle.registry)
+        )
+
+    def _configuration_drift(self) -> Decision | None:
+        if self.ledger is not self._session_ledger:
+            return Decision(
+                False,
+                "provenance ledger changed; rebuild the guarded runner",
+            )
+        try:
+            ledger_binding = _ledger_internal_binding(self._session_ledger)
+        except Exception:
+            return Decision(
+                False,
+                "provenance ledger internals changed; rebuild the guarded runner",
+            )
+        if ledger_binding != self._ledger_internal_binding:
+            return Decision(
+                False,
+                "provenance ledger internals changed; rebuild the guarded runner",
+            )
+        if _live_registry_state(self.registry) != self._bundle.source_state:
+            return Decision(False, "registry changed; rebuild the guarded runner")
+        if self._source_policy is not None and _live_policy_state(
+            self._source_policy,
+            self._bundle.registry,
+        ) != self._source_policy_state:
+            return Decision(False, "policy changed; rebuild the guarded runner")
+        return None
+
+    def _invoke_locked(
+        self,
+        decision: Decision,
+        approved_call: dict[str, Any],
+        implementation: Callable[..., Any],
+        approved_ledger: ProvenanceLedger,
+    ) -> ExecutionResult:
+        """Invoke and publish while the caller holds ``approved_ledger._lock``."""
+
+        tool_name = approved_call["name"]
+        try:
+            result = implementation(**approved_call["input"])
+        except Exception:
+            return ExecutionResult(
+                Decision(False, f"verb '{tool_name}' raised during invocation"),
+                executed=False,
+                invoked=True,
+                contract_violation="invocation_exception",
+            )
+        if inspect.isasyncgen(result):
+            _close_async_generator(result)
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{tool_name}' returned an async generator; "
+                    "the synchronous runner rejected the result",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="async_generator_result",
+            )
+        if inspect.isawaitable(result):
+            _close_awaitable(result)
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{tool_name}' returned an awaitable; "
+                    "the synchronous runner rejected the result",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="awaitable_result",
+            )
+        try:
+            approved_result = _snapshot_json_value(result)
+            approved_ledger.record_result(approved_result)
+        except Exception:
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{tool_name}' returned a non-plain JSON result",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="unsupported_result",
+            )
+        return ExecutionResult(
+            decision,
+            executed=True,
+            result=approved_result,
+            invoked=True,
+        )
 
     def run(
         self,
         tool_use: dict,
         *,
         trusted_args: dict | None = None,
-        confirm: Callable[[Decision], bool] | None = None,
+        confirm: Callable[[ConfirmationRequest], bool] | None = None,
     ) -> ExecutionResult:
+        drift = self._configuration_drift()
+        if drift is not None:
+            return ExecutionResult(drift, executed=False)
         try:
             approved_call, approved_trusted_args = _snapshot_tool_call(
                 tool_use,
@@ -847,32 +2124,109 @@ class GuardedToolRunner:
                 Decision(False, "tool call could not be snapshotted safely"),
                 executed=False,
             )
-        decision = dispatch(
-            self.registry,
-            self.policy_set,
-            approved_call,
-            trusted_args=approved_trusted_args,
-            ledger=self.ledger,
-        )
-        if not decision.allow:
-            return ExecutionResult(decision, executed=False)
+        approved_ledger = self._session_ledger
+        with approved_ledger._lock:
+            drift = self._configuration_drift()
+            if drift is not None:
+                return ExecutionResult(drift, executed=False)
+            decision = dispatch(
+                self._bundle.registry,
+                self._bundle.policy_set,
+                approved_call,
+                trusted_args=approved_trusted_args,
+                ledger=approved_ledger,
+            )
+            if not decision.allow:
+                return ExecutionResult(decision, executed=False)
 
-        tool_name = approved_call["name"]
-        implementation = self.registry.tools[tool_name].fn
-        if decision.needs_confirm:
+            tool_name = approved_call["name"]
+            implementation = self._bundle.registry.tools[tool_name].fn
+            if implementation is None:
+                return ExecutionResult(
+                    Decision(False, f"verb '{tool_name}' has no implementation"),
+                    executed=False,
+                )
+            if _is_async_callable(implementation):
+                return ExecutionResult(
+                    Decision(
+                        False,
+                        f"verb '{tool_name}' has an async implementation; "
+                        "the synchronous runner rejects it",
+                    ),
+                    executed=False,
+                )
+            if not decision.needs_confirm:
+                return self._invoke_locked(
+                    decision,
+                    approved_call,
+                    implementation,
+                    approved_ledger,
+                )
             if confirm is None:
                 return ExecutionResult(decision, executed=False)
-            confirmation = confirm(decision)
-            if inspect.iscoroutine(confirmation):
-                confirmation.close()
-            if confirmation is not True:
-                return ExecutionResult(decision, executed=False)
-        if implementation is None:
-            raise RuntimeError(f"verb '{tool_name}' has no registered implementation")
+            try:
+                request = _confirmation_request(
+                    self._bundle,
+                    decision,
+                    approved_call,
+                    approved_ledger,
+                )
+            except Exception:
+                return ExecutionResult(
+                    Decision(
+                        False,
+                        "confirmation request could not be serialized safely",
+                    ),
+                    executed=False,
+                )
 
-        result = implementation(**approved_call["input"])
-        self.ledger.record_result(result)
-        return ExecutionResult(decision, executed=True, result=result)
+        # Confirmation is trusted application/UI code and may block. It runs
+        # outside the session lock; the complete action is revalidated below.
+        confirmation = confirm(request)
+        if inspect.isasyncgen(confirmation):
+            _close_async_generator(confirmation)
+            return ExecutionResult(
+                Decision(False, "confirmation callback must be synchronous"),
+                executed=False,
+                contract_violation="awaitable_confirmation",
+            )
+        if inspect.isawaitable(confirmation):
+            _close_awaitable(confirmation)
+            return ExecutionResult(
+                Decision(False, "confirmation callback must be synchronous"),
+                executed=False,
+                contract_violation="awaitable_confirmation",
+            )
+        if confirmation is not True:
+            return ExecutionResult(decision, executed=False)
+
+        with approved_ledger._lock:
+            drift = self._configuration_drift()
+            if drift is not None:
+                return ExecutionResult(drift, executed=False)
+            revalidated = dispatch(
+                self._bundle.registry,
+                self._bundle.policy_set,
+                approved_call,
+                trusted_args=approved_trusted_args,
+                ledger=approved_ledger,
+            )
+            if not revalidated.allow:
+                return ExecutionResult(revalidated, executed=False)
+            if approved_ledger.version != request.ledger_version:
+                return ExecutionResult(
+                    Decision(
+                        False,
+                        "provenance ledger changed; request confirmation again",
+                    ),
+                    executed=False,
+                )
+            return self._invoke_locked(
+                revalidated,
+                approved_call,
+                implementation,
+                approved_ledger,
+            )
 
 
 # === demo =================================================================
@@ -896,12 +2250,22 @@ def demo() -> None:
     print("review queue:  ", ps.review)
     print()
 
-    d = gate(reg, ps, "send_email", {"to": "attacker@evil.com", "body": "x"},
-             {"to": "data", "body": "data"})
+    d = gate(
+        reg,
+        ps,
+        "send_email",
+        {"to": "attacker@evil.com", "subject": "", "body": "x"},
+        {"to": "data", "subject": "trusted", "body": "data"},
+    )
     print("attack send_email(to=attacker):", "BLOCKED" if not d.allow else "ALLOW", "-", d.reason)
 
-    d = gate(reg, ps, "send_email", {"to": "alice@company.com", "body": "summary"},
-             {"to": "trusted", "body": "data"})
+    d = gate(
+        reg,
+        ps,
+        "send_email",
+        {"to": "alice@company.com", "subject": "", "body": "summary"},
+        {"to": "trusted", "subject": "trusted", "body": "data"},
+    )
     print("legit  send_email(to=alice):   ", "ALLOW" if d.allow else "BLOCKED", "-", d.reason)
 
     d = gate(reg, ps, "delete_record", {"table": "users", "record_id": "42"},

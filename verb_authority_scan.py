@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import html
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,7 @@ from verb_authority import (
 )
 
 
-REPORT_VERSION = 2
+REPORT_VERSION = 3
 CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
@@ -45,9 +46,126 @@ CONTROL_VERIFICATION_NOTICE = (
     "verified by this scanner."
 )
 
+_SCHEMA_ANNOTATION_KEYS = frozenset(
+    {
+        "$comment",
+        "default",
+        "deprecated",
+        "description",
+        "examples",
+        "title",
+    }
+)
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "definitions",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+        "patternProperties",
+        "properties",
+    }
+)
+_SCHEMA_RAW_VALUE_KEYWORDS = frozenset({"const", "enum"})
+_MODELED_ARGUMENT_CONSTRAINTS = frozenset({"enum", "maxLength", "maximum"})
+_SHA256_HEX_LENGTH = 64
+
 
 class SchemaError(ValueError):
     """Raised when an input does not contain recognizable tool definitions."""
+
+
+def _validate_plain_json(
+    value: Any,
+    *,
+    field: str = "JSON input",
+    active: set[int] | None = None,
+) -> None:
+    """Require a finite, cycle-free tree of exact built-in JSON types."""
+
+    value_type = type(value)
+    if value_type in (str, int, bool) or value is None:
+        if value_type is str:
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise SchemaError(f"{field} contains invalid Unicode") from exc
+        return
+    if value_type is float:
+        if not math.isfinite(value):
+            raise SchemaError(f"{field} contains a non-finite number")
+        return
+    if value_type not in (dict, list):
+        raise SchemaError(f"{field} must contain only plain JSON values")
+
+    active = set() if active is None else active
+    identity = id(value)
+    if identity in active:
+        raise SchemaError(f"{field} contains a cycle")
+    active.add(identity)
+    try:
+        if value_type is dict:
+            for key, child in value.items():
+                if type(key) is not str:
+                    raise SchemaError(f"{field} contains a non-string object key")
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise SchemaError(f"{field} contains invalid Unicode") from exc
+                _validate_plain_json(child, field=field, active=active)
+        else:
+            for child in value:
+                _validate_plain_json(child, field=field, active=active)
+    finally:
+        active.remove(identity)
+
+
+def validate_plain_json(value: Any, *, field: str = "JSON input") -> None:
+    """Validate a public API value against the scanner's strict JSON boundary."""
+
+    _validate_plain_json(value, field=field)
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise SchemaError(f"JSON input contains non-standard numeric constant {value}")
+
+
+def _json_object_without_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise SchemaError(f"JSON input contains duplicate object key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_json_stream(stream: Any) -> Any:
+    try:
+        value = json.load(
+            stream,
+            object_pairs_hook=_json_object_without_duplicates,
+            parse_constant=_reject_json_constant,
+        )
+    except SchemaError:
+        raise
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise SchemaError(f"invalid JSON input: {exc}") from exc
+    _validate_plain_json(value)
+    return value
+
+
+def load_json_path(path: str, *, allow_stdin: bool = False) -> Any:
+    """Load strict JSON while rejecting duplicate keys and non-finite numbers."""
+
+    if path == "-":
+        if not allow_stdin:
+            raise SchemaError("stdin is not supported for this input")
+        return _load_json_stream(sys.stdin)
+    with Path(path).open(encoding="utf-8") as source:
+        return _load_json_stream(source)
 
 
 @dataclass
@@ -88,8 +206,8 @@ def _tool_from_mapping(
         schema = {}
     if not isinstance(schema, dict):
         raise SchemaError(f"tool '{name}' has a non-object input schema")
-    if not isinstance(annotations, dict):
-        annotations = {}
+    if type(annotations) is not dict:
+        raise SchemaError(f"tool '{name}' has non-object annotations")
     return ToolDefinition(
         name=name,
         input_schema=schema,
@@ -107,12 +225,16 @@ def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
     Atlas fixture.
     """
 
-    if isinstance(document, list):
+    _validate_plain_json(document, field="schema document")
+
+    if type(document) is list:
         if not document:
             return []
-        return [_tool_from_mapping(item) for item in document if isinstance(item, dict)]
+        if any(type(item) is not dict for item in document):
+            raise SchemaError("tool definitions must be JSON objects")
+        return [_tool_from_mapping(item) for item in document]
 
-    if not isinstance(document, dict):
+    if type(document) is not dict:
         raise SchemaError("schema document must be a JSON object or array")
 
     if isinstance(document.get("sources"), list):
@@ -140,10 +262,11 @@ def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
     if isinstance(document.get("tools"), list):
         return parse_tool_definitions(document["tools"])
     if isinstance(document.get("functions"), list):
+        if any(type(function) is not dict for function in document["functions"]):
+            raise SchemaError("function definitions must be JSON objects")
         return [
             _tool_from_mapping({"type": "function", "function": function})
             for function in document["functions"]
-            if isinstance(function, dict)
         ]
     if "name" in document:
         return [_tool_from_mapping(document)]
@@ -167,15 +290,189 @@ def _property_type(schema: dict[str, Any]) -> str:
     return schema_type
 
 
+def _enum_value_fingerprint(value: Any) -> str:
+    """Return a stable, type-preserving digest without reporting enum values."""
+
+    try:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise SchemaError("enum members must be JSON-compatible values") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _schema_material(value: Any) -> Any:
+    """Return canonical validation material with annotations removed.
+
+    Property and definition names are data inside their containing maps, so
+    they are retained even when they happen to equal an annotation keyword.
+    Enum and const members are instance values rather than subschemas and are
+    likewise copied without interpreting their object keys as annotations.
+    """
+
+    if type(value) is list:
+        return [_schema_material(item) for item in value]
+    if type(value) is not dict:
+        return value
+
+    material: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _SCHEMA_ANNOTATION_KEYS:
+            continue
+        if key in _SCHEMA_MAP_KEYWORDS and type(item) is dict:
+            material[key] = {
+                name: _schema_material(subschema)
+                for name, subschema in item.items()
+            }
+        elif key in _SCHEMA_RAW_VALUE_KEYWORDS:
+            material[key] = item
+        else:
+            material[key] = _schema_material(item)
+    return material
+
+
+def _canonical_sha256(value: Any) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise SchemaError("schema material must be canonical plain JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _definition_schema_material(definition: ToolDefinition) -> Any:
+    """Preserve both wrapped JSON Schema and supported direct-shape exports."""
+
+    if "properties" in definition.input_schema:
+        return _schema_material(definition.input_schema)
+
+    properties, _ = _properties(definition)
+    reserved = {
+        key: value
+        for key, value in definition.input_schema.items()
+        if key not in properties
+    }
+    material = _schema_material(reserved)
+    if type(material) is not dict:
+        material = {}
+    material["properties"] = {
+        name: _schema_material(property_schema)
+        for name, property_schema in properties.items()
+    }
+    return material
+
+
+def _argument_schema_material(schema: Any) -> tuple[str, str]:
+    full_material = _schema_material(schema)
+    residual_material = _schema_material(schema)
+    if type(residual_material) is dict:
+        for field in _MODELED_ARGUMENT_CONSTRAINTS:
+            residual_material.pop(field, None)
+    return (
+        _canonical_sha256(full_material),
+        _canonical_sha256(residual_material),
+    )
+
+
+def _tool_schema_material(
+    definition: ToolDefinition,
+) -> tuple[str, str]:
+    properties, _ = _properties(definition)
+    full_material = _definition_schema_material(definition)
+    residual_material = _definition_schema_material(definition)
+    if type(residual_material) is dict:
+        residual_material.pop("properties", None)
+
+        raw_required = definition.input_schema.get("required")
+        if type(raw_required) is list:
+            unmodeled_required = sorted(set(raw_required) - set(properties))
+            if unmodeled_required:
+                residual_material["required"] = unmodeled_required
+            else:
+                residual_material.pop("required", None)
+
+        additional_properties = definition.input_schema.get("additionalProperties")
+        if type(additional_properties) is bool:
+            residual_material.pop("additionalProperties", None)
+    return (
+        _canonical_sha256(full_material),
+        _canonical_sha256(residual_material),
+    )
+
+
+def _normalized_constraints(
+    schema: Any, *, redact_values: bool = False
+) -> dict[str, Any]:
+    """Preserve the small constraint vocabulary the runtime already parses.
+
+    Enum members are represented only by stable fingerprints. This is enough
+    for set comparison while keeping the original schema values out of both
+    named and redacted reports.
+    """
+
+    if not isinstance(schema, dict):
+        return {}
+
+    constraints: dict[str, Any] = {}
+    if "maximum" in schema:
+        maximum = schema["maximum"]
+        if not (
+            type(maximum) is int
+            or (type(maximum) is float and math.isfinite(maximum))
+        ):
+            raise SchemaError("schema maximum must be a finite number")
+        if redact_values:
+            constraints["maximum_present"] = True
+        else:
+            constraints["maximum"] = maximum
+
+    if "maxLength" in schema:
+        max_length = schema["maxLength"]
+        if type(max_length) is not int or max_length < 0:
+            raise SchemaError("schema maxLength must be a non-negative integer")
+        if redact_values:
+            constraints["max_length_present"] = True
+        else:
+            constraints["max_length"] = max_length
+
+    if "enum" in schema:
+        enum = schema["enum"]
+        if type(enum) is not list:
+            raise SchemaError("schema enum must be an array")
+        fingerprints = sorted({_enum_value_fingerprint(value) for value in enum})
+        if len(fingerprints) != len(enum):
+            raise SchemaError("schema enum members must be unique")
+        if redact_values:
+            constraints["enum"] = {
+                "count": len(fingerprints),
+                "values_redacted": True,
+            }
+        else:
+            constraints["enum"] = {
+                "count": len(fingerprints),
+                "value_fingerprints_sha256": fingerprints,
+            }
+    return constraints
+
+
 def _param(name: str, schema: Any) -> Param:
     if not isinstance(schema, dict):
         schema = {}
     param_type = _property_type(schema)
     enum = schema.get("enum") if param_type == "enum" else None
-    maximum = schema.get("maximum")
-    cap = maximum if isinstance(maximum, (int, float)) else None
-    max_length = schema.get("maxLength")
-    max_len = max_length if isinstance(max_length, int) else None
+    constraints = _normalized_constraints(schema)
+    cap = constraints.get("maximum")
+    max_len = constraints.get("max_length")
     sink = schema.get("x-verb-authority-sink")
     if not isinstance(sink, bool):
         sink = None
@@ -202,10 +499,22 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
         }
     if not isinstance(properties, dict):
         raise SchemaError(f"tool '{definition.name}' has non-object properties")
+    for name, property_schema in properties.items():
+        if type(name) is not str or not name:
+            raise SchemaError(
+                f"tool '{definition.name}' has an invalid property name"
+            )
+        if type(property_schema) not in (dict, bool):
+            raise SchemaError(
+                f"tool '{definition.name}' property '{name}' must be a schema object "
+                "or boolean"
+            )
     required = schema.get("required", [])
-    if not isinstance(required, list):
-        required = []
-    return properties, {item for item in required if isinstance(item, str)}
+    if type(required) is not list or any(type(item) is not str for item in required):
+        raise SchemaError(f"tool '{definition.name}' required must be an array of names")
+    if len(required) != len(set(required)):
+        raise SchemaError(f"tool '{definition.name}' required names must be unique")
+    return properties, set(required)
 
 
 def _optional_text(value: Any, *, field: str) -> str | None:
@@ -551,22 +860,42 @@ def _annotation_conflicts(risk: Risk, annotations: dict[str, Any]) -> list[str]:
         conflicts.append("readOnlyHint=false conflicts with effective risk")
     if destructive is True and risk is not Risk.DESTRUCTIVE:
         conflicts.append("destructiveHint=true conflicts with effective risk")
+    elif (
+        destructive is False
+        and read_only is not True
+        and risk is Risk.DESTRUCTIVE
+    ):
+        conflicts.append("destructiveHint=false conflicts with effective risk")
     return conflicts
 
 
 def _fingerprint(
     definitions: Iterable[ToolDefinition], *, redact_names: bool = False
 ) -> str:
+    if not redact_names:
+        material = [
+            {
+                "name": definition.name,
+                "input_schema": _definition_schema_material(definition),
+            }
+            for definition in definitions
+        ]
+        return _canonical_sha256(material)
+
     normalized = []
     for tool_index, definition in enumerate(definitions, start=1):
         properties, required = _properties(definition)
         normalized_properties = {}
         for param_index, (name, raw) in enumerate(sorted(properties.items()), start=1):
             display_name = f"param_{param_index:03d}" if redact_names else name
-            normalized_properties[display_name] = {
+            normalized_property = {
                 "type": _property_type(raw if isinstance(raw, dict) else {}),
                 "required": name in required,
             }
+            constraints = _normalized_constraints(raw, redact_values=redact_names)
+            if constraints:
+                normalized_property["constraints"] = constraints
+            normalized_properties[display_name] = normalized_property
         normalized.append(
             {
                 "name": f"tool_{tool_index:03d}" if redact_names else definition.name,
@@ -675,6 +1004,35 @@ def scan_definitions(
     if not definitions:
         raise SchemaError("no tool definitions found")
 
+    for definition in definitions:
+        if type(definition) is not ToolDefinition:
+            raise SchemaError("tool definitions must use ToolDefinition values")
+        if type(definition.name) is not str or not definition.name.strip():
+            raise SchemaError("tool definition is missing a non-empty name")
+        for source_field, source_value in (
+            ("source_id", definition.source_id),
+            ("source_url", definition.source_url),
+        ):
+            if source_value is not None and type(source_value) is not str:
+                raise SchemaError(
+                    f"tool '{definition.name}' {source_field} must be text"
+                )
+        _validate_plain_json(
+            definition.input_schema,
+            field=f"tool '{definition.name}' input schema",
+        )
+        _validate_plain_json(
+            definition.annotations,
+            field=f"tool '{definition.name}' annotations",
+        )
+        _properties(definition)
+
+    if control_declarations is not None:
+        _validate_plain_json(
+            control_declarations,
+            field="control declarations",
+        )
+
     declarations = None
     if control_declarations is not None:
         declarations = _validate_control_declarations(
@@ -719,6 +1077,7 @@ def scan_definitions(
     for tool_index, definition in enumerate(definitions, start=1):
         tool_name = definition.name
         display_tool = f"tool_{tool_index:03d}" if redact_names else tool_name
+        properties, _ = _properties(definition)
         risk = policy_set.risk[tool_name]
         inferred_risk = policy_set.risk_inference[tool_name]
         declared_tool = (
@@ -742,17 +1101,26 @@ def scan_definitions(
             if needs_review:
                 counts["review_required"] += 1
             display_param = f"param_{param_index:03d}" if redact_names else param.name
-            arguments.append(
-                {
-                    "name": display_param,
-                    "type": param.type,
-                    "required": param.name in required_by_tool[tool_name],
-                    "policy": final_policy.value,
-                    "confidence": confidence.value,
-                    "review_required": needs_review,
-                    "reason": _reason(param, initial_policy, confidence, risk),
-                }
+            argument = {
+                "name": display_param,
+                "type": param.type,
+                "required": param.name in required_by_tool[tool_name],
+                "policy": final_policy.value,
+                "confidence": confidence.value,
+                "review_required": needs_review,
+                "reason": _reason(param, initial_policy, confidence, risk),
+            }
+            constraints = _normalized_constraints(
+                properties.get(param.name), redact_values=redact_names
             )
+            if constraints:
+                argument["constraints"] = constraints
+            if not redact_names:
+                (
+                    argument["schema_material_fingerprint_sha256"],
+                    argument["unmodeled_schema_fingerprint_sha256"],
+                ) = _argument_schema_material(properties.get(param.name))
+            arguments.append(argument)
         risk_inference: dict[str, Any] = {
             "source": inferred_risk.source,
             "confidence": inferred_risk.confidence.value,
@@ -792,6 +1160,11 @@ def scan_definitions(
             "annotation_conflicts": conflicts,
             "arguments": arguments,
         }
+        if not redact_names:
+            (
+                tool_report["schema_material_fingerprint_sha256"],
+                tool_report["unmodeled_schema_fingerprint_sha256"],
+            ) = _tool_schema_material(definition)
         if definition.source_id and not redact_names:
             tool_report["source_id"] = definition.source_id
         if definition.source_url and not redact_names:
@@ -805,7 +1178,21 @@ def scan_definitions(
             "network_used": False,
             "server_executed": False,
             "descriptions_included": False,
-            "examples_or_values_included": False,
+            "examples_included": False,
+            "defaults_included": False,
+            "runtime_values_included": False,
+            "schema_constraint_values_included": not redact_names,
+            "enum_values_included": False,
+            "enum_value_fingerprints_included": not redact_names,
+            "enum_value_fingerprints_dictionary_guessable": not redact_names,
+            "schema_material_fingerprints_included": not redact_names,
+            "schema_material_fingerprints_dictionary_guessable": not redact_names,
+            "unmodeled_schema_fingerprints_included": not redact_names,
+            "schema_fingerprint_material_scope": (
+                "modeled_presence_and_enum_count_only"
+                if redact_names
+                else "full_validation_material_excluding_annotations"
+            ),
             "names_redacted": redact_names,
             "control_declarations_included": control_declarations is not None,
         },
@@ -849,6 +1236,26 @@ def _markdown_cell(value: Any) -> str:
     return html.escape(str(value), quote=False).replace("|", "\\|").replace("\n", " ")
 
 
+def _constraint_details(argument: dict[str, Any]) -> str:
+    constraints = argument.get("constraints", {})
+    details = []
+    if "maximum" in constraints:
+        details.append(f"maximum: {constraints['maximum']}")
+    elif constraints.get("maximum_present") is True:
+        details.append("maximum: redacted")
+    if "max_length" in constraints:
+        details.append(f"max length: {constraints['max_length']}")
+    elif constraints.get("max_length_present") is True:
+        details.append("max length: redacted")
+    enum = constraints.get("enum")
+    if isinstance(enum, dict):
+        representation = (
+            "redacted" if enum.get("values_redacted") is True else "fingerprinted"
+        )
+        details.append(f"enum: {enum['count']} {representation} member(s)")
+    return "; ".join(details) if details else "—"
+
+
 def _control_details(argument: dict[str, Any]) -> str:
     if argument["schema_exposure"] == "unexposed":
         details = f"enforced by {argument['enforced_by']}"
@@ -876,6 +1283,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "> Local static analysis only: no server was executed and no network was used.",
         "> Descriptions, examples, defaults, and runtime values are not included.",
+        "> Enum members are always omitted. Non-redacted reports use stable SHA-256",
+        "> fingerprints for comparison; these are guessable for low-entropy values.",
+        "> Non-redacted reports also fingerprint full schema validation material,",
+        "> excluding annotations; those hashes are correlatable and may be guessable.",
+        "> Redacted reports omit exact constraint values and all exact schema hashes.",
         "",
         "## Summary",
         "",
@@ -1005,20 +1417,21 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Findings",
             "",
-            "| Tool | Risk | Argument | Type | Required | Policy | Review | Reason |",
-            "|---|---|---|---|---|---|---|---|",
+            "| Tool | Risk | Argument | Type | Required | Constraints | Policy | Review | Reason |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for tool in report["tools"]:
         for argument in tool["arguments"]:
             lines.append(
                 "| {tool} | {risk} | {argument} | {type} | {required} | "
-                "{policy} | {review} | {reason} |".format(
+                "{constraints} | {policy} | {review} | {reason} |".format(
                     tool=_markdown_cell(tool["name"]),
                     risk=_markdown_cell(tool["risk"]),
                     argument=_markdown_cell(argument["name"]),
                     type=_markdown_cell(argument["type"]),
                     required="yes" if argument["required"] else "no",
+                    constraints=_markdown_cell(_constraint_details(argument)),
                     policy=_markdown_cell(argument["policy"]),
                     review="yes" if argument["review_required"] else "no",
                     reason=_markdown_cell(argument["reason"]),
@@ -1027,12 +1440,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         if not tool["arguments"]:
             lines.append(
                 f"| {_markdown_cell(tool['name'])} | {_markdown_cell(tool['risk'])} | "
-                "— | — | — | — | — | no arguments |"
+                "— | — | — | — | — | — | no arguments |"
             )
         for conflict in tool["annotation_conflicts"]:
             lines.append(
                 f"| {_markdown_cell(tool['name'])} | {_markdown_cell(tool['risk'])} | "
-                f"— | — | — | — | yes | {_markdown_cell(conflict)} |"
+                f"— | — | — | — | — | — | yes | {_markdown_cell(conflict)} |"
             )
     lines.extend(
         [
@@ -1050,13 +1463,6 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
-
-
-def _load_json(path: str) -> Any:
-    if path == "-":
-        return json.load(sys.stdin)
-    with Path(path).open(encoding="utf-8") as schema_file:
-        return json.load(schema_file)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1087,9 +1493,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.controls == "-" and "-" in args.schemas:
             raise SchemaError("schemas and control declarations cannot both use stdin")
-        controls = _load_json(args.controls) if args.controls else None
+        controls = (
+            load_json_path(args.controls, allow_stdin=True)
+            if args.controls
+            else None
+        )
         report = scan_documents(
-            [_load_json(path) for path in args.schemas],
+            [load_json_path(path, allow_stdin=True) for path in args.schemas],
             redact_names=args.redact_names,
             control_declarations=controls,
         )

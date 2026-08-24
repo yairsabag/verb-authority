@@ -22,14 +22,22 @@ tool-call arguments—without classifying prompts.
 > can allow the directory-supplied address. Preventing that control-flow
 > influence requires planner- or session-level information-flow control.
 
+> **Compositional-authority boundary:** conformance is per argument, not an
+> authorization decision for the action instance as a whole. A recipient,
+> account, amount, and purpose can each have valid provenance while their
+> particular combination is still forbidden. The surrounding application must
+> enforce cross-argument, transaction, sequence, and business-policy rules
+> before execution; Verb Authority does not infer those relationships.
+
 The per-argument boundary is the intended utility tradeoff: an application can
 lock `to` while still allowing untrusted text to fill `body`, instead of
 disabling the entire `send_email` tool after untrusted content enters context.
 
 This is a research-grade boundary, not a claim that prompt injection is
 impossible. The optional ledger catches exact reuse, emails and URLs extracted
-from returned text, nested JSON value leaves or risk-shaped object keys, and
-several lexical disguises. It does **not** follow a value through semantic
+from returned text, nested JSON values, every exact object key, exact
+containers (including empty ones), and several lexical disguises. It does
+**not** follow a value through semantic
 reconstruction—for example,
 turning “attacker at evil dot com” into an address. A developer can also defeat
 the guarantee by marking untrusted input as trusted without using the ledger.
@@ -42,14 +50,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.7"
+python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.6"
 python -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.7 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.7)
+The [beta.6 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
@@ -98,9 +106,12 @@ print(decision.allow)   # False
 print(decision.reason)  # param 'to' is a locked sink; data may not author it
 ```
 
-Call `dispatch` immediately before tool execution. Execute only when
-`decision.allow` is true, and request human approval when
-`decision.needs_confirm` is true.
+`dispatch` is a decision-only API. Call it immediately before tool execution,
+execute only when `decision.allow` is true, and request human approval when
+`decision.needs_confirm` is true. A direct-dispatch integration owns the
+atomic relationship between that decision, the exact arguments it executes,
+confirmation, callable identity, and result recording. Use the guarded runner
+below when those properties need to be enforced as one runtime boundary.
 
 ## Execute tools and resolve trusted choices
 
@@ -112,14 +123,82 @@ small `name`/`input` shape shown above.
 
 The runner accepts plain built-in JSON-shaped values (`dict`, `list`, strings,
 finite numbers, booleans, and `None`). Normalize framework containers before
-calling it. It snapshots the tool call and trusted arguments and captures the
-registered callable before asking for confirmation, then executes exactly that
-approved snapshot. A synchronous confirmation callback approves only by
-returning the exact boolean `True`; mutating the original call cannot rewrite
-what runs. Malformed or unsupported runtime values fail closed.
+calling it. A root-to-leaf path is limited to 64 list/dict containers,
+including the root input object, and integers are limited to 512 decimal
+digits. Values outside either portable serialization bound fail closed before
+confirmation or invocation. Every registered parameter must appear explicitly in the tool
+call, including a parameter declared with `Param(..., required=False)`. If the
+provider or Python callable has a default, the application must materialize
+that value before the gate. A protected materialized value must also appear,
+with the same exact JSON type and value, in `trusted_args`. `required=False`
+is retained as beta schema/API metadata; it is not permission to execute an
+implicit default. The runner also rejects registered callables that consume an
+undeclared parameter or rely on an undeclared default. Beta.8 accepts only an
+exact plain Python function as an implementation. Bound methods, callable
+instances or classes, builtins, and partials are rejected because their hidden
+receiver or bound state is not a declared tool argument; materialize that
+state as explicit parameters instead.
 
-Runtime parameters are required by default. Set `Param(..., required=False)`
-only when omission intentionally selects a safe implementation-owned default.
+Before confirmation, the runner isolates the tool call and trusted arguments
+and snapshots registration/policy metadata. The callback receives an
+immutable `ConfirmationRequest` whose canonical, ASCII-escaped
+`arguments_json` encodes the exact private argument snapshot that can run. A UI
+may decode and show individual fields only through a trusted renderer that
+neutralizes bidi/control characters and escapes each output context. Without
+such a renderer, show the canonical ASCII-escaped JSON verbatim; never inject
+decoded fields directly into markup or a terminal. The request also contains
+the effective risk and its evidence, the declared-risk conflict state, and
+`registration_id`, `executable_id`, `ledger_version`, and `action_id`
+commitments. `executable_id` is an address-free SHA-256 digest of the function's
+module/qualified name, code content, and raw non-unwrapped binding signature; a
+separate private binding token detects replacement of the live function object
+without exposing its address. `action_id` is a content commitment, not a
+one-time nonce or replay-prevention mechanism. Applications must provide any
+required request freshness or replay control. Approval requires the exact
+boolean `True`.
+
+Visible mutation of registered `Tool`/`Param`/policy material or replacement
+of the function object/code denies the action and requires rebuilding the
+runner. Derived risk, risk evidence, conflicts, and required confirmations
+cannot be weakened in a caller-supplied `PolicySet`; a parameter policy can be
+overridden only when that parameter appears in the derived review queue.
+Required confirmation may be made stricter. The ledger's private stores and
+lock are exact built-ins, are excluded from its representation, and replacement
+of one after runner construction is detected. Direct in-process mutation of
+private attributes remains trusted-application behavior. This is not a
+semantic snapshot of module globals or closure contents.
+Those are trusted application state: serialize their changes with tool
+execution and rebuild the runner when they change action configuration. The
+confirmation callback is likewise
+trusted control-plane code; keep it synchronous and side-effect-safe, and do
+not let untrusted code run inside it. Exceptions from that callback propagate
+to its trusted caller. The session ledger owns a re-entrant lock. The runner
+holds that shared lock from final revalidation through invocation and atomic
+result publication, so multiple runners using the same ledger serialize that
+critical action section. It deliberately releases the lock while human
+confirmation may block, then reacquires it and rechecks configuration and the
+ledger epoch. This is not a lock for globals, databases, or other application
+state; externally synchronize those resources and avoid unsynchronized
+mutation during a call.
+
+The runner is deliberately synchronous. It rejects coroutine and async-
+generator implementations before invocation, rejects awaitable results, and
+closes native coroutine results without invoking hooks on arbitrary awaitable
+objects. A successful result must also be plain finite JSON; it is
+deep-snapshotted before being returned and recorded. `ExecutionResult.invoked`
+says whether the callable was entered, `executed` says it completed the
+synchronous JSON-result contract and was recorded, and `contract_violation`
+distinguishes an awaitable or unsupported result. A callable can therefore be
+`invoked=True` but `executed=False`. If a tool implementation raises an
+ordinary `Exception`, the runner returns a generic denial with `invoked=True`,
+`executed=False`, `result=None`, and
+`contract_violation="invocation_exception"`; exception details are not placed
+in the result. Process-control `BaseException` subclasses still propagate.
+Never automatically retry when `invoked=True`, even if `executed=False`: the
+implementation may have produced an external side effect before raising or
+violating the result contract. A result beyond the JSON depth or integer bound
+is reported after invocation as `contract_violation="unsupported_result"`
+without exposing the result.
 Free outbound payloads may be authored by data, but they still must satisfy
 their declared runtime type and bounds such as `max_len`.
 
@@ -194,6 +273,39 @@ report intended for public sharing, also remove tool and parameter names:
 python -m verb_authority scan tools.json \
   --redact-names --format json --output authority-report.json
 ```
+
+Named JSON reports use report format v3. For the constraints understood by
+Authority Diff, they retain exact `maximum` and `maxLength` values and a
+SHA-256 fingerprint for each enum member. Raw enum members are omitted, but
+hashes of low-entropy values are dictionary-guessable and repeated hashes are
+correlatable, so named reports should normally remain local. The report's
+global schema fingerprint commits to full validation material with annotations
+removed, including those exact numeric values and enum-member hashes. Named
+reports also include per-tool and per-argument
+`schema_material_fingerprint_sha256` and
+`unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
+can likewise be dictionary-guessed or correlated.
+
+`--redact-names` also removes exact numeric constraint values and enum-member
+hashes, plus all exact per-tool and per-argument schema-material hashes. A
+redacted constraint record exposes only shape: whether `maximum` or
+`maxLength` is present and how many enum members exist. Its schema fingerprint
+therefore commits only to modeled constraint presence and enum count, not the
+exact constraint values or unmodeled validation material. Review any remaining
+author-written evidence before sharing. Redacted reports are intentionally not
+accepted as diff inputs.
+
+The v3 `privacy` object makes that contract machine-readable. It replaces the
+old combined `examples_or_values_included` field with
+`examples_included: false`, `defaults_included: false`, and
+`runtime_values_included: false`. Named reports set
+`schema_material_fingerprints_included`,
+`schema_material_fingerprints_dictionary_guessable`, and
+`unmodeled_schema_fingerprints_included` to `true`, with
+`schema_fingerprint_material_scope` set to
+`full_validation_material_excluding_annotations`. Redacted reports set those
+three booleans to `false` and use the scope
+`modeled_presence_and_enum_count_only`.
 
 Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
 arguments, risk conflicts, or MCP annotation conflicts need attention. Static
@@ -310,17 +422,22 @@ Example output:
   schema_exposure: unexposed -> exposed
 ```
 
-The command also accepts two non-redacted JSON reports. When implementation
+The command also accepts two non-redacted JSON reports. Diff output format v2
+is paired with scanner report format v3. Earlier report v2 omitted constraint
+values and cannot be migrated without inventing evidence; rescan the original
+raw schema with the v3 scanner before comparing it. When implementation
 controls are part of the comparison, pass the sidecars with
 `--before-controls` and `--after-controls`. Control evidence remains visibly
 author-supplied; a diff does not turn a declaration into verified enforcement.
 
-Use the CI threshold to fail only when authority increases. Review-only changes
-and protection increases remain visible without failing the job:
+The two CLI thresholds are independent. `--fail-on-increase` returns status 2
+only for authority increases; review-only and protection increases remain
+visible without tripping that flag. Add `--fail-on-review` when any ambiguous
+or unmodeled change should also return status 2:
 
 ```bash
 python -m verb_authority diff tools-main.json tools-pr.json \
-  --fail-on-increase
+  --fail-on-increase --fail-on-review
 ```
 
 Or add the repository's zero-configuration composite action after exporting
@@ -331,14 +448,38 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.7
+- uses: yairsabag/verb-authority@v0.10.0-beta.6
   with:
     before: tools-main.json
     after: tools-pr.json
 ```
 
 The action fails the step on an authority increase by default. Set
-`fail_on_increase: "false"` for an observation-only rollout.
+`fail_on_increase: "false"` for an observation-only rollout. Starting with
+beta.8, its separate `fail_on_review` input also defaults to `"true"`, so an
+unmodeled or ambiguously ordered schema change fails closed instead of passing
+because it is not an authority increase. Set either boolean independently:
+
+```yaml
+with:
+  before: tools-main.json
+  after: tools-pr.json
+  fail_on_increase: "true"
+  fail_on_review: "true"
+```
+
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.6
+pin in the example above predates `fail_on_review`; pin beta.8 or later after
+that release is published to use the second threshold.
+
+The v3 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
+removing one is an authority increase; tightening one is a protection
+increase; and enum replacements without a strict subset relationship require
+review. Authority Diff is not a complete JSON Schema equivalence checker.
+Schema changes outside the modeled vocabulary are surfaced through the
+unmodeled-schema fingerprint as `REVIEW`; any change it cannot order safely
+requires independent review rather than an assumption that no reported
+increase means safe.
 
 Name-redacted reports cannot be correlated safely across versions, so diff
 them locally before applying `--redact-names` to a report intended for sharing.
@@ -364,15 +505,24 @@ The project is one importable module with five cooperating pieces:
   and require review plus confirmation. A complete-token name heuristic is
   reported only as caller-mutable evidence; it never establishes authority.
 - **Optional provenance ledger.** Values returned by tools are recorded as
-  untrusted. Exact reuse, nested JSON value leaves and canonical risk-shaped
-  object keys, contained email/URL extraction, and canonicalized lexical
-  variants are forced back to data provenance even if `trusted_args` was wired
-  incorrectly. Mixed-script homographs are rejected recursively in locked JSON
-  values.
+  untrusted. Exact, type-tagged JSON scalar leaves (`null`, booleans, integers,
+  finite floats, and strings), every exact object key, and exact list/object
+  containers (including empty or container-only values) are forced back to
+  data provenance even if `trusted_args` was wired incorrectly. `True`, `1`,
+  and `1.0` do not share a ledger identity.
+  Containment recognizes email addresses and anchored HTTP, HTTPS, FTP, WS,
+  WSS, protocol-relative, and `www.` URI forms extracted verbatim from returned
+  text. NFKC normalization and recursive script detection reject a locked JSON
+  string or key containing more than one of the tracked Latin, Greek, and
+  Cyrillic scripts.
 
-The gate rejects unknown tools and unknown arguments and enforces the runtime
-registry's explicit `Param.required` flags. It does not replace complete JSON
-Schema validation or the tool implementation's own authorization checks.
+The gate rejects unknown tools, unknown arguments, and every omitted registered
+parameter. `Param.required` remains schema metadata, not an implicit-default
+execution path. URI containment is not a general URI/IDN validator, and the
+mixed-script check is not a complete Unicode-confusables implementation. The
+gate also does not replace complete JSON Schema validation or the tool
+implementation's own authorization checks, including cross-argument and
+action-instance authorization.
 
 ## Integrating a tool loop
 
@@ -412,11 +562,15 @@ result = run_tool(tool_call)
 ledger.record_result(result)
 ```
 
-Thread one ledger through the session and record each result immediately after
-the tool returns. The ledger is a containment layer, not sound taint tracking:
-it recognizes values (including risk-shaped keys and value leaves nested in
-JSON) and selected lexical forms, not arbitrary transformations or control
-flow.
+This direct-dispatch example leaves confirmation-to-execution atomicity,
+callable identity, result validation, and result capture to the application.
+Thread one ledger through the session and record each plain JSON result
+immediately after the tool returns. Prefer `GuardedToolRunner` when those
+operations should share the frozen runtime boundary described above. The
+ledger is a containment layer, not sound taint tracking: it recognizes values
+(including every exact key, exact containers, and typed scalar leaves nested
+in JSON) and selected risk-shaped lexical forms, not arbitrary transformations
+or control flow.
 
 ## Evidence and demos
 
@@ -508,12 +662,12 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.7 is the public beta for the
-local schema scanner, control evidence, Authority Diff, and Tool Authority
-Atlas. This remains early, research-grade work and is not described as
-production-ready. The schema scanner has been externally exercised. The
-runtime gate is extensively tested locally and is now entering integration
-validation. See
+v0.9.0 is the latest stable release. v0.10.0-beta.6 is the current public beta
+for the local schema scanner, control evidence, Authority Diff, and Tool
+Authority Atlas. v0.10.0-beta.8 is an unpublished runtime-integration release
+candidate under independent audit; beta.7 was withheld and is not reused.
+This remains early, research-grade work and is not described as
+production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for focused contribution guidance.
 

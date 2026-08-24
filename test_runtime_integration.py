@@ -1,10 +1,21 @@
 """Integration tests for trusted choices and guarded tool execution."""
 
+import asyncio
+import functools
+import inspect
+import json
+import threading
+import types
+
 import pytest
+import verb_authority as authority
 
 from verb_authority import (
     GuardedToolRunner,
     Param,
+    Policy,
+    PolicySet,
+    ProvenanceLedger,
     Registry,
     ResolutionStatus,
     Risk,
@@ -12,6 +23,7 @@ from verb_authority import (
     TrustedChoice,
     TrustedResolver,
     build_policy,
+    dispatch,
 )
 
 
@@ -313,11 +325,12 @@ def test_runner_blocks_a_missing_locked_param_before_callable_default():
     execution = runner.run({"name": "transfer_funds", "input": {}})
 
     assert not execution.executed
+    assert not execution.invoked
     assert not execution.decision.allow
     assert transfers == []
 
 
-def test_explicitly_optional_param_uses_implementation_owned_default():
+def test_runner_forbids_an_implicit_optional_default_for_a_protected_param():
     messages = []
 
     def send_email(destination: str = "application-safe-default"):
@@ -335,10 +348,17 @@ def test_explicitly_optional_param_uses_implementation_owned_default():
     )
     runner = GuardedToolRunner(registry)
 
-    execution = runner.run({"name": "send_email", "input": {}})
+    confirmations = []
+    execution = runner.run(
+        {"name": "send_email", "input": {}},
+        confirm=lambda request: confirmations.append(request) or True,
+    )
 
-    assert execution.executed
-    assert messages == ["application-safe-default"]
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert "optional default" in execution.decision.reason
+    assert confirmations == []
+    assert messages == []
 
 
 def test_async_confirmation_is_rejected_by_the_synchronous_runner():
@@ -371,7 +391,138 @@ def test_async_confirmation_is_rejected_by_the_synchronous_runner():
     assert transfers == []
 
 
-def test_pending_confirmation_with_no_callable_remains_non_executing():
+def test_synchronous_runner_rejects_an_async_registered_callable():
+    async def read_message():
+        return {"reply_to": "attacker@evil.com"}
+
+    registry = Registry()
+    registry.add(Tool("read_message", [], fn=read_message, risk=Risk.READ_ONLY))
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert not execution.executed
+    assert not execution.invoked
+    assert not execution.decision.allow
+    assert execution.result is None
+    assert "async" in execution.decision.reason
+
+
+def test_synchronous_runner_rejects_and_closes_an_awaitable_result():
+    async def eventual_result():
+        return {"reply_to": "attacker@evil.com"}
+
+    coroutine = eventual_result()
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_message",
+            [],
+            fn=lambda: coroutine,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert not execution.executed
+    assert execution.invoked
+    assert not execution.decision.allow
+    assert execution.result is None
+    assert coroutine.cr_frame is None
+    assert execution.contract_violation == "awaitable_result"
+
+
+def test_runner_rejects_custom_awaitable_without_calling_its_close_hook():
+    effects = []
+
+    class CustomAwaitable:
+        def __await__(self):
+            if False:
+                yield None
+            return None
+
+        def close(self):
+            effects.append("close hook ran")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_message",
+            [],
+            fn=lambda: CustomAwaitable(),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.contract_violation == "awaitable_result"
+    assert effects == []
+
+
+def test_synchronous_runner_rejects_an_async_generator_implementation():
+    async def stream_messages():
+        yield {"reply_to": "attacker@evil.com"}
+
+    registry = Registry()
+    registry.add(
+        Tool("read_message", [], fn=stream_messages, risk=Risk.READ_ONLY)
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert "async" in execution.decision.reason
+
+
+def test_runner_rejects_and_closes_an_async_generator_result_in_running_loop():
+    async def stream_messages():
+        yield {"reply_to": "attacker@evil.com"}
+
+    stream = stream_messages()
+    registry = Registry()
+    registry.add(
+        Tool("read_message", [], fn=lambda: stream, risk=Risk.READ_ONLY)
+    )
+    runner = GuardedToolRunner(registry)
+
+    async def invoke_from_running_loop():
+        return runner.run({"name": "read_message", "input": {}})
+
+    execution = asyncio.run(invoke_from_running_loop())
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.contract_violation == "async_generator_result"
+    assert stream.ag_frame is None
+
+
+def test_runner_reports_implementation_exceptions_without_exposing_details():
+    def fail():
+        raise RuntimeError("private credential material")
+
+    registry = Registry()
+    registry.add(Tool("read_message", [], fn=fail, risk=Risk.READ_ONLY))
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.result is None
+    assert execution.contract_violation == "invocation_exception"
+    assert "private credential material" not in execution.decision.reason
+
+
+def test_decision_only_dispatch_allows_no_callable_but_runner_rejects_it():
     registry = Registry()
     registry.add(
         Tool(
@@ -381,9 +532,9 @@ def test_pending_confirmation_with_no_callable_remains_non_executing():
             risk=Risk.FINANCIAL,
         )
     )
-    runner = GuardedToolRunner(registry)
-
-    execution = runner.run(
+    decision = dispatch(
+        registry,
+        build_policy(registry),
         {
             "name": "transfer_funds",
             "input": {"destination": "acct-approved"},
@@ -391,8 +542,9 @@ def test_pending_confirmation_with_no_callable_remains_non_executing():
         trusted_args={"destination": "acct-approved"},
     )
 
-    assert not execution.executed
-    assert execution.decision.needs_confirm
+    assert decision.allow and decision.needs_confirm
+    with pytest.raises(TypeError, match="must be callable"):
+        GuardedToolRunner(registry)
 
 
 def test_confirmation_callback_cannot_mutate_nested_approved_values():
@@ -406,7 +558,7 @@ def test_confirmation_callback_cannot_mutate_nested_approved_values():
     registry.add(
         Tool(
             "transfer_funds",
-            [Param("destination", sink=True)],
+            [Param("destination", "object", sink=True)],
             fn=transfer_funds,
             risk=Risk.FINANCIAL,
         )
@@ -465,8 +617,275 @@ def test_confirmation_callback_cannot_swap_the_approved_callable():
         confirm=swap_callable_then_confirm,
     )
 
-    assert execution.executed
-    assert calls == [("approved", "acct-approved")]
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert calls == []
+
+
+def test_runner_rejects_a_registry_replacement_instead_of_using_stale_policy():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "lookup_record",
+            [Param("destination", sink=False)],
+            fn=lambda destination: calls.append(("safe", destination)),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    registry.add(
+        Tool(
+            "lookup_record",
+            [Param("destination", sink=True)],
+            fn=lambda destination: calls.append(("destructive", destination)),
+            risk=Risk.DESTRUCTIVE,
+        )
+    )
+
+    execution = runner.run(
+        {
+            "name": "lookup_record",
+            "input": {"destination": "attacker-authored"},
+        }
+    )
+
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert "registry changed" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_rejects_a_stale_policy_during_bundle_construction():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "lookup_record",
+            [Param("destination", sink=False)],
+            fn=lambda destination: destination,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    stale_policy = build_policy(registry)
+    registry.add(
+        Tool(
+            "lookup_record",
+            [Param("destination", sink=True)],
+            fn=lambda destination: destination,
+            risk=Risk.DESTRUCTIVE,
+        )
+    )
+
+    with pytest.raises(ValueError, match="different registry registration"):
+        GuardedToolRunner(registry, stale_policy)
+
+
+def test_confirmation_is_bound_to_the_private_approved_action_snapshot():
+    executed = []
+    observed = []
+    call = {
+        "name": "transfer_funds",
+        "input": {"destination": "acct-approved", "amount": 1_000_000},
+    }
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True), Param("amount", "number")],
+            fn=lambda destination, amount: executed.append((destination, amount)),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def display_and_confirm(request):
+        call["input"]["amount"] = 1
+        observed.append(request)
+        return request.needs_confirm
+
+    result = runner.run(
+        call,
+        trusted_args={"destination": "acct-approved"},
+        confirm=display_and_confirm,
+    )
+
+    assert result.executed
+    assert executed == [("acct-approved", 1_000_000)]
+    assert len(observed) == 1
+    request = observed[0]
+    assert request.tool_name == "transfer_funds"
+    assert json.loads(request.arguments_json) == {
+        "amount": 1_000_000,
+        "destination": "acct-approved",
+    }
+    assert request.risk is Risk.FINANCIAL
+    assert request.risk_assessment.risk is Risk.FINANCIAL
+    assert request.registration_id
+    assert request.executable_id
+    assert request.action_id
+
+
+def test_runner_revalidates_registry_state_after_confirmation():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: calls.append(("approved", destination)),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def replace_during_confirmation(request):
+        registry.add(
+            Tool(
+                "transfer_funds",
+                [Param("destination", sink=True)],
+                fn=lambda destination: calls.append(("replacement", destination)),
+                risk=Risk.FINANCIAL,
+            )
+        )
+        return True
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=replace_during_confirmation,
+    )
+
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert "registry changed" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_revalidates_ledger_taint_after_confirmation():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: calls.append(destination),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def taint_during_confirmation(request):
+        runner.ledger.record_result({"destination": "acct-approved"})
+        return True
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=taint_during_confirmation,
+    )
+
+    assert not execution.executed
+    assert not execution.decision.allow
+    assert "locked sink" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_serializes_final_gate_invocation_and_ledger_publication():
+    entered = threading.Event()
+    release = threading.Event()
+    record_started = threading.Event()
+    record_done = threading.Event()
+    executions = []
+
+    def implementation(destination):
+        entered.set()
+        assert release.wait(2)
+        return {"destination": destination}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_destination",
+            [Param("destination", sink=True)],
+            fn=implementation,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def invoke():
+        executions.append(
+            runner.run(
+                {
+                    "name": "set_destination",
+                    "input": {"destination": "acct-approved"},
+                },
+                trusted_args={"destination": "acct-approved"},
+            )
+        )
+
+    def record_concurrently():
+        record_started.set()
+        runner.ledger.record_result("acct-approved")
+        record_done.set()
+
+    invocation_thread = threading.Thread(target=invoke)
+    writer_thread = threading.Thread(target=record_concurrently)
+    invocation_thread.start()
+    assert entered.wait(2)
+    writer_thread.start()
+    assert record_started.wait(2)
+    try:
+        assert not record_done.wait(0.05)
+    finally:
+        release.set()
+    invocation_thread.join(2)
+    writer_thread.join(2)
+
+    assert not invocation_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert record_done.is_set()
+    assert len(executions) == 1 and executions[0].executed
+
+
+def test_numeric_result_taint_propagates_through_the_runner_ledger():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_account",
+            [],
+            fn=lambda: {"nested": {"account_id": 31337}},
+            risk=Risk.READ_ONLY,
+        )
+    )
+    registry.add(
+        Tool(
+            "set_account",
+            [Param("account_id", "integer", sink=True)],
+            fn=lambda account_id: calls.append(account_id),
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    read = runner.run({"name": "read_account", "input": {}})
+    value = read.result["nested"]["account_id"]
+    write = runner.run(
+        {"name": "set_account", "input": {"account_id": value}},
+        trusted_args={"account_id": value},
+    )
+
+    assert read.executed
+    assert runner.ledger.is_tainted(value)
+    assert not write.executed
+    assert calls == []
 
 
 def test_runner_fails_closed_before_confirmation_for_non_json_values():
@@ -591,6 +1010,1017 @@ def test_runner_ledger_blocks_a_laundered_result_inside_nested_json():
     assert not send.executed
     assert not send.decision.allow
     assert calls == []
+
+
+def test_bounded_optional_callable_default_must_be_materialized_before_gating():
+    calls = []
+
+    def set_amount(amount=10_000):
+        calls.append(amount)
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_amount",
+            [Param("amount", "integer", cap=10, sink=False, required=False)],
+            fn=set_amount,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    result = runner.run({"name": "set_amount", "input": {}})
+
+    assert not result.invoked
+    assert not result.executed
+    assert "optional default" in result.decision.reason
+    assert calls == []
+
+
+def test_mutable_protected_callable_default_never_reaches_confirmation():
+    calls = []
+
+    def transfer(destination={"account": "acct-approved"}):
+        calls.append(dict(destination))
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_default",
+            [Param("destination", sink=True, required=False)],
+            fn=transfer,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    confirmations = []
+
+    result = runner.run(
+        {"name": "transfer_default", "input": {}},
+        confirm=lambda request: confirmations.append(request) or True,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert confirmations == []
+    assert calls == []
+
+
+def test_runner_rejects_undeclared_callable_defaults_at_bundle_construction():
+    def transfer(destination={"account": "acct-approved"}):
+        return destination
+
+    registry = Registry()
+    registry.add(Tool("transfer_default", [], fn=transfer, risk=Risk.WRITE))
+
+    with pytest.raises(ValueError, match="undeclared params: destination"):
+        GuardedToolRunner(registry)
+
+
+def test_runner_rejects_bound_partial_arguments_hidden_from_the_schema():
+    def transfer(destination):
+        return destination
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_default",
+            [],
+            fn=functools.partial(transfer, {"account": "acct-attacker"}),
+            risk=Risk.WRITE,
+        )
+    )
+
+    with pytest.raises(TypeError, match="bound partial arguments"):
+        GuardedToolRunner(registry)
+
+
+def test_runner_rejects_forged_dunder_signature_hiding_default():
+    def implementation(hidden_destination="acct-attacker", **kwargs):
+        return {"hidden_destination": hidden_destination, **kwargs}
+
+    implementation.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter(
+                "value",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+    )
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", sink=False)],
+            fn=implementation,
+            risk=Risk.WRITE,
+        )
+    )
+
+    with pytest.raises(TypeError, match="cannot define __signature__"):
+        GuardedToolRunner(registry)
+
+
+def test_runner_validates_actual_wrapper_not_dunder_wrapped_signature():
+    def advertised(value):
+        return value
+
+    def implementation(hidden_destination="acct-attacker", **kwargs):
+        return {"hidden_destination": hidden_destination, **kwargs}
+
+    implementation.__wrapped__ = advertised
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", sink=False)],
+            fn=implementation,
+            risk=Risk.WRITE,
+        )
+    )
+
+    with pytest.raises(ValueError, match="undeclared params: hidden_destination"):
+        GuardedToolRunner(registry)
+
+
+@pytest.mark.parametrize("shape", ["bound_method", "callable_object"])
+def test_runner_rejects_callable_shapes_with_hidden_receiver_state(shape):
+    class Handler:
+        def __init__(self):
+            self.route = "acct-approved"
+
+        def invoke(self, value):
+            return {"value": value, "route": self.route}
+
+        def __call__(self, value):
+            return self.invoke(value)
+
+    handler = Handler()
+    implementation = handler.invoke if shape == "bound_method" else handler
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", sink=False)],
+            fn=implementation,
+            risk=Risk.WRITE,
+        )
+    )
+
+    with pytest.raises(TypeError, match="(bound method|exact Python function)"):
+        GuardedToolRunner(registry)
+
+
+@pytest.mark.parametrize(
+    "implementation, params",
+    [
+        (lambda value, /: value, [Param("value")]),
+        (lambda *values: values, [Param("value")]),
+        (lambda: None, [Param("value")]),
+    ],
+)
+def test_runner_rejects_callable_signatures_that_cannot_bind_declared_kwargs(
+    implementation, params
+):
+    registry = Registry()
+    registry.add(Tool("set_value", params, fn=implementation, risk=Risk.WRITE))
+
+    with pytest.raises((TypeError, ValueError)):
+        GuardedToolRunner(registry)
+
+
+def test_runner_accepts_declared_params_through_var_keyword_only():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", sink=False)],
+            fn=lambda **kwargs: calls.append(kwargs),
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    result = runner.run({"name": "set_value", "input": {"value": "ok"}})
+
+    assert result.executed
+    assert calls == [{"value": "ok"}]
+
+
+def test_runner_rejects_polymorphic_boundary_objects():
+    class RegistrySubclass(Registry):
+        pass
+
+    class PolicySetSubclass(PolicySet):
+        pass
+
+    class LedgerSubclass(ProvenanceLedger):
+        pass
+
+    registry = Registry()
+    registry.add(Tool("read_value", [], fn=lambda: None, risk=Risk.READ_ONLY))
+    policy = build_policy(registry)
+    derived_policy = PolicySetSubclass(
+        policy.policy,
+        policy.risk,
+        policy.review,
+        policy.confirm,
+        policy.risk_inference,
+        policy.risk_review,
+        policy.risk_conflicts,
+    )
+
+    with pytest.raises(TypeError, match="exact Registry"):
+        GuardedToolRunner(RegistrySubclass())
+    with pytest.raises(TypeError, match="exact PolicySet"):
+        GuardedToolRunner(registry, derived_policy)
+    with pytest.raises(TypeError, match="exact ProvenanceLedger"):
+        GuardedToolRunner(registry, ledger=LedgerSubclass())
+
+
+def test_ledger_constructor_rejects_injected_internal_stores_and_hides_data():
+    class HidingSet(set):
+        def __contains__(self, value):
+            return False
+
+        def add(self, value):
+            return None
+
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        ProvenanceLedger(_tainted=HidingSet())
+
+    ledger = ProvenanceLedger()
+    ledger.record_result({"secret": "attacker@evil.example"})
+    rendered = repr(ledger)
+    assert "secret" not in rendered
+    assert "attacker@evil.example" not in rendered
+
+
+def test_runner_detects_replaced_ledger_internal_store_before_execution():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_value",
+            [],
+            fn=lambda: calls.append(True),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    ledger = ProvenanceLedger()
+    runner = GuardedToolRunner(registry, ledger=ledger)
+    ledger._tainted = set()
+
+    execution = runner.run({"name": "read_value", "input": {}})
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert "ledger internals changed" in execution.decision.reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", ["risk", "confirm"])
+def test_runner_rejects_preconstruction_risk_policy_weakening(mutation):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: destination,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    policy_set = build_policy(registry)
+    if mutation == "risk":
+        policy_set.risk["transfer_funds"] = Risk.READ_ONLY
+    else:
+        policy_set.confirm.clear()
+
+    with pytest.raises(ValueError):
+        GuardedToolRunner(registry, policy_set)
+
+
+def test_runner_rejects_preconstruction_high_confidence_sink_unlock():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_account",
+            [Param("account_id", sink=True)],
+            fn=lambda account_id: account_id,
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+    policy_set.policy["set_account"]["account_id"] = Policy.TYPED_BOUNDED
+
+    with pytest.raises(ValueError, match="derived review queue"):
+        GuardedToolRunner(registry, policy_set)
+
+
+def test_runner_accepts_explicit_override_for_derived_review_entry():
+    calls = []
+
+    def write_query(query):
+        calls.append(query)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "write_query",
+            [Param("query")],
+            fn=write_query,
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+    assert ("write_query", "query") in policy_set.review
+    policy_set.policy["write_query"]["query"] = Policy.TYPED_BOUNDED
+    runner = GuardedToolRunner(registry, policy_set)
+
+    execution = runner.run(
+        {"name": "write_query", "input": {"query": "approved"}}
+    )
+
+    assert execution.invoked and execution.executed
+    assert calls == ["approved"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["mapping", "callable", "risk", "param", "param_list"],
+)
+def test_runner_fingerprint_detects_every_live_registration_mutation(mutation):
+    calls = []
+
+    def implementation(value):
+        calls.append(value)
+
+    param = Param("value", sink=False)
+    tool = Tool("set_value", [param], fn=implementation, risk=Risk.WRITE)
+    registry = Registry()
+    registry.add(tool)
+    runner = GuardedToolRunner(registry)
+
+    if mutation == "mapping":
+        registry.tools["set_value"] = Tool(
+            "set_value",
+            [Param("value", sink=False)],
+            fn=implementation,
+            risk=Risk.WRITE,
+        )
+    elif mutation == "callable":
+        tool.fn = lambda value: calls.append(f"replacement:{value}")
+    elif mutation == "risk":
+        tool.risk = Risk.DESTRUCTIVE
+    elif mutation == "param":
+        param.max_len = 1
+    else:
+        tool.params = list(tool.params)
+
+    result = runner.run({"name": "set_value", "input": {"value": "ok"}})
+
+    assert not result.invoked
+    assert not result.executed
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+def test_runner_detects_callable_code_replacement_during_confirmation():
+    calls = []
+
+    def approved(destination):
+        calls.append(("approved", destination))
+
+    def replacement(destination):
+        calls.append(("replacement", destination))
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=approved,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def replace_code(request):
+        approved.__code__ = replacement.__code__
+        return True
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=replace_code,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+def test_runner_detects_same_code_new_function_binding_during_confirmation():
+    calls = []
+
+    def approved(destination):
+        calls.append(destination)
+        return destination
+
+    registry = Registry()
+    tool = Tool(
+        "transfer_funds",
+        [Param("destination", sink=True)],
+        fn=approved,
+        risk=Risk.FINANCIAL,
+    )
+    registry.add(tool)
+    runner = GuardedToolRunner(registry)
+
+    def replace_with_same_code(request):
+        tool.fn = types.FunctionType(
+            approved.__code__,
+            approved.__globals__,
+            name=approved.__name__,
+            argdefs=approved.__defaults__,
+            closure=approved.__closure__,
+        )
+        return True
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=replace_with_same_code,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+def test_callable_identity_uses_code_content_when_ids_are_reused(monkeypatch):
+    def approved(value):
+        return value
+
+    def replacement(value):
+        return {"replacement": value}
+
+    monkeypatch.setattr(authority, "id", lambda value: 7, raising=False)
+    before = authority._callable_identity(approved)
+    approved.__code__ = replacement.__code__
+    after = authority._callable_identity(approved)
+
+    assert before != after
+    assert before.startswith("sha256:")
+    assert after.startswith("sha256:")
+
+
+def test_callable_identity_commits_the_raw_invocation_signature():
+    def implementation(value):
+        return value
+
+    before = authority._callable_identity(implementation)
+    implementation.__defaults__ = ("explicit-values-still-required",)
+    after = authority._callable_identity(implementation)
+
+    assert before != after
+
+
+def test_runner_detects_caller_supplied_policy_mutation_before_execution():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", sink=True)],
+            fn=lambda value: calls.append(value),
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+    runner = GuardedToolRunner(registry, policy_set)
+    policy_set.policy["set_value"]["value"] = Policy.TYPED_BOUNDED
+
+    result = runner.run(
+        {"name": "set_value", "input": {"value": "attacker"}}
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "policy changed" in result.decision.reason
+    assert calls == []
+
+
+def test_runner_detects_caller_supplied_policy_mutation_during_confirmation():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: calls.append(destination),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    policy_set = build_policy(registry)
+    runner = GuardedToolRunner(registry, policy_set)
+
+    def mutate_policy(request):
+        policy_set.risk["transfer_funds"] = Risk.DESTRUCTIVE
+        return True
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=mutate_policy,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "policy changed" in result.decision.reason
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        type("HiddenDict", (dict,), {"items": lambda self: {}.items()})(
+            account_id=31337
+        ),
+        type("HiddenList", (list,), {})([31337]),
+    ],
+)
+def test_runner_rejects_polymorphic_tool_results_without_exposing_them(result):
+    registry = Registry()
+    registry.add(
+        Tool("read_value", [], fn=lambda: result, risk=Risk.READ_ONLY)
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_value", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.result is None
+    assert execution.contract_violation == "unsupported_result"
+    assert not runner.ledger.is_tainted(31337)
+
+
+def _nested_lists(count, leaf="value"):
+    value = leaf
+    for _ in range(count):
+        value = [value]
+    return value
+
+
+def test_runner_accepts_input_at_the_documented_json_depth_boundary():
+    calls = []
+
+    def consume(payload):
+        calls.append(payload)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=consume,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    # The tool-input object is the first container on the path.
+    payload = _nested_lists(authority.MAX_JSON_DEPTH - 1)
+
+    execution = runner.run(
+        {"name": "consume", "input": {"payload": payload}}
+    )
+
+    assert execution.invoked and execution.executed
+    assert calls == [payload]
+
+
+@pytest.mark.parametrize(
+    "extra_depth",
+    [0, 1, 500],
+)
+def test_runner_rejects_overdeep_input_without_exposing_recursion_errors(
+    extra_depth,
+):
+    calls = []
+
+    def consume(payload):
+        calls.append(payload)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=consume,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    payload = _nested_lists(authority.MAX_JSON_DEPTH + extra_depth)
+
+    execution = runner.run(
+        {"name": "consume", "input": {"payload": payload}}
+    )
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert execution.result is None
+    assert "snapshotted safely" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_rejects_overdeep_result_as_unsupported_after_invocation():
+    result = _nested_lists(authority.MAX_JSON_DEPTH + 500)
+
+    def read_value():
+        return result
+
+    registry = Registry()
+    registry.add(
+        Tool("read_value", [], fn=read_value, risk=Risk.READ_ONLY)
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_value", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.result is None
+    assert execution.contract_violation == "unsupported_result"
+
+
+def test_huge_integer_is_denied_before_confirmation_serialization():
+    calls = []
+    confirmations = []
+
+    def transfer(amount):
+        calls.append(amount)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer",
+            [Param("amount", "integer", sink=False)],
+            fn=transfer,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {"name": "transfer", "input": {"amount": 10**5000}},
+        confirm=lambda request: confirmations.append(request) or True,
+    )
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert confirmations == []
+    assert calls == []
+
+
+def test_huge_integer_in_enum_input_is_denied_without_encoder_exception():
+    calls = []
+
+    def choose(mode):
+        calls.append(mode)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose",
+            [Param("mode", "enum", enum=["safe"], sink=False)],
+            fn=choose,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {"name": "choose", "input": {"mode": 10**5000}}
+    )
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert calls == []
+
+
+def test_plain_object_key_cannot_be_laundered_into_a_locked_sink():
+    writes = []
+
+    def read_accounts():
+        return {"acct-attacker": {"balance": 100}}
+
+    def set_account(account_id):
+        writes.append(account_id)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool("read_accounts", [], fn=read_accounts, risk=Risk.READ_ONLY)
+    )
+    registry.add(
+        Tool(
+            "set_account",
+            [Param("account_id", sink=True)],
+            fn=set_account,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    read = runner.run({"name": "read_accounts", "input": {}})
+    account_id = next(iter(read.result))
+    write = runner.run(
+        {"name": "set_account", "input": {"account_id": account_id}},
+        trusted_args={"account_id": account_id},
+    )
+
+    assert read.executed
+    assert runner.ledger.is_tainted(account_id)
+    assert not write.invoked
+    assert not write.executed
+    assert writes == []
+
+
+@pytest.mark.parametrize("returned", [{}, [], {"route": []}, {"route": {}}])
+def test_empty_or_container_only_result_cannot_reach_locked_sink(returned):
+    writes = []
+
+    def read_destination():
+        return returned
+
+    def set_destination(destination):
+        writes.append(destination)
+        return None
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_destination",
+            [],
+            fn=read_destination,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    registry.add(
+        Tool(
+            "set_destination",
+            [Param("destination", "json", sink=True)],
+            fn=set_destination,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    read = runner.run({"name": "read_destination", "input": {}})
+    destination = read.result
+    write = runner.run(
+        {"name": "set_destination", "input": {"destination": destination}},
+        trusted_args={"destination": destination},
+    )
+
+    assert read.executed
+    assert runner.ledger.is_tainted(destination)
+    assert not write.invoked
+    assert not write.executed
+    assert writes == []
+
+
+def test_frozen_runner_enum_members_preserve_exact_json_types():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_mode",
+            [Param("mode", "enum", enum=[True, 1, {"level": [2]}], sink=False)],
+            fn=lambda mode: calls.append(mode),
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    boolean = runner.run({"name": "set_mode", "input": {"mode": True}})
+    integer = runner.run({"name": "set_mode", "input": {"mode": 1}})
+    nested = runner.run(
+        {"name": "set_mode", "input": {"mode": {"level": [2]}}}
+    )
+
+    assert boolean.executed and integer.executed and nested.executed
+    assert calls == [True, 1, {"level": [2]}]
+
+
+def test_frozen_runner_enum_does_not_coerce_boolean_and_integer_members():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_mode",
+            [Param("mode", "enum", enum=[True], sink=False)],
+            fn=lambda mode: mode,
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    result = runner.run({"name": "set_mode", "input": {"mode": 1}})
+
+    assert not result.invoked
+    assert not result.executed
+    assert "type/bounds" in result.decision.reason
+
+
+def _capture_confirmation_request(
+    *,
+    tool_name="operate",
+    risk=Risk.FINANCIAL,
+    implementation=None,
+    cap=10,
+    amount=1,
+):
+    if implementation is None:
+        implementation = lambda amount: amount
+    registry = Registry()
+    registry.add(
+        Tool(
+            tool_name,
+            [Param("amount", "integer", cap=cap, sink=False)],
+            fn=implementation,
+            risk=risk,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    captured = []
+    runner.run(
+        {"name": tool_name, "input": {"amount": amount}},
+        confirm=lambda request: captured.append(request) or False,
+    )
+    assert len(captured) == 1
+    return captured[0]
+
+
+def test_action_id_commits_every_action_and_registration_component():
+    def implementation(amount):
+        return amount
+
+    def replacement(amount):
+        return amount
+
+    base = _capture_confirmation_request(implementation=implementation)
+    changed_args = _capture_confirmation_request(
+        implementation=implementation,
+        amount=2,
+    )
+    changed_tool = _capture_confirmation_request(
+        tool_name="operate_other",
+        implementation=implementation,
+    )
+    changed_risk = _capture_confirmation_request(
+        risk=Risk.DESTRUCTIVE,
+        implementation=implementation,
+    )
+    changed_registration = _capture_confirmation_request(
+        cap=20,
+        implementation=implementation,
+    )
+    changed_executable = _capture_confirmation_request(
+        implementation=replacement,
+    )
+
+    assert len(
+        {
+            base.action_id,
+            changed_args.action_id,
+            changed_tool.action_id,
+            changed_risk.action_id,
+            changed_registration.action_id,
+            changed_executable.action_id,
+        }
+    ) == 6
+
+
+def test_action_id_changes_with_arguments_and_ledger_on_the_same_runner():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [Param("amount", "integer", cap=10, sink=False)],
+            fn=lambda amount: amount,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def capture(amount):
+        requests = []
+        runner.run(
+            {"name": "operate", "input": {"amount": amount}},
+            confirm=lambda request: requests.append(request) or False,
+        )
+        assert len(requests) == 1
+        return requests[0]
+
+    base = capture(1)
+    changed_arguments = capture(2)
+    runner.ledger.record_result({"unrelated": "new tool data"})
+    changed_ledger = capture(1)
+
+    assert base.registration_id == changed_arguments.registration_id
+    assert base.executable_id == changed_arguments.executable_id
+    assert base.action_id != changed_arguments.action_id
+    assert base.arguments_json == changed_ledger.arguments_json
+    assert base.registration_id == changed_ledger.registration_id
+    assert base.executable_id == changed_ledger.executable_id
+    assert base.ledger_version != changed_ledger.ledger_version
+    assert base.action_id != changed_ledger.action_id
+
+
+def test_confirmation_arguments_json_is_ascii_escaped_for_bidi_text():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: destination,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    # Keep the payload single-script so this test reaches the confirmation
+    # boundary; mixed-script rejection is covered separately.  The bidi
+    # override itself must still be escaped in the immutable JSON snapshot.
+    destination = "acct-\u202e\u00e9"
+    requests = []
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": destination},
+        },
+        trusted_args={"destination": destination},
+        confirm=lambda request: requests.append(request) or False,
+    )
+
+    assert not result.invoked
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.arguments_json.isascii()
+    assert "\\u202e" in request.arguments_json
+    assert "\\u00e9" in request.arguments_json
+    assert json.loads(request.arguments_json) == {"destination": destination}
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["acct-\ud800", {"route-\udfff": "acct-approved"}],
+)
+def test_runner_rejects_lone_surrogates_during_snapshot(destination):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", "json", sink=True)],
+            fn=lambda destination: destination,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    confirmations = []
+
+    result = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": destination},
+        },
+        trusted_args={"destination": destination},
+        confirm=lambda request: confirmations.append(request) or True,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "snapshotted safely" in result.decision.reason
+    assert confirmations == []
 
 
 @pytest.mark.parametrize(
