@@ -12,7 +12,7 @@ import re
 import sys
 import tarfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
 
@@ -87,7 +87,16 @@ def _artifact_distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "_", name).lower()
 
 
-def _wheel_identity(wheel_path: Path) -> tuple[str, str]:
+def _artifact_version_name(version: str) -> str:
+    return re.sub(r"[^\w\d.]+", "_", version).lower()
+
+
+def _wheel_identity(
+    wheel_path: Path,
+    *,
+    expected_name: str,
+    expected_version: str,
+) -> tuple[str, str]:
     try:
         with ZipFile(wheel_path) as wheel:
             metadata_members = [
@@ -119,6 +128,15 @@ def _wheel_identity(wheel_path: Path) -> tuple[str, str]:
                     "wheel METADATA and WHEEL must belong to the same "
                     "dist-info directory"
                 )
+            expected_root = (
+                f"{_artifact_distribution_name(expected_name)}-"
+                f"{_artifact_version_name(expected_version)}.dist-info"
+            )
+            if metadata_root != expected_root:
+                raise VerificationError(
+                    f"wheel dist-info directory {metadata_root!r} does not "
+                    f"match expected {expected_root!r}"
+                )
             metadata = wheel.read(metadata_members[0]).decode("utf-8")
             wheel_metadata = wheel.read(wheel_members[0]).decode("utf-8")
     except (BadZipFile, OSError, UnicodeDecodeError) as exc:
@@ -144,12 +162,22 @@ def _wheel_identity(wheel_path: Path) -> tuple[str, str]:
     return _metadata_identity(metadata, "wheel")
 
 
-def _sdist_identity(sdist_path: Path) -> tuple[str, str]:
+def _sdist_identity(
+    sdist_path: Path,
+    *,
+    expected_name: str,
+    expected_version: str,
+) -> tuple[str, str]:
     try:
         with tarfile.open(sdist_path, "r:gz") as source_archive:
+            expected_root = (
+                f"{_artifact_distribution_name(expected_name)}-"
+                f"{_artifact_version_name(expected_version)}"
+            )
+            members = source_archive.getmembers()
             metadata_members = [
                 member
-                for member in source_archive.getmembers()
+                for member in members
                 if member.isfile()
                 and member.name.endswith("/PKG-INFO")
                 and member.name.count("/") == 1
@@ -159,6 +187,27 @@ def _sdist_identity(sdist_path: Path) -> tuple[str, str]:
                     f"source distribution must contain exactly one top-level "
                     f"PKG-INFO; found {len(metadata_members)}"
                 )
+            metadata_root = metadata_members[0].name.rsplit("/", 1)[0]
+            if metadata_root != expected_root:
+                raise VerificationError(
+                    f"source-distribution root {metadata_root!r} does not "
+                    f"match expected {expected_root!r}"
+                )
+            for member in members:
+                path = PurePosixPath(member.name)
+                if (
+                    path.is_absolute()
+                    or not path.parts
+                    or path.parts[0] != expected_root
+                    or ".." in path.parts
+                    or "\\" in member.name
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise VerificationError(
+                        f"source distribution contains unsafe or unexpected "
+                        f"member path {member.name!r}; every member must remain "
+                        f"under {expected_root!r}"
+                    )
             extracted = source_archive.extractfile(metadata_members[0])
             if extracted is None:
                 raise VerificationError("cannot read source distribution PKG-INFO")
@@ -168,6 +217,59 @@ def _sdist_identity(sdist_path: Path) -> tuple[str, str]:
             f"cannot inspect source distribution {sdist_path.name}: {exc}"
         ) from exc
     return _metadata_identity(metadata, "source distribution")
+
+
+def verify_sdist(
+    project_path: Path, dist_path: Path, tag: str | None = None
+) -> Path:
+    """Verify the sole built sdist before any archive extraction occurs."""
+
+    if tag is None:
+        expected_name, expected_version = _project_identity(project_path)
+    else:
+        expected_name, expected_version = verify_tag(project_path, tag)
+
+    sdists = sorted(dist_path.glob("*.tar.gz"))
+    if len(sdists) != 1:
+        raise VerificationError(
+            "pre-extraction release directory must contain exactly one source "
+            f"distribution; found {len(sdists)}"
+        )
+    try:
+        entries = set(dist_path.iterdir())
+    except OSError as exc:
+        raise VerificationError(f"cannot inspect release directory: {exc}") from exc
+    if entries != {sdists[0]}:
+        unexpected = sorted(path.name for path in entries - {sdists[0]})
+        raise VerificationError(
+            "pre-extraction release directory contains unexpected entries: "
+            f"{unexpected}"
+        )
+
+    artifact_name = _artifact_distribution_name(expected_name)
+    expected_filename = f"{artifact_name}-{expected_version}.tar.gz"
+    if sdists[0].name != expected_filename:
+        raise VerificationError(
+            f"source-distribution filename {sdists[0].name!r} does not identify "
+            f"{expected_name} {expected_version}"
+        )
+
+    artifact_name_value, artifact_version = _sdist_identity(
+        sdists[0],
+        expected_name=expected_name,
+        expected_version=expected_version,
+    )
+    if _normalize_name(artifact_name_value) != _normalize_name(expected_name):
+        raise VerificationError(
+            f"source distribution Name {artifact_name_value!r} does not match "
+            f"project.name {expected_name!r}"
+        )
+    if artifact_version != expected_version:
+        raise VerificationError(
+            f"source distribution Version {artifact_version!r} does not match "
+            f"project.version {expected_version!r}"
+        )
+    return sdists[0]
 
 
 def verify_artifacts(
@@ -212,8 +314,24 @@ def verify_artifacts(
         )
 
     for label, path, identity_reader in (
-        ("wheel", wheels[0], _wheel_identity),
-        ("source distribution", sdists[0], _sdist_identity),
+        (
+            "wheel",
+            wheels[0],
+            lambda wheel_path: _wheel_identity(
+                wheel_path,
+                expected_name=expected_name,
+                expected_version=expected_version,
+            ),
+        ),
+        (
+            "source distribution",
+            sdists[0],
+            lambda sdist_path: _sdist_identity(
+                sdist_path,
+                expected_name=expected_name,
+                expected_version=expected_version,
+            ),
+        ),
     ):
         artifact_name, artifact_version = identity_reader(path)
         if _normalize_name(artifact_name) != _normalize_name(expected_name):
@@ -247,6 +365,14 @@ def _parser() -> argparse.ArgumentParser:
     artifacts_parser.add_argument("--project", required=True, type=Path)
     artifacts_parser.add_argument("--dist", required=True, type=Path)
     artifacts_parser.add_argument("--tag")
+
+    sdist_parser = subparsers.add_parser(
+        "sdist",
+        help="verify the sole source distribution before extracting it",
+    )
+    sdist_parser.add_argument("--project", required=True, type=Path)
+    sdist_parser.add_argument("--dist", required=True, type=Path)
+    sdist_parser.add_argument("--tag")
     return parser
 
 
@@ -256,6 +382,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "tag":
             name, version = verify_tag(args.project, args.tag)
             print(f"release identity verified: {name} {version} ({args.tag})")
+        elif args.command == "sdist":
+            sdist = verify_sdist(args.project, args.dist, args.tag)
+            print(f"source distribution verified before extraction: {sdist.name}")
         else:
             wheel, sdist = verify_artifacts(args.project, args.dist, args.tag)
             print(

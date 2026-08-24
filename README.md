@@ -351,10 +351,15 @@ three booleans to `false` and use the scope
 `modeled_presence_and_enum_count_only`.
 
 Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
-arguments, risk conflicts, or MCP annotation conflicts need attention. Static
-inference is a review aid, not a vulnerability verdict; the scanner does not
-inspect tool implementations or verify the surrounding application's
-authorization and provenance wiring.
+arguments, risk conflicts, MCP annotation conflicts, or unresolved JSON Schema
+composition need attention. The scanner does not resolve `$ref`, `allOf`,
+`anyOf`, `oneOf`, or conditional/dependent schemas. It instead sets
+`schema_review_required` on the tool and counts it in
+`summary.schema_review_required_tools`, so authority-bearing properties hidden
+behind those constructs cannot produce a silent clean result. Static inference
+is a review aid, not a vulnerability verdict; the scanner does not inspect tool
+implementations or verify the surrounding application's authorization and
+provenance wiring.
 
 ### Add implementation-level control evidence
 

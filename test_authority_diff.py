@@ -32,6 +32,12 @@ def _avp9_report():
     return scan_documents([schema], control_declarations=controls)
 
 
+def _refresh_control_fingerprint(report):
+    report["control_declaration_fingerprint_sha256"] = (
+        scanner._control_declaration_fingerprint(report["declared_controls"])
+    )
+
+
 def _constraint_document(maximum, max_length, enum):
     return {
         "tools": [
@@ -589,6 +595,71 @@ def test_duplicate_unexposed_control_arguments_are_rejected():
         diff_reports(report, copy.deepcopy(report))
 
 
+def test_control_declaration_fingerprint_is_recomputed_before_diffing():
+    report = _avp9_report()
+    report["control_declaration_fingerprint_sha256"] = "0" * 64
+
+    with pytest.raises(DiffError, match="fingerprint does not match"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_duplicated_declared_risk_must_match_the_report_tool():
+    report = _avp9_report()
+    report["declared_controls"]["tools"][0]["risk"]["effects"].append(
+        "different_effect"
+    )
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="risk conflicts with the report tool"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_declared_risk_cannot_outlive_its_declared_control_tool():
+    report = _avp9_report()
+    report["declared_controls"]["tools"] = []
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="declared risk without the matching"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_duplicated_schema_closure_must_match_the_report_tool():
+    report = _avp9_report()
+    declared_tool = report["declared_controls"]["tools"][0]
+    declared_tool["schema_closes_unknown_arguments"] = not declared_tool[
+        "schema_closes_unknown_arguments"
+    ]
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="schema closure conflicts"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    (
+        ("inferred_policy", "typed_bounded", "inferred policy conflicts"),
+        ("review_required", None, "review requirement conflicts"),
+    ),
+)
+def test_duplicated_declared_argument_analysis_must_match_report(
+    field, value, message
+):
+    report = _avp9_report()
+    argument = next(
+        item
+        for item in report["declared_controls"]["tools"][0]["arguments"]
+        if item["name"] == "bidWei"
+    )
+    if field == "review_required":
+        value = not argument[field]
+    argument[field] = value
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
 def test_cli_rejects_malformed_report_with_exit_two(tmp_path, capsys):
     before = _single_argument_report({"type": "number", "maximum": 100})
     after = copy.deepcopy(before)
@@ -839,6 +910,8 @@ def test_declared_risk_effect_change_requires_review():
     before = _avp9_report()
     after = copy.deepcopy(before)
     after["tools"][0]["declared_risk"]["effects"].append("pays_gas")
+    after["declared_controls"]["tools"][0]["risk"]["effects"].append("pays_gas")
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -870,6 +943,7 @@ def test_avp9_constrained_amount_becoming_free_is_an_authority_increase():
     bid = next(argument for argument in arguments if argument["name"] == "bidWei")
     bid["authority"] = "free"
     bid.pop("bounds")
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -905,19 +979,21 @@ def test_server_fixed_argument_becoming_exposed_is_an_authority_increase():
             }
         ]
     )
-    tool["arguments"].append(destination_report["tools"][0]["arguments"][0])
+    destination_argument = destination_report["tools"][0]["arguments"][0]
+    tool["arguments"].append(destination_argument)
     declared_tool = after["declared_controls"]["tools"][0]
     declared_tool["unexposed_arguments"] = []
     declared_tool["arguments"].append(
         {
             "name": "destination",
             "schema_exposure": "exposed",
-            "inferred_policy": "trusted_fixed",
-            "review_required": False,
+            "inferred_policy": destination_argument["policy"],
+            "review_required": destination_argument["review_required"],
             "authority": "locked",
             "evidence": "declared",
         }
     )
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -938,6 +1014,7 @@ def test_enforced_bound_becoming_caller_controlled_is_flagged():
     arguments = after["declared_controls"]["tools"][0]["arguments"]
     bid = next(argument for argument in arguments if argument["name"] == "bidWei")
     bid["bounds"][0]["bounds_mutability"] = "caller"
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -954,6 +1031,7 @@ def test_enforced_bound_becoming_specified_is_an_authority_increase():
     arguments = after["declared_controls"]["tools"][0]["arguments"]
     bid = next(argument for argument in arguments if argument["name"] == "bidWei")
     bid["bounds"][0]["operational_status"] = "specified"
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -969,6 +1047,7 @@ def test_specified_bound_becoming_enforced_is_a_protection_increase():
     arguments = after["declared_controls"]["tools"][0]["arguments"]
     bid = next(argument for argument in arguments if argument["name"] == "bidWei")
     bid["bounds"][-1]["operational_status"] = "enforced"
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -984,6 +1063,7 @@ def test_specified_bound_mutability_change_requires_review_but_does_not_fail():
     arguments = after["declared_controls"]["tools"][0]["arguments"]
     bid = next(argument for argument in arguments if argument["name"] == "bidWei")
     bid["bounds"][-1]["bounds_mutability"] = "caller"
+    _refresh_control_fingerprint(after)
 
     diff = diff_reports(before, after)
 
@@ -1049,6 +1129,58 @@ def test_opening_additional_properties_is_an_authority_increase():
     assert change["classification"] == "authority_increase"
     assert change["before"] is True
     assert change["after"] is False
+
+
+def test_new_unresolved_schema_composition_requires_diff_review():
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "properties": {"body": {"type": "string"}}
+                },
+            }
+        ]
+    }
+    after_document = copy.deepcopy(before_document)
+    after_document["tools"][0]["inputSchema"]["allOf"] = [
+        {
+            "properties": {
+                "recipient": {"type": "string", "format": "email"}
+            }
+        }
+    ]
+
+    diff = diff_reports(
+        scan_documents([before_document]), scan_documents([after_document])
+    )
+
+    change = next(
+        item
+        for item in diff["changes"]
+        if item["kind"] == "schema_review_requirement_changed"
+    )
+    assert change["classification"] == "review"
+    assert change["before"] is False
+    assert change["after"] is True
+
+
+def test_optional_schema_review_fields_preserve_legacy_v3_compatibility():
+    report = _single_argument_report({"type": "string"})
+    report["summary"].pop("schema_review_required_tools")
+    report["tools"][0].pop("schema_review_required")
+
+    diff = diff_reports(report, copy.deepcopy(report))
+
+    assert diff["summary"]["changes"] == 0
+
+
+def test_schema_review_summary_must_match_tool_flags():
+    report = _single_argument_report({"type": "string"})
+    report["summary"]["schema_review_required_tools"] = 1
+
+    with pytest.raises(DiffError, match="does not match its tools"):
+        diff_reports(report, copy.deepcopy(report))
 
 
 def test_redacted_reports_are_rejected_because_names_are_not_stable():

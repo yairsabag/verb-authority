@@ -87,6 +87,52 @@ _SCHEMA_SINGLE_SUBSCHEMA_KEYWORDS = frozenset(
 _SCHEMA_ARRAY_SUBSCHEMA_KEYWORDS = frozenset(
     {"allOf", "anyOf", "oneOf", "prefixItems"}
 )
+_SCHEMA_AUTHORITY_REVIEW_KEYWORDS = frozenset(
+    {
+        "$dynamicRef",
+        "$recursiveRef",
+        "$ref",
+        "allOf",
+        "anyOf",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+        "else",
+        "if",
+        "oneOf",
+        "then",
+    }
+)
+_SCHEMA_UNMODELED_AUTHORITY_KEYWORDS = frozenset(
+    {
+        "contains",
+        "contentSchema",
+        "items",
+        "not",
+        "prefixItems",
+        "propertyNames",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_SCHEMA_WRAPPER_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "$schema",
+        "additionalProperties",
+        "const",
+        "enum",
+        "maxProperties",
+        "minProperties",
+        "required",
+        "type",
+        "unevaluatedProperties",
+        *_SCHEMA_MAP_KEYWORDS,
+        *_SCHEMA_SINGLE_SUBSCHEMA_KEYWORDS,
+        *_SCHEMA_ARRAY_SUBSCHEMA_KEYWORDS,
+        *_SCHEMA_AUTHORITY_REVIEW_KEYWORDS,
+    }
+)
 _MODELED_ARGUMENT_CONSTRAINTS = frozenset({"enum", "maxLength", "maximum"})
 _SHA256_HEX_LENGTH = 64
 MAX_JSON_DEPTH = 128
@@ -868,12 +914,14 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     properties = schema.get("properties")
     if properties is None:
         # Some SDK exports expose the input shape directly rather than wrapping
-        # it in a JSON Schema object.
-        properties = {
-            key: value
-            for key, value in schema.items()
-            if key not in {"type", "required", "$schema", "additionalProperties"}
-        }
+        # it in a JSON Schema object. A document containing recognized schema
+        # structure is still a wrapped schema, even when its caller-visible
+        # properties are supplied only through an unresolved reference or
+        # combinator.
+        if _SCHEMA_WRAPPER_KEYWORDS.intersection(schema):
+            properties = {}
+        else:
+            properties = dict(schema)
     if not isinstance(properties, dict):
         raise SchemaError(f"tool '{definition.name}' has non-object properties")
     for name, property_schema in properties.items():
@@ -892,6 +940,47 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     if len(required) != len(set(required)):
         raise SchemaError(f"tool '{definition.name}' required names must be unique")
     return properties, set(required)
+
+
+def _schema_requires_authority_review(schema: Any) -> bool:
+    """Flag composition the scanner deliberately does not resolve.
+
+    The scanner models only the caller-visible ``properties`` at the exported
+    input-schema root. References, combinators, and conditional/dependent
+    schemas can add or alter those properties, so their presence must remain a
+    visible review obligation rather than silently producing a complete-looking
+    per-argument report. Traversal follows schema-bearing keyword positions and
+    intentionally does not interpret instance values such as ``enum`` members.
+    """
+
+    if type(schema) is bool:
+        # Boolean property schemas are valid JSON Schema, but the scanner's
+        # Param model does not represent "accept everything"/"accept nothing".
+        return True
+    if type(schema) is not dict:
+        return False
+    if (
+        _SCHEMA_AUTHORITY_REVIEW_KEYWORDS.intersection(schema)
+        or _SCHEMA_UNMODELED_AUTHORITY_KEYWORDS.intersection(schema)
+    ):
+        return True
+
+    pattern_properties = schema.get("patternProperties")
+    if type(pattern_properties) is dict and pattern_properties:
+        return True
+    if type(schema.get("additionalProperties")) is dict:
+        return True
+
+    # Root ``properties`` and nested object properties are the only schema map
+    # this scanner actually enumerates. Follow those paths so a ref/combinator
+    # inside an argument is still surfaced. Deliberately do not walk `$defs`
+    # or legacy `definitions`: an unused helper definition is inert, while any
+    # reference to it is already caught at the reference site.
+    properties = schema.get("properties")
+    return type(properties) is dict and any(
+        _schema_requires_authority_review(subschema)
+        for subschema in properties.values()
+    )
 
 
 def _consume_definition_limits(
@@ -1533,6 +1622,7 @@ def _scan_definitions_bounded(
         "protected_parameters": 0,
         "data_fillable_parameters": 0,
         "review_required": 0,
+        "schema_review_required_tools": 0,
         "confirmation_required_tools": len(policy_set.confirm),
         "risk_review_required_tools": len(policy_set.risk_review),
         "risk_conflicts": len(policy_set.risk_conflicts),
@@ -1553,6 +1643,11 @@ def _scan_definitions_bounded(
         )
         conflicts = _annotation_conflicts(risk, definition.annotations)
         counts["annotation_conflicts"] += len(conflicts)
+        schema_review_required = _schema_requires_authority_review(
+            definition.input_schema
+        )
+        if schema_review_required:
+            counts["schema_review_required_tools"] += 1
         arguments = []
         for param_index, param in enumerate(params_by_tool[tool_name], start=1):
             initial_policy, confidence = infer_policy(param)
@@ -1622,6 +1717,7 @@ def _scan_definitions_bounded(
             "schema_closes_unknown_arguments": (
                 definition.input_schema.get("additionalProperties") is False
             ),
+            "schema_review_required": schema_review_required,
             "annotation_conflicts": conflicts,
             "arguments": arguments,
         }
@@ -1759,7 +1855,16 @@ def _markdown_cell(value: Any) -> str:
             safe.append(f"{escape}{codepoint:0{width}x}")
         else:
             safe.append(character)
-    return html.escape("".join(safe), quote=False).replace("|", "\\|")
+    escaped = html.escape("".join(safe), quote=False)
+    markdown_safe: list[str] = []
+    for character in escaped:
+        # Escaping brackets and the image marker is sufficient to neutralize
+        # inline/reference links and images without making ordinary prose,
+        # identifiers, or parenthesized constraint text unreadable.
+        if character in {"\\", "`", "!", "[", "]", "|"}:
+            markdown_safe.append("\\")
+        markdown_safe.append(character)
+    return "".join(markdown_safe)
 
 
 def _constraint_details(argument: dict[str, Any]) -> str:
@@ -1824,6 +1929,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Protected (`trusted_fixed`) | {summary['protected_parameters']} |",
         f"| Data-fillable | {summary['data_fillable_parameters']} |",
         f"| Parameters requiring review | {summary['review_required']} |",
+        f"| Schemas requiring review | {summary.get('schema_review_required_tools', 0)} |",
         f"| Tools requiring confirmation | {summary['confirmation_required_tools']} |",
         f"| Tool risks requiring review | {summary['risk_review_required_tools']} |",
         f"| Tool risk conflicts | {summary['risk_conflicts']} |",
@@ -1851,8 +1957,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "## Tool risk evidence",
             "",
             "| Tool | Effective risk | Source | Name heuristic | Mutability | "
-            "Declared effects | Conflict | Review | Confirmation |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "Declared effects | Conflict | Risk review | Schema review | Confirmation |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for tool in report["tools"]:
@@ -1872,7 +1978,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
         lines.append(
             "| {tool} | {risk} | {source} | {signal} ({confidence}) | "
-            "{mutability} | {effects} | {conflict} | {review} | {confirmation} |".format(
+            "{mutability} | {effects} | {conflict} | {review} | {schema_review} | "
+            "{confirmation} |".format(
                 tool=_markdown_cell(tool["name"]),
                 risk=_markdown_cell(tool["risk"]),
                 source=_markdown_cell(tool["risk_source"]),
@@ -1882,6 +1989,9 @@ def render_markdown(report: dict[str, Any]) -> str:
                 effects=_markdown_cell(declared_effects),
                 conflict="yes" if tool["risk_conflict"] else "no",
                 review="yes" if tool["risk_review_required"] else "no",
+                schema_review=(
+                    "yes" if tool.get("schema_review_required") is True else "no"
+                ),
                 confirmation="yes" if tool["needs_confirmation"] else "no",
             )
         )
@@ -1984,6 +2094,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "requires review and runtime confirmation. This report is not a",
             "vulnerability verdict, does not inspect tool implementations, and does not prove",
             "that the surrounding application supplies correct provenance or authorization.",
+            "References and composed/conditional schemas are not resolved; when present,",
+            "the report marks the tool for schema review instead of claiming complete coverage.",
             "Review every flagged argument against the real tool semantics before deployment.",
             "",
         ]
@@ -2044,6 +2156,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = report["summary"]
     if args.fail_on_review and (
         summary["review_required"]
+        or summary.get("schema_review_required_tools", 0)
         or summary["risk_review_required_tools"]
         or summary["risk_conflicts"]
         or summary["annotation_conflicts"]

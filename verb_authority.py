@@ -303,17 +303,138 @@ def verb_risk(tool_name: str) -> Risk:
 
 
 # === per-parameter inference (safe-by-default, with confidence) ===========
-_SINK = re.compile(
-    r"(^to$|_to$|recipient|account|iban|^url$|_url$|endpoint|host|webhook|"
-    r"^path$|_path$|^file$|_file$|cmd|command|token|password|secret|credential|"
-    r"api[_-]?key)",
-    re.I,
+_AUTHORITY_SINK_TOKENS = frozenset(
+    {
+        "recipient",
+        "recipients",
+        "account",
+        "accounts",
+        "iban",
+        "ibans",
+        "url",
+        "urls",
+        "uri",
+        "uris",
+        "endpoint",
+        "endpoints",
+        "host",
+        "hosts",
+        "hostname",
+        "hostnames",
+        "webhook",
+        "webhooks",
+        "path",
+        "paths",
+        "file",
+        "files",
+        "cmd",
+        "cmds",
+        "command",
+        "commands",
+        "shell",
+        "shells",
+        "token",
+        "tokens",
+        "password",
+        "passwords",
+        "secret",
+        "secrets",
+        "credential",
+        "credentials",
+        "destination",
+        "destinations",
+    }
 )
-_SELECTOR = re.compile(r"(?:^|_)(?:id|ids|key|keys)$", re.I)
-_PAYLOAD = re.compile(
-    r"(?:^|_)(?:body|message|content|text|summary|reply|note|description)$",
-    re.I,
+_COMPACT_AUTHORITY_SINK_TOKENS = frozenset({"apikey", "apikeys"})
+_SELECTOR_TOKENS = frozenset({"id", "ids", "key", "keys"})
+_PAYLOAD_TOKENS = frozenset(
+    {"body", "message", "content", "text", "summary", "reply", "note", "description"}
 )
+_KNOWN_IDENTIFIER_ACRONYM = re.compile(
+    r"(?<![A-Z])(IBAN|URL|URI|CMD|API|ID)(s?)(?=$|[A-Z][a-z]|[^A-Za-z0-9])"
+)
+
+
+def _identifier_tokens(name: str) -> tuple[str, ...]:
+    """Split common schema identifier styles without substring guessing.
+
+    Tool providers use snake_case, kebab-case, dotted/slashed paths,
+    camelCase, and acronym suffixes interchangeably. Normalize those styles
+    into complete, case-folded tokens so ``messageId`` and ``messageID`` carry
+    the same selector evidence as ``message_id`` while words such as
+    ``valid`` and ``keyboard`` do not acquire authority merely because they
+    contain the letters ``id`` or ``key``.
+    """
+
+    if type(name) is not str:
+        return ()
+    normalized = unicodedata.normalize("NFKC", name)
+    # Preserve familiar acronym tokens (and their conventional lowercase-s
+    # plurals) before applying the generic camel-case boundaries. Without
+    # this step ``replyIBANs`` becomes ``reply / iba / ns`` and silently loses
+    # the authority-bearing token. The uppercase look-behind prevents a word
+    # such as ``VALID`` from being split merely because it ends in ``ID``.
+    normalized = _KNOWN_IDENTIFIER_ACRONYM.sub(
+        lambda match: f"_{match.group(1).casefold()}{match.group(2)}_",
+        normalized,
+    )
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    return tuple(
+        token.casefold()
+        for token in re.split(r"[^A-Za-z0-9]+", separated)
+        if token
+    )
+
+
+def _is_sink_name(name: str) -> bool:
+    """Return structural sink evidence across common identifier styles."""
+
+    tokens = _identifier_tokens(name)
+    if not tokens:
+        return False
+    if _AUTHORITY_SINK_TOKENS.intersection(tokens):
+        return True
+    if _COMPACT_AUTHORITY_SINK_TOKENS.intersection(tokens):
+        return True
+    if "api" in tokens and {"key", "keys"}.intersection(tokens):
+        return True
+    # Preserve the existing ``*_to`` evidence for camel/kebab/dotted forms
+    # such as replyTo, reply-to, and reply.to. Matching a complete final token
+    # avoids false positives such as ``into`` or ``tomorrow``.
+    return tokens[-1] == "to"
+
+
+def _is_selector_name(name: str) -> bool:
+    """Return complete-token selector evidence, never raw substrings."""
+
+    return bool(_SELECTOR_TOKENS.intersection(_identifier_tokens(name)))
+
+
+def _is_payload_name(name: str) -> bool:
+    """Recognize only a complete final payload token across name styles."""
+
+    tokens = _identifier_tokens(name)
+    return bool(tokens and tokens[-1] in _PAYLOAD_TOKENS)
+
+
+def _identifier_name_requires_review(name: str) -> bool:
+    """Fail closed when the English identifier heuristic cannot model a name.
+
+    Compatibility forms such as fullwidth Latin normalize to ASCII and remain
+    classifiable. Mixed-script, non-Latin, punctuation-only, and numeric-only
+    names do not receive a high-confidence typed/data-authorable verdict from
+    an English-only token dictionary. A developer may still make the explicit
+    ``sink=False`` declaration above this fallback.
+    """
+
+    if type(name) is not str:
+        return True
+    normalized = unicodedata.normalize("NFKC", name)
+    if not normalized.isascii():
+        return True
+    tokens = _identifier_tokens(name)
+    return not any(re.search(r"[A-Za-z]", token) for token in tokens)
 
 
 def infer_policy(p: Param):
@@ -326,7 +447,9 @@ def infer_policy(p: Param):
         # explicitly not a sink: still type-check, but data may fill it
         if p.type in ("number", "integer", "enum", "boolean"):
             return Policy.TYPED_BOUNDED, Confidence.HIGH
-        if _PAYLOAD.search(p.name) or (p.type == "string" and (p.max_len or 0) > 200):
+        if _is_payload_name(p.name) or (
+            p.type == "string" and (p.max_len or 0) > 200
+        ):
             return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
         return Policy.TYPED_BOUNDED, Confidence.HIGH
     # --- no declaration: fall back to conservative name-based inference ---
@@ -335,13 +458,17 @@ def infer_policy(p: Param):
     # as ``reply_to`` must not become authorable merely because another token
     # resembles free text.  Generic ``*_id``/``*_key`` selectors remain locked
     # but uncertain so consequential tools surface them in PolicySet.review.
-    if p.type in ("email", "uri") or _SINK.search(p.name):
+    if p.type in ("email", "uri") or _is_sink_name(p.name):
         return Policy.TRUSTED_FIXED, Confidence.HIGH
-    if _SELECTOR.search(p.name):
+    if _is_selector_name(p.name):
+        return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
+    if _identifier_name_requires_review(p.name):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
     if p.type in ("number", "integer", "enum", "boolean"):
         return Policy.TYPED_BOUNDED, Confidence.HIGH
-    if _PAYLOAD.search(p.name) or (p.type == "string" and (p.max_len or 0) > 200):
+    if _is_payload_name(p.name) or (
+        p.type == "string" and (p.max_len or 0) > 200
+    ):
         return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
     return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN   # locked-safe until you confirm
 
@@ -780,14 +907,18 @@ def _type_ok(p: Param, v) -> bool:
         return integer and (p.cap is None or v <= p.cap)
     if p.type == "enum":
         try:
-            return p.enum is not None and any(
-                (
-                    _canonical_json_value(v) == member.canonical_json
-                    if isinstance(member, _FrozenEnumMember)
-                    else _same_authority_value(v, member)
-                )
-                for member in p.enum
-            )
+            if p.enum is None:
+                return False
+            canonical_candidate: str | None = None
+            for member in p.enum:
+                if isinstance(member, _FrozenEnumMember):
+                    if canonical_candidate is None:
+                        canonical_candidate = _canonical_json_value(v)
+                    if canonical_candidate == member.canonical_json:
+                        return True
+                elif _same_authority_value(v, member):
+                    return True
+            return False
         except Exception:
             return False
     if p.type == "boolean":
@@ -1004,9 +1135,50 @@ MAX_LEDGER_ENTRIES = 10_000
 MAX_LEDGER_UTF8_BYTES = 8 * 1024 * 1024
 """Maximum retained UTF-8 text material in one provenance session."""
 
+MAX_LEDGER_LOOKUP_CHARACTERS = 16 * 1024 * 1024
+"""Maximum containment-search work shared by one dispatch decision."""
+
 
 class _LedgerCapacityExceeded(ValueError):
     """Internal signal that a session ledger must be replaced, not retried."""
+
+
+class _LedgerLookupBudgetExceeded(ValueError):
+    """Internal signal that a containment query must conservatively taint."""
+
+
+class _LedgerLookupBudget:
+    """Deterministic character-work budget for ledger containment searches."""
+
+    __slots__ = ("remaining", "exhausted")
+
+    def __init__(self) -> None:
+        if (
+            type(MAX_LEDGER_LOOKUP_CHARACTERS) is not int
+            or MAX_LEDGER_LOOKUP_CHARACTERS < 1
+        ):
+            self.remaining = 0
+            self.exhausted = True
+        else:
+            self.remaining = MAX_LEDGER_LOOKUP_CHARACTERS
+            self.exhausted = False
+
+    def consume(self, amount: int) -> None:
+        # Charge before each substring operation. Once exhausted, this shared
+        # object stays exhausted so later queries in the same dispatch also
+        # fail closed without scanning history again.
+        if (
+            self.exhausted
+            or type(amount) is not int
+            or amount < 0
+            or amount > self.remaining
+        ):
+            self.remaining = 0
+            self.exhausted = True
+            raise _LedgerLookupBudgetExceeded(
+                "provenance ledger lookup work limit exceeded"
+            )
+        self.remaining -= amount
 
 
 @dataclass
@@ -1186,6 +1358,17 @@ class ProvenanceLedger:
         tainted so the direct dispatch API fails closed instead of recursing.
         """
 
+        return self._is_tainted_with_budget(value, _LedgerLookupBudget())
+
+    def _is_tainted_with_budget(
+        self,
+        value: Any,
+        budget: _LedgerLookupBudget,
+    ) -> bool:
+        """Budget-aware implementation shared across one dispatch decision."""
+
+        if type(budget) is not _LedgerLookupBudget:
+            return True
         with self._lock:
             if self._saturated:
                 return True
@@ -1196,20 +1379,29 @@ class ProvenanceLedger:
         with self._lock:
             if self._saturated:
                 return True
-            return self._is_tainted_value(normalized_value, set(), 0)
+            try:
+                return self._is_tainted_value(
+                    normalized_value,
+                    set(),
+                    0,
+                    budget,
+                )
+            except _LedgerLookupBudgetExceeded:
+                return True
 
     def _is_tainted_value(
         self,
         value: Any,
         seen: set[int],
         depth: int,
+        budget: _LedgerLookupBudget,
     ) -> bool:
         token = _json_leaf_token(value)
         if token is not None:
             if token in self._tainted:
                 return True
             if type(value) is str:
-                return self._is_tainted_string(value)
+                return self._is_tainted_string(value, budget)
             return False
         if type(value) not in (dict, list, tuple):
             return False
@@ -1235,36 +1427,52 @@ class ProvenanceLedger:
                             ("string", key) in self._tainted
                             or (
                                 _has_risk_shaped_form(key)
-                                and self._is_tainted_string(key)
+                                and self._is_tainted_string(key, budget)
                             )
                         )
                     )
-                    or self._is_tainted_value(item, seen, depth + 1)
+                    or self._is_tainted_value(
+                        item,
+                        seen,
+                        depth + 1,
+                        budget,
+                    )
                     for key, item in value.items()
                 )
             return any(
-                self._is_tainted_value(item, seen, depth + 1)
+                self._is_tainted_value(item, seen, depth + 1, budget)
                 for item in value
             )
         finally:
             seen.remove(identity)
 
-    def _is_tainted_string(self, value: str) -> bool:
+    def _is_tainted_string(
+        self,
+        value: str,
+        budget: _LedgerLookupBudget,
+    ) -> bool:
         if ("string", value) in self._tainted:            # layer 1: exact
             return True
         v = value.strip()
         if not v:
             return False
         if _is_risk_shaped(v):                          # layer 2: contained
-            if any(v in blob for blob in self._blobs):
-                return True
+            budget.consume(len(v))
+            for blob in self._blobs:
+                budget.consume(len(v) + len(blob))
+                if v in blob:
+                    return True
         # layer 3: canonical. Fold the value to a disguise-free form and look
         # for it in the canonicalized blobs. This catches the family the
         # adaptive attacker found -- homograph / uppercase / spaced variants
         # of a tainted address -- without a separate rule per trick.
         cv = _canonical(v)
-        if _is_risk_shaped(cv) and any(cv in cb for cb in self._canon_blobs):
-            return True
+        if _is_risk_shaped(cv):
+            budget.consume(len(cv))
+            for canonical_blob in self._canon_blobs:
+                budget.consume(len(cv) + len(canonical_blob))
+                if cv in canonical_blob:
+                    return True
         return False
 
 
@@ -1518,17 +1726,24 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
                     f"unknown param '{_safe_reason_text(name)}'",
                 )
     provenance = {}
+    ledger_lookup_budget = _LedgerLookupBudget()
     for n in args:
-        if ledger is not None and ledger.is_tainted(args.get(n)):
-            provenance[n] = "data"            # ledger overrides any dev declaration
-        elif n in trusted_args:
+        matches_trusted = False
+        if n in trusted_args:
             try:
                 matches_trusted = _same_authority_value(args[n], trusted_args[n])
             except Exception:
                 matches_trusted = False
-            provenance[n] = "trusted" if matches_trusted else "data"
-        else:
+        if not matches_trusted:
             provenance[n] = "data"
+            continue
+        if ledger is not None and ledger._is_tainted_with_budget(
+            args[n],
+            ledger_lookup_budget,
+        ):
+            provenance[n] = "data"            # ledger overrides any dev declaration
+        else:
+            provenance[n] = "trusted"
     if ledger is not None and ledger.saturated:
         return Decision(
             False,

@@ -51,6 +51,12 @@ jobs:
       - name: Build source distribution
         run: python -m build --sdist
 
+      - name: Verify source distribution before extraction
+        run: |
+          python scripts/verify_release_artifacts.py sdist \
+            --project pyproject.toml \
+            --dist dist
+
       - name: Extract and inspect source distribution
         run: |
           mkdir -p "${{ runner.temp }}/verb-authority-sdist"

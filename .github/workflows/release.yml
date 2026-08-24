@@ -37,6 +37,15 @@ jobs:
       - name: Build source distribution
         run: python -m build --sdist
 
+      - name: Verify source distribution before extraction
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python scripts/verify_release_artifacts.py sdist \
+            --project pyproject.toml \
+            --dist dist \
+            --tag "$RELEASE_TAG"
+
       - name: Extract and inspect source distribution
         run: |
           mkdir -p "${{ runner.temp }}/verb-authority-sdist"

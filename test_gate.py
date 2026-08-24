@@ -1,5 +1,6 @@
 """Tests for the verb-authority gate. Run with: pytest test_gate.py -v"""
 import pytest
+import verb_authority as authority
 from verb_authority import (
     Policy, Confidence, Risk, Param, Tool, Registry,
     infer_policy, infer_risk, verb_risk, build_policy, gate, dispatch,
@@ -24,6 +25,62 @@ def test_strong_sink_name_infers_trusted_fixed():
 
 def test_payload_name_infers_outbound_payload():
     assert infer_policy(Param("body", "string"))[0] is Policy.OUTBOUND_PAYLOAD
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "messageBody",
+        "response-content",
+        "agent.reply",
+        "tool/description",
+        "finalSummary",
+        "plainText",
+        "request_message",
+        "note",
+    ],
+)
+def test_payload_tokenization_supports_common_identifier_styles(name):
+    policy, confidence = infer_policy(Param(name, "string"))
+
+    assert policy is Policy.OUTBOUND_PAYLOAD
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize(
+    ("name", "confidence"),
+    [
+        ("replyTo", Confidence.HIGH),
+        ("contentURL", Confidence.HIGH),
+        ("messageId", Confidence.UNCERTAIN),
+    ],
+)
+def test_authority_tokens_take_precedence_over_payload_tokens(name, confidence):
+    policy, actual_confidence = infer_policy(Param(name, "string"))
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert actual_confidence is confidence
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "somebody",
+        "bodyguard",
+        "messageboard",
+        "contentious",
+        "textile",
+        "notebook",
+        "replying",
+        "summaryCount",
+        "descriptionHash",
+    ],
+)
+def test_payload_tokenization_does_not_match_substrings_or_nonfinal_tokens(name):
+    policy, confidence = infer_policy(Param(name, "string"))
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
 
 
 @pytest.mark.parametrize(
@@ -62,8 +119,194 @@ def test_ambiguous_message_identifier_stays_locked_and_enters_review():
     assert not decision.allow
     assert "locked sink" in decision.reason
 
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "messageId",
+        "message-id",
+        "messageID",
+        "message.id",
+        "message/id",
+        "replyTo",
+        "reply-to",
+        "userIds",
+        "idempotencyKey",
+    ],
+)
+def test_authority_selector_tokenization_locks_common_identifier_styles(name):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "select_message",
+            [Param(name, "integer")],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["select_message"][name] is Policy.TRUSTED_FIXED
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "select_message", "input": {name: 7}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["valid", "grid", "monkey", "liquid", "keyboard", "hockey"],
+)
+def test_selector_tokenization_does_not_match_identifier_substrings(name):
+    policy, confidence = infer_policy(Param(name, "integer"))
+
+    assert policy is Policy.TYPED_BOUNDED
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "primaryRecipient",
+        "backup-account",
+        "settlement.IBAN",
+        "callbackURL",
+        "backup-uri",
+        "replyURI",
+        "service/endpoint",
+        "targetHost",
+        "event.webhook",
+        "idempotencyPath",
+        "source-file",
+        "runCmd",
+        "execute-command",
+        "primary.shell",
+        "accessToken",
+        "user-password",
+        "api.secret",
+        "service/credential",
+        "api-key",
+        "apiKey",
+        "message/destination",
+    ],
+)
+def test_authority_sink_families_lock_across_identifier_styles(name):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "perform_action",
+            [Param(name, "integer")],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["perform_action"][name] is Policy.TRUSTED_FIXED
+    assert ("perform_action", name) not in policy_set.review
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "perform_action", "input": {name: 7}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "recipients",
+        "accounts",
+        "ibans",
+        "urls",
+        "uris",
+        "endpoints",
+        "hosts",
+        "hostnames",
+        "webhooks",
+        "paths",
+        "files",
+        "cmds",
+        "commands",
+        "shells",
+        "tokens",
+        "passwords",
+        "secrets",
+        "credentials",
+        "destinations",
+        "apiKeys",
+    ],
+)
+def test_plural_authority_sink_tokens_lock_conservatively(name):
+    policy, confidence = infer_policy(Param(name, "integer"))
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "profile",
+        "compile",
+        "commandment",
+        "tokenization",
+        "hostility",
+        "pathway",
+        "pathology",
+        "accountancy",
+        "secretive",
+    ],
+)
+def test_authority_sink_tokenization_does_not_match_substrings(name):
+    policy, confidence = infer_policy(Param(name, "integer"))
+
+    assert policy is Policy.TYPED_BOUNDED
+    assert confidence is Confidence.HIGH
+
+
+def test_fullwidth_authority_name_normalizes_to_a_high_confidence_sink():
+    policy, confidence = infer_policy(Param("ｂａｃｋｕｐ＿ｐａｔｈ", "integer"))
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize("name", ["рath", "סכום", "金額", "---", "12345"])
+def test_unmodelled_identifier_scripts_and_shapes_lock_for_review(name):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "write_value",
+            [Param(name, "integer")],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["write_value"][name] is Policy.TRUSTED_FIXED
+    assert ("write_value", name) in policy_set.review
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "write_value", "input": {name: 7}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+@pytest.mark.parametrize("name", ["рath", "סכום", "金額", "---", "12345"])
+def test_explicit_non_sink_overrides_unmodelled_identifier_review(name):
+    policy, confidence = infer_policy(Param(name, "integer", sink=False))
+
+    assert policy is Policy.TYPED_BOUNDED
+    assert confidence is Confidence.HIGH
+
+
 def test_ambiguous_string_marked_uncertain_and_locked_safe():
-    pol, conf = infer_policy(Param("destination", "string"))
+    pol, conf = infer_policy(Param("topic", "string"))
     assert conf is Confidence.UNCERTAIN
     assert pol is Policy.TRUSTED_FIXED   # safe-by-default
 
@@ -674,6 +917,35 @@ def test_enum_matching_is_type_strict():
     assert not d.allow and "type/bounds" in d.reason
 
 
+def test_frozen_enum_candidate_is_canonicalized_once(monkeypatch):
+    candidate = ["not-present" * 100]
+    param = authority._FrozenParam(
+        name="value",
+        type="enum",
+        enum=tuple(
+            authority._FrozenEnumMember(f'"member-{index}"')
+            for index in range(5_000)
+        ),
+        max_len=None,
+        cap=None,
+        sink=False,
+        required=True,
+        source_id=1,
+        enum_source_id=2,
+    )
+    calls = []
+    original = authority._canonical_json_value
+
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(authority, "_canonical_json_value", counted)
+
+    assert not authority._type_ok(param, candidate)
+    assert calls == [candidate]
+
+
 def test_typed_bounded_string_rejects_non_string_values():
     reg = Registry()
     reg.add(
@@ -871,6 +1143,108 @@ def test_ledger_does_not_block_genuine_trusted_value():
     tool_use = {"name":"send_email", "input":{"to":"alice@company.com","body":"x"}}
     d = dispatch(reg, ps, tool_use, trusted_args={"to":"alice@company.com"}, ledger=ledger)
     assert d.allow
+
+
+@pytest.mark.parametrize(
+    "trusted_args",
+    [{}, {"to": "different@company.com"}],
+)
+def test_dispatch_skips_ledger_when_trust_cannot_promote_provenance(
+    monkeypatch,
+    trusted_args,
+):
+    reg, ps = _setup()
+    ledger = ProvenanceLedger()
+    ledger.record_result("history contains https://attacker.invalid/path")
+    scans = []
+
+    def forbidden_lookup(self, value, budget):
+        scans.append(value)
+        raise AssertionError("ledger history must not be scanned")
+
+    monkeypatch.setattr(
+        ProvenanceLedger,
+        "_is_tainted_with_budget",
+        forbidden_lookup,
+    )
+
+    decision = dispatch(
+        reg,
+        ps,
+        {
+            "name": "send_email",
+            "input": {"to": "alice@company.com", "body": "hello"},
+        },
+        trusted_args=trusted_args,
+        ledger=ledger,
+    )
+
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+    assert scans == []
+
+
+def test_dispatch_shares_one_ledger_lookup_budget_across_trusted_arguments(
+    monkeypatch,
+):
+    first = "https://clean-a.example/path"
+    second = "https://clean-b.example/path"
+    history = "observed https://attacker.example/path in an untrusted result"
+    ledger = ProvenanceLedger()
+    ledger.record_result(history)
+    one_clean_lookup = (
+        2 * len(first)
+        + len(history)
+        + 2 * len(authority._canonical(first))
+        + len(authority._canonical(history))
+    )
+    monkeypatch.setattr(
+        authority,
+        "MAX_LEDGER_LOOKUP_CHARACTERS",
+        one_clean_lookup,
+    )
+    # Each standalone lookup receives its own budget and fits exactly.
+    assert not ledger.is_tainted(first)
+    assert not ledger.is_tainted(second)
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_routes",
+            [
+                Param("primary_url", "uri", sink=True),
+                Param("backup_url", "uri", sink=True),
+            ],
+            risk=Risk.WRITE,
+        )
+    )
+    tool_call = {
+        "name": "set_routes",
+        "input": {"primary_url": first, "backup_url": second},
+    }
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        tool_call,
+        trusted_args=dict(tool_call["input"]),
+        ledger=ledger,
+    )
+
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_standalone_ledger_lookup_fails_closed_when_work_budget_is_exhausted(
+    monkeypatch,
+):
+    ledger = ProvenanceLedger()
+    ledger.record_result(
+        "observed https://attacker.example/path in an untrusted result"
+    )
+    monkeypatch.setattr(authority, "MAX_LEDGER_LOOKUP_CHARACTERS", 1)
+
+    assert ledger.is_tainted("https://clean.example/path")
 
 
 @pytest.mark.parametrize(

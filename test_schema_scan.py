@@ -588,6 +588,7 @@ def test_scans_mcp_tools_list_result():
         "protected_parameters": 1,
         "data_fillable_parameters": 1,
         "review_required": 0,
+        "schema_review_required_tools": 0,
         "confirmation_required_tools": 1,
         "risk_review_required_tools": 1,
         "risk_conflicts": 0,
@@ -874,6 +875,7 @@ def test_public_atlas_baseline_is_reproducible():
         "protected_parameters": 10,
         "data_fillable_parameters": 4,
         "review_required": 6,
+        "schema_review_required_tools": 5,
         "confirmation_required_tools": 10,
         "risk_review_required_tools": 10,
         "risk_conflicts": 0,
@@ -915,6 +917,28 @@ def test_markdown_escapes_schema_controlled_names():
 
     assert "&lt;script&gt;\\|tool" in markdown
     assert "line break\\|arg" in markdown
+
+
+def test_markdown_neutralizes_active_link_and_image_syntax():
+    hostile = "![audit](https://example.invalid/pixel)`label`"
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": hostile,
+                        "inputSchema": {"properties": {hostile: {"type": "string"}}},
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+
+    assert hostile not in markdown
+    assert "![audit](" not in markdown
+    assert "\\!\\[audit\\](https://example.invalid/pixel)\\`label\\`" in markdown
 
 
 def test_reports_declared_controls_without_overriding_inferred_policy():
@@ -1346,6 +1370,236 @@ def test_cli_writes_report_and_can_fail_on_review(tmp_path):
     assert json.loads(report_path.read_text(encoding="utf-8"))["summary"][
         "review_required"
     ] == 1
+
+
+@pytest.mark.parametrize(
+    "input_schema",
+    (
+        {
+            "$defs": {
+                "input": {
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    }
+                }
+            },
+            "$ref": "#/$defs/input",
+        },
+        {
+            "properties": {},
+            "allOf": [
+                {
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    }
+                }
+            ],
+        },
+        {"properties": {}, "anyOf": [{"properties": {"recipient": {}}}]},
+        {"properties": {}, "oneOf": [{"properties": {"recipient": {}}}]},
+        {
+            "properties": {"mode": {"type": "string"}},
+            "if": {"properties": {"mode": {"const": "send"}}},
+            "then": {"properties": {"recipient": {"format": "email"}}},
+        },
+        {
+            "properties": {"mode": {"type": "string"}},
+            "dependentSchemas": {
+                "mode": {"properties": {"recipient": {"format": "email"}}}
+            },
+        },
+        {
+            "properties": {"mode": {"type": "string"}},
+            "dependencies": {
+                "mode": {"properties": {"recipient": {"format": "email"}}}
+            },
+        },
+        {
+            "properties": {"mode": {"type": "string"}},
+            "dependentRequired": {"mode": ["recipient"]},
+        },
+        {"properties": {}, "$dynamicRef": "#input"},
+        {"properties": {}, "$recursiveRef": "#"},
+        {
+            "properties": {},
+            "patternProperties": {
+                "^recipient$": {"type": "string", "format": "email"}
+            },
+        },
+        {"properties": {}, "additionalProperties": {"format": "email"}},
+        {"properties": {}, "unevaluatedProperties": False},
+        {"properties": {}, "propertyNames": {"pattern": "recipient"}},
+        {
+            "properties": {
+                "recipients": {"type": "array", "items": {"format": "email"}}
+            }
+        },
+        {
+            "properties": {
+                "recipients": {
+                    "type": "array",
+                    "contains": {"format": "email"},
+                }
+            }
+        },
+        {"properties": {}, "not": {"properties": {"recipient": {}}}},
+        {
+            "properties": {
+                "payload": {
+                    "type": "string",
+                    "contentSchema": {"properties": {"recipient": {}}},
+                }
+            }
+        },
+        {
+            "properties": {
+                "tuple": {
+                    "type": "array",
+                    "prefixItems": [{"format": "email"}],
+                }
+            }
+        },
+        {"properties": {"recipient": True}},
+        {"properties": {"recipient": False}},
+    ),
+    ids=(
+        "local-ref",
+        "all-of",
+        "any-of",
+        "one-of",
+        "conditional",
+        "dependent-schemas",
+        "legacy-dependencies",
+        "dependent-required",
+        "dynamic-ref",
+        "recursive-ref",
+        "pattern-properties",
+        "additional-properties-schema",
+        "unevaluated-properties",
+        "property-names",
+        "array-items",
+        "array-contains",
+        "not",
+        "content-schema",
+        "prefix-items",
+        "boolean-true-property",
+        "boolean-false-property",
+    ),
+)
+def test_composed_or_unresolved_schemas_require_explicit_review(input_schema):
+    report = scan_documents(
+        [{"tools": [{"name": "send_message", "inputSchema": input_schema}]}]
+    )
+
+    assert report["tools"][0]["schema_review_required"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
+
+
+def test_simple_schema_and_enum_instance_values_do_not_require_schema_review():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "set_mode",
+                        "inputSchema": {
+                            "$defs": {
+                                "unused": {
+                                    "allOf": [{"properties": {"recipient": {}}}]
+                                }
+                            },
+                            "properties": {
+                                "mode": {
+                                    "type": "object",
+                                    "enum": [{"$ref": "instance-data-only"}],
+                                }
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    assert report["tools"][0]["schema_review_required"] is False
+    assert report["summary"]["schema_review_required_tools"] == 0
+
+
+def test_boolean_additional_properties_are_handled_by_schema_closure_not_review():
+    reports = [
+        scan_documents(
+            [
+                {
+                    "tools": [
+                        {
+                            "name": f"tool_{str(value).lower()}",
+                            "inputSchema": {
+                                "properties": {},
+                                "additionalProperties": value,
+                            },
+                        }
+                    ]
+                }
+            ]
+        )
+        for value in (False, True)
+    ]
+
+    assert [
+        report["tools"][0]["schema_review_required"] for report in reports
+    ] == [False, False]
+    assert [
+        report["tools"][0]["schema_closes_unknown_arguments"]
+        for report in reports
+    ] == [True, False]
+
+
+def test_cli_fail_on_review_rejects_hidden_authority_in_local_ref(tmp_path):
+    schema_path = tmp_path / "tools.json"
+    report_path = tmp_path / "report.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "inputSchema": {
+                            "$defs": {
+                                "input": {
+                                    "properties": {
+                                        "recipient": {
+                                            "type": "string",
+                                            "format": "email",
+                                        }
+                                    }
+                                }
+                            },
+                            "$ref": "#/$defs/input",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                str(schema_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert report["tools"][0]["arguments"] == []
 
 
 def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):

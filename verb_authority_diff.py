@@ -8,6 +8,7 @@ networking code is used.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import unicodedata
 from decimal import Decimal, InvalidOperation
@@ -78,6 +79,7 @@ _REPORT_TOOL_SENTINEL_KEYS = frozenset(
         "risk_conflict",
         "risk_review_required",
         "needs_confirmation",
+        "schema_review_required",
         "annotation_conflicts",
         "schema_material_fingerprint_sha256",
         "unmodeled_schema_fingerprint_sha256",
@@ -289,6 +291,7 @@ def _validate_report_tool(
             "risk_review_required",
             "needs_confirmation",
             "schema_closes_unknown_arguments",
+            "schema_review_required",
             "annotation_conflicts",
             "arguments",
             "schema_material_fingerprint_sha256",
@@ -362,6 +365,11 @@ def _validate_report_tool(
         "schema_closes_unknown_arguments",
     ):
         _require_bool(tool.get(boolean_field), field=f"tool '{name}' {boolean_field}")
+    if "schema_review_required" in tool:
+        _require_bool(
+            tool["schema_review_required"],
+            field=f"tool '{name}' schema_review_required",
+        )
     _require_string_array(
         tool.get("annotation_conflicts"),
         field=f"tool '{name}' annotation conflicts",
@@ -423,7 +431,8 @@ def _validate_bound(value: Any, *, field: str) -> None:
 def _validate_declared_controls(
     value: Any,
     *,
-    report_arguments: dict[str, set[str]],
+    report_tools: dict[str, dict[str, Any]],
+    report_arguments: dict[str, dict[str, dict[str, Any]]],
 ) -> None:
     declared = _require_object(value, field="declared_controls")
     _reject_unknown_fields(
@@ -473,14 +482,27 @@ def _validate_declared_controls(
         if name in tools_seen:
             raise DiffError(f"declared controls contain duplicate tool name: {name}")
         tools_seen.add(name)
-        if name not in report_arguments:
+        if name not in report_tools:
             raise DiffError(f"declared controls reference unknown report tool: {name}")
+        report_tool = report_tools[name]
         _require_bool(
             tool.get("schema_closes_unknown_arguments"),
             field=f"declared control tool '{name}' schema closure",
         )
+        if (
+            tool["schema_closes_unknown_arguments"]
+            is not report_tool["schema_closes_unknown_arguments"]
+        ):
+            raise DiffError(
+                f"declared control tool '{name}' schema closure conflicts with "
+                "the report tool"
+            )
         if "risk" in tool:
             _validate_declared_risk(tool["risk"], field=f"declared tool '{name}' risk")
+        if tool.get("risk") != report_tool.get("declared_risk"):
+            raise DiffError(
+                f"declared control tool '{name}' risk conflicts with the report tool"
+            )
 
         argument_names: set[str] = set()
         for raw_argument in _require_array(
@@ -517,6 +539,7 @@ def _validate_declared_controls(
                     f"declared controls reference unknown argument: "
                     f"{name}.{argument_name}"
                 )
+            report_argument = report_arguments[name][argument_name]
             if argument.get("schema_exposure") != "exposed":
                 raise DiffError(
                     f"declared argument schema exposure is invalid: "
@@ -527,11 +550,21 @@ def _validate_declared_controls(
                     f"declared argument inferred policy is invalid: "
                     f"{name}.{argument_name}"
                 )
+            if argument["inferred_policy"] != report_argument["policy"]:
+                raise DiffError(
+                    f"declared argument inferred policy conflicts with the report: "
+                    f"{name}.{argument_name}"
+                )
             _require_bool(
                 argument.get("review_required"),
                 field=f"declared argument review requirement for "
                 f"{name}.{argument_name}",
             )
+            if argument["review_required"] is not report_argument["review_required"]:
+                raise DiffError(
+                    f"declared argument review requirement conflicts with the report: "
+                    f"{name}.{argument_name}"
+                )
             if argument.get("authority") not in _DECLARED_AUTHORITIES:
                 raise DiffError(f"declared authority is invalid: {name}.{argument_name}")
             if argument.get("evidence") not in _EVIDENCE:
@@ -614,6 +647,32 @@ def _validate_declared_controls(
                     argument["note"],
                     field=f"unexposed control note for {name}.{argument_name}",
                 )
+
+    for name, report_tool in report_tools.items():
+        if report_tool.get("declared_risk") is not None and name not in tools_seen:
+            raise DiffError(
+                f"report tool '{name}' exposes declared risk without the matching "
+                "declared control tool"
+            )
+
+
+def _control_declaration_fingerprint(value: dict[str, Any]) -> str:
+    """Recompute the scanner's stable fingerprint for declared controls."""
+
+    normalized = {
+        "version": value["version"],
+        "tools": value["tools"],
+    }
+    try:
+        encoded = json.dumps(
+            normalized,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise DiffError("declared controls are not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
@@ -718,7 +777,7 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         raise DiffError(f"{label} has invalid constraint privacy metadata")
 
     summary = _require_object(report.get("summary"), field=f"{label} summary")
-    summary_fields = {
+    required_summary_fields = {
         "tools",
         "parameters",
         "protected_parameters",
@@ -729,39 +788,60 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         "risk_conflicts",
         "annotation_conflicts",
     }
+    optional_summary_fields = {"schema_review_required_tools"}
     _reject_unknown_fields(
         summary,
-        allowed=summary_fields,
+        allowed=required_summary_fields | optional_summary_fields,
         field=f"{label} summary",
     )
-    if set(summary) != summary_fields or any(
+    if not required_summary_fields.issubset(summary) or any(
         type(value) is not int or value < 0 for value in summary.values()
     ):
         raise DiffError(f"{label} has invalid report summary")
 
     tools = _require_array(report.get("tools"), field=f"{label} tools")
     tool_names: set[str] = set()
-    report_arguments: dict[str, set[str]] = {}
+    report_tools: dict[str, dict[str, Any]] = {}
+    report_arguments: dict[str, dict[str, dict[str, Any]]] = {}
     for raw_tool in tools:
         tool_name, argument_names = _validate_report_tool(
             raw_tool,
             seen=tool_names,
             require_fingerprints=not names_redacted,
         )
-        report_arguments[tool_name] = argument_names
+        report_tools[tool_name] = raw_tool
+        report_arguments[tool_name] = {
+            argument["name"]: argument for argument in raw_tool["arguments"]
+        }
+        if set(report_arguments[tool_name]) != argument_names:
+            raise DiffError(f"tool '{tool_name}' argument index is inconsistent")
+
+    if summary.get("schema_review_required_tools") != sum(
+        tool.get("schema_review_required", False) is True for tool in tools
+    ) and "schema_review_required_tools" in summary:
+        raise DiffError(
+            f"{label} schema_review_required_tools does not match its tools"
+        )
 
     controls_included = privacy["control_declarations_included"]
     if controls_included:
         if "declared_controls" not in report:
             raise DiffError(f"{label} is missing declared_controls")
-        _require_sha256(
+        declared_fingerprint = _require_sha256(
             report.get("control_declaration_fingerprint_sha256"),
             field=f"{label} control declaration fingerprint",
         )
         _validate_declared_controls(
             report["declared_controls"],
+            report_tools=report_tools,
             report_arguments=report_arguments,
         )
+        if declared_fingerprint != _control_declaration_fingerprint(
+            report["declared_controls"]
+        ):
+            raise DiffError(
+                f"{label} control declaration fingerprint does not match its controls"
+            )
     elif "declared_controls" in report or "control_declaration_fingerprint_sha256" in report:
         raise DiffError(f"{label} has inconsistent declared control metadata")
 
@@ -910,6 +990,9 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "annotation_conflicts": raw_tool.get("annotation_conflicts", []),
             "schema_closes_unknown_arguments": raw_tool.get(
                 "schema_closes_unknown_arguments"
+            ),
+            "schema_review_required": raw_tool.get(
+                "schema_review_required", False
             ),
             "schema_material_fingerprint_sha256": raw_tool[
                 "schema_material_fingerprint_sha256"
@@ -1539,6 +1622,32 @@ def diff_reports(
                     field="schema_closes_unknown_arguments",
                     before=before_closed,
                     after=after_closed,
+                    message=message,
+                )
+            )
+
+        before_schema_review = before_tool["schema_review_required"]
+        after_schema_review = after_tool["schema_review_required"]
+        if before_schema_review is not after_schema_review:
+            if after_schema_review is True:
+                classification = "review"
+                message = (
+                    "The schema now uses unresolved composition or references and "
+                    "requires manual authority review."
+                )
+            else:
+                classification = "protection_increase"
+                message = (
+                    "The unresolved schema-composition review requirement was removed."
+                )
+            changes.append(
+                _change(
+                    classification,
+                    "schema_review_requirement_changed",
+                    tool,
+                    field="schema_review_required",
+                    before=before_schema_review,
+                    after=after_schema_review,
                     message=message,
                 )
             )

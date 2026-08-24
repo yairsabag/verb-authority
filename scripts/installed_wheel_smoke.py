@@ -251,6 +251,362 @@ def _authority_name_precedence() -> None:
         )
 
 
+def _daybreak_post_audit_regressions() -> None:
+    """Repeat the final pre-release audit findings from the installed wheel."""
+
+    for name in (
+        "messageId",
+        "message-id",
+        "messageID",
+        "message.id",
+        "message/id",
+        "replyTo",
+        "reply-to",
+        "userIds",
+        "idempotencyKey",
+    ):
+        inferred, _ = infer_policy(Param(name, "integer"))
+        _check(
+            inferred is verb_authority.Policy.TRUSTED_FIXED,
+            f"installed selector tokenizer relaxed {name!r}",
+        )
+    for name in ("valid", "grid", "monkey", "liquid", "keyboard", "hockey"):
+        inferred, _ = infer_policy(Param(name, "integer"))
+        _check(
+            inferred is verb_authority.Policy.TYPED_BOUNDED,
+            f"installed selector tokenizer matched substring-only name {name!r}",
+        )
+    for name in (
+        "primaryRecipient",
+        "backup-account",
+        "settlement.IBAN",
+        "callbackURL",
+        "backup-uri",
+        "replyURI",
+        "service/endpoint",
+        "targetHost",
+        "event.webhook",
+        "idempotencyPath",
+        "source-file",
+        "runCmd",
+        "execute-command",
+        "primary.shell",
+        "accessToken",
+        "user-password",
+        "api.secret",
+        "service/credential",
+        "api-key",
+        "apiKey",
+        "message/destination",
+        "recipients",
+        "accounts",
+        "ibans",
+        "urls",
+        "uris",
+        "endpoints",
+        "hosts",
+        "webhooks",
+        "paths",
+        "files",
+        "cmds",
+        "commands",
+        "shells",
+        "tokens",
+        "passwords",
+        "secrets",
+        "credentials",
+        "destinations",
+        "apiKeys",
+    ):
+        inferred, confidence = infer_policy(Param(name, "integer"))
+        _check(
+            inferred is verb_authority.Policy.TRUSTED_FIXED
+            and confidence is Confidence.HIGH,
+            f"installed authority tokenizer relaxed {name!r}",
+        )
+    for name in (
+        "profile",
+        "compile",
+        "commandment",
+        "tokenization",
+        "hostility",
+        "pathway",
+        "pathology",
+        "accountancy",
+        "secretive",
+    ):
+        inferred, confidence = infer_policy(Param(name, "integer"))
+        _check(
+            inferred is verb_authority.Policy.TYPED_BOUNDED
+            and confidence is Confidence.HIGH,
+            f"installed authority tokenizer matched substring-only name {name!r}",
+        )
+    for name in (
+        "messageBody",
+        "response-content",
+        "agent.reply",
+        "tool/description",
+        "finalSummary",
+        "plainText",
+    ):
+        inferred, confidence = infer_policy(Param(name, "string"))
+        _check(
+            inferred is verb_authority.Policy.OUTBOUND_PAYLOAD
+            and confidence is Confidence.HIGH,
+            f"installed payload tokenizer kept {name!r} unnecessarily locked",
+        )
+    for name in ("replyTo", "contentURL", "messageId"):
+        inferred, _ = infer_policy(Param(name, "string"))
+        _check(
+            inferred is verb_authority.Policy.TRUSTED_FIXED,
+            f"installed payload tokenizer overrode authority in {name!r}",
+        )
+    for name in (
+        "somebody",
+        "bodyguard",
+        "messageboard",
+        "contentious",
+        "textile",
+        "notebook",
+        "replying",
+        "summaryCount",
+        "descriptionHash",
+    ):
+        inferred, _ = infer_policy(Param(name, "string"))
+        _check(
+            inferred is verb_authority.Policy.TRUSTED_FIXED,
+            f"installed payload tokenizer matched substring/nonfinal {name!r}",
+        )
+    inferred, confidence = infer_policy(Param("ｂａｃｋｕｐ＿ｐａｔｈ", "integer"))
+    _check(
+        inferred is verb_authority.Policy.TRUSTED_FIXED
+        and confidence is Confidence.HIGH,
+        "installed tokenizer did not normalize a fullwidth authority name",
+    )
+    for name in ("рath", "סכום", "金額", "---", "12345"):
+        inferred, confidence = infer_policy(Param(name, "integer"))
+        explicit, explicit_confidence = infer_policy(
+            Param(name, "integer", sink=False)
+        )
+        _check(
+            inferred is verb_authority.Policy.TRUSTED_FIXED
+            and confidence is Confidence.UNCERTAIN,
+            f"installed tokenizer trusted unmodelled identifier {name!r}",
+        )
+        _check(
+            explicit is verb_authority.Policy.TYPED_BOUNDED
+            and explicit_confidence is Confidence.HIGH,
+            f"explicit non-sink did not override identifier review for {name!r}",
+        )
+
+    enum_registry = Registry()
+    enum_registry.add(
+        Tool(
+            "choose",
+            [Param("mode", "enum", enum=list(range(5_000)), sink=False)],
+            risk=Risk.READ_ONLY,
+        )
+    )
+    frozen_enum = verb_authority._freeze_registry(
+        enum_registry,
+        validate_callable=False,
+    ).tools["choose"].params[0]
+    candidate = ["not-present" * 100]
+    canonical_calls = 0
+    original_canonical = verb_authority._canonical_json_value
+
+    def counted_canonical(value: Any) -> str:
+        nonlocal canonical_calls
+        canonical_calls += 1
+        return original_canonical(value)
+
+    verb_authority._canonical_json_value = counted_canonical
+    try:
+        enum_allowed = verb_authority._type_ok(frozen_enum, candidate)
+    finally:
+        verb_authority._canonical_json_value = original_canonical
+    _check(
+        not enum_allowed and canonical_calls == 1,
+        "installed enum validation serialized one candidate per enum member",
+    )
+
+    ledger = verb_authority.ProvenanceLedger()
+    ledger.record_result(
+        {"content": "observed https://attacker.invalid/path in tool output"}
+    )
+    registry = Registry()
+    registry.add(
+        Tool(
+            "send",
+            [
+                Param("recipient", "uri", sink=True),
+                Param("body", "string", sink=False),
+            ],
+            risk=Risk.WRITE,
+        )
+    )
+    policy = build_policy(registry)
+    clean_call = {
+        "name": "send",
+        "input": {
+            "recipient": "https://approved.example/path",
+            "body": "hello",
+        },
+    }
+    lookup_calls = 0
+    original_lookup = verb_authority.ProvenanceLedger._is_tainted_with_budget
+
+    def counted_lookup(self: Any, value: Any, budget: Any) -> bool:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return original_lookup(self, value, budget)
+
+    verb_authority.ProvenanceLedger._is_tainted_with_budget = counted_lookup
+    try:
+        untrusted = dispatch(registry, policy, clean_call, ledger=ledger)
+    finally:
+        verb_authority.ProvenanceLedger._is_tainted_with_budget = original_lookup
+    _check(
+        not untrusted.allow and lookup_calls == 0,
+        "installed dispatcher scanned ledger history when trust could not promote",
+    )
+
+    original_lookup_limit = verb_authority.MAX_LEDGER_LOOKUP_CHARACTERS
+    verb_authority.MAX_LEDGER_LOOKUP_CHARACTERS = 1
+    try:
+        budgeted = dispatch(
+            registry,
+            policy,
+            clean_call,
+            trusted_args={"recipient": clean_call["input"]["recipient"]},
+            ledger=ledger,
+        )
+    finally:
+        verb_authority.MAX_LEDGER_LOOKUP_CHARACTERS = original_lookup_limit
+    _check(
+        not budgeted.allow and "locked sink" in budgeted.reason,
+        "installed ledger lookup budget did not fail closed",
+    )
+
+    composed_document = {
+        "tools": [
+            {
+                "name": "read_record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "allOf": [
+                        {
+                            "properties": {
+                                "recipient": {
+                                    "type": "string",
+                                    "format": "email",
+                                }
+                            },
+                            "required": ["recipient"],
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "read_record": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "declared",
+                    "effects": ["reads_record"],
+                }
+            }
+        },
+    }
+    composed_report = scan_documents(
+        [composed_document],
+        control_declarations=controls,
+    )
+    _check(
+        composed_report["summary"]["schema_review_required_tools"] == 1
+        and composed_report["summary"]["risk_review_required_tools"] == 0
+        and composed_report["tools"][0]["schema_review_required"] is True
+        and composed_report["tools"][0]["arguments"] == [],
+        "installed scanner silently omitted composed authority",
+    )
+
+    inconsistent = copy.deepcopy(composed_report)
+    inconsistent["declared_controls"]["tools"][0]["risk"]["effects"].append(
+        "different_effect"
+    )
+    inconsistent["control_declaration_fingerprint_sha256"] = (
+        verb_authority_scan._control_declaration_fingerprint(
+            inconsistent["declared_controls"]
+        )
+    )
+    try:
+        diff_reports(composed_report, inconsistent)
+    except DiffError as exc:
+        _check(
+            "risk conflicts with the report tool" in str(exc),
+            f"installed report validator returned the wrong conflict: {exc}",
+        )
+    else:
+        raise AssertionError(
+            "installed Authority Diff accepted inconsistent duplicated risk"
+        )
+
+    hostile_name = "![audit](https://example.invalid/pixel)`label`"
+    hostile_markdown = render_markdown(
+        scan_documents(
+            [
+                {
+                    "tools": [
+                        {
+                            "name": hostile_name,
+                            "inputSchema": {
+                                "properties": {
+                                    hostile_name: {"type": "string"}
+                                }
+                            },
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+    _check(
+        hostile_name not in hostile_markdown
+        and "![audit](" not in hostile_markdown
+        and "\\!\\[audit\\](https://example.invalid/pixel)\\`label\\`"
+        in hostile_markdown,
+        "installed Markdown renderer emitted an active image or link",
+    )
+
+    with TemporaryDirectory(prefix="verb-authority-composed-smoke-") as directory:
+        root = Path(directory)
+        schema_path = root / "schema.json"
+        controls_path = root / "controls.json"
+        report_path = root / "report.json"
+        schema_path.write_text(json.dumps(composed_document), encoding="utf-8")
+        controls_path.write_text(json.dumps(controls), encoding="utf-8")
+        exit_code = verb_authority_scan.main(
+            [
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        _check(
+            exit_code == 2,
+            "installed scan CLI did not fail on unresolved schema composition",
+        )
+
+
 def _exact_authority_and_action_identity() -> None:
     registry = Registry()
     registry.add(
@@ -1866,6 +2222,7 @@ def main() -> int:
         _trusted_fixed_validation,
         _serialized_policy_runtime_boundary,
         _authority_name_precedence,
+        _daybreak_post_audit_regressions,
         _exact_authority_and_action_identity,
         _registry_replacement_drift,
         _forged_callable_metadata_denial,

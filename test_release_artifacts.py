@@ -13,7 +13,9 @@ pytest.importorskip(
 
 from scripts.verify_release_artifacts import (  # noqa: E402
     VerificationError,
+    main,
     verify_artifacts,
+    verify_sdist,
     verify_tag,
 )
 
@@ -59,21 +61,26 @@ def _write_wheel(
     suffix: str = "py3-none-any",
     root_is_purelib: str = "true",
     tags: tuple[str, ...] = ("py3-none-any",),
+    internal_dist_info_name: str | None = None,
     wheel_dist_info_name: str | None = None,
     include_wheel_metadata: bool = True,
 ) -> Path:
     wheel_path = dist / f"{ARTIFACT_NAME}-{filename_version}-{suffix}.whl"
-    metadata_member = (
-        f"{ARTIFACT_NAME}-{filename_version}.dist-info/METADATA"
+    expected_dist_info_name = (
+        f"{ARTIFACT_NAME}-{filename_version}.dist-info"
     )
+    metadata_dist_info_name = internal_dist_info_name or expected_dist_info_name
+    metadata_member = f"{metadata_dist_info_name}/METADATA"
     with ZipFile(wheel_path, "w", compression=ZIP_DEFLATED) as wheel:
         wheel.writestr(
             metadata_member,
             _metadata(name=metadata_name, version=metadata_version),
         )
         if include_wheel_metadata:
-            dist_info_name = wheel_dist_info_name or (
-                f"{ARTIFACT_NAME}-{filename_version}.dist-info"
+            dist_info_name = (
+                wheel_dist_info_name
+                or internal_dist_info_name
+                or expected_dist_info_name
             )
             wheel.writestr(
                 f"{dist_info_name}/WHEEL",
@@ -96,18 +103,23 @@ def _write_sdist(
     filename_version: str = PROJECT_VERSION,
     metadata_name: str = PROJECT_NAME,
     metadata_version: str = PROJECT_VERSION,
+    internal_root_name: str | None = None,
+    extra_member_name: str | None = None,
 ) -> Path:
     sdist_path = dist / f"{ARTIFACT_NAME}-{filename_version}.tar.gz"
     metadata_bytes = _metadata(
         name=metadata_name,
         version=metadata_version,
     ).encode("utf-8")
-    metadata_member = tarfile.TarInfo(
-        f"{ARTIFACT_NAME}-{filename_version}/PKG-INFO"
-    )
+    root_name = internal_root_name or f"{ARTIFACT_NAME}-{filename_version}"
+    metadata_member = tarfile.TarInfo(f"{root_name}/PKG-INFO")
     metadata_member.size = len(metadata_bytes)
     with tarfile.open(sdist_path, "w:gz") as source_archive:
         source_archive.addfile(metadata_member, BytesIO(metadata_bytes))
+        if extra_member_name is not None:
+            extra_member = tarfile.TarInfo(extra_member_name)
+            extra_member.size = 0
+            source_archive.addfile(extra_member, BytesIO())
     return sdist_path
 
 
@@ -144,6 +156,127 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
         wheel.parent,
         "v0.10.0-beta.8",
     ) == (wheel, sdist)
+
+
+def test_normalized_internal_wheel_dist_info_root_is_accepted(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = _write_wheel(
+        dist,
+        internal_dist_info_name="verb_authority-0.10.0b8.dist-info",
+    )
+    sdist = _write_sdist(dist)
+
+    assert verify_artifacts(project_path, dist) == (wheel, sdist)
+
+
+def test_wrong_internal_wheel_dist_info_root_is_rejected(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(
+        dist,
+        internal_dist_info_name="verb_authority-0.10.0b7.dist-info",
+    )
+    _write_sdist(dist)
+
+    with pytest.raises(
+        VerificationError,
+        match="dist-info directory.*verb_authority-0.10.0b8.dist-info",
+    ):
+        verify_artifacts(project_path, dist)
+
+
+def test_normalized_internal_sdist_root_is_accepted(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = _write_wheel(dist)
+    sdist = _write_sdist(
+        dist,
+        internal_root_name="verb_authority-0.10.0b8",
+    )
+
+    assert verify_artifacts(project_path, dist) == (wheel, sdist)
+
+
+def test_pre_extraction_sdist_verifier_accepts_sole_valid_archive(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    sdist = _write_sdist(dist)
+
+    assert verify_sdist(project_path, dist, "v0.10.0-beta.8") == sdist
+    assert (
+        main(
+            [
+                "sdist",
+                "--project",
+                str(project_path),
+                "--dist",
+                str(dist),
+                "--tag",
+                "v0.10.0-beta.8",
+            ]
+        )
+        == 0
+    )
+
+
+def test_pre_extraction_sdist_cli_rejects_wrong_root(tmp_path, capsys):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_sdist(
+        dist,
+        internal_root_name="verb_authority-0.10.0b7",
+    )
+
+    assert (
+        main(
+            [
+                "sdist",
+                "--project",
+                str(project_path),
+                "--dist",
+                str(dist),
+            ]
+        )
+        == 2
+    )
+    assert "source-distribution root" in capsys.readouterr().err
+
+
+def test_wrong_internal_sdist_root_is_rejected(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(dist)
+    _write_sdist(
+        dist,
+        internal_root_name="verb_authority-0.10.0b7",
+    )
+
+    with pytest.raises(
+        VerificationError,
+        match="source-distribution root.*verb_authority-0.10.0b8",
+    ):
+        verify_artifacts(project_path, dist)
+
+
+def test_sdist_member_path_cannot_escape_expected_root(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(dist)
+    _write_sdist(
+        dist,
+        extra_member_name="verb_authority-0.10.0b8/../escape.txt",
+    )
+
+    with pytest.raises(VerificationError, match="unsafe or unexpected member path"):
+        verify_artifacts(project_path, dist)
 
 
 def test_second_wheel_is_rejected(tmp_path):

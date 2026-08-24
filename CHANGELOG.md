@@ -62,8 +62,14 @@ tag or GitHub release was created, and the version is intentionally not reused.
 - Evaluate authority-bearing names before broad numeric, enum, boolean, or
   payload rules. Numeric account identifiers and explicit destinations remain
   locked, while ambiguous identifier selectors stay locked and enter the
-  consequential-tool review queue. Payload matching is token-bound rather
-  than substring-based.
+  consequential-tool review queue. Tokenize sink, selector, and payload names
+  consistently across snake-, kebab-, dotted-, slashed-, camel-case, and
+  acronym styles, so names such as `messageId`, `message-id`, `messageID`,
+  `replyTo`, `contentURL`, `idempotencyPath`, and `apiKey` cannot fall through
+  to broad numeric authority while `messageBody` remains data-fillable.
+  Match complete tokens rather than substrings, normalize compatible fullwidth
+  forms, and keep non-Latin, mixed-script, or otherwise unmodeled identifiers
+  locked for review unless the application explicitly declares `sink=False`.
 - Normalize valid string-valued policy/risk enum entries consistently in the
   direct gate, dispatcher, and guarded runner; malformed policy material now
   returns a closed decision from direct APIs instead of escaping an exception.
@@ -116,6 +122,11 @@ tag or GitHub release was created, and the version is intentionally not reused.
   evicted, overflow saturates the session, the already-invoked call reports
   `ledger_capacity_exceeded` with an explicit no-retry instruction, and later
   calls require a fresh ledger.
+- Canonicalize a rejected runtime enum candidate once rather than once per
+  declared member. Skip ledger-history containment scans when no exact trusted
+  candidate could promote provenance, and share a deterministic 16-MiB
+  character-work budget across the remaining lookups in one dispatch; budget
+  exhaustion conservatively keeps the candidate data-authored.
 - Add a source-pinned, non-executing AgentDojo schema exporter and record the
   first static scan across all four public tool suites (74 suite exposures,
   118 parameters) without presenting it as an attack or utility benchmark.
@@ -132,7 +143,10 @@ tag or GitHub release was created, and the version is intentionally not reused.
 - Fail a release before checksumming or upload unless its tag normalizes to the
   project version and exactly one wheel plus one source distribution carry the
   expected name and version; require the exact pure-Python
-  `py3-none-any` wheel filename, matching internal `WHEEL` metadata, and refuse
+  `py3-none-any` wheel filename, matching internal `WHEEL` metadata, an exact
+  name/version-bound `.dist-info` root, and an exact name/version-bound source
+  root. Reject unsafe source-archive paths and special members, verify the
+  source distribution before extraction in CI/release jobs, and refuse
   unexpected local or pre-existing release assets.
 - Isolate both composite-action Python entry points with `-I` and remove
   `PYTHONPATH`/`PYTHONHOME`, so consumer-workspace `pip.py`,
@@ -182,6 +196,15 @@ tag or GitHub release was created, and the version is intentionally not reused.
   annotation-named data nested under unsupported schema keywords in unmodeled
   fingerprints, reject over-deep schemas cleanly, and terminal-escape controls
   and bidirectional formatting in text diff output.
+- Surface unresolved references, combinators, conditional/dependent schemas,
+  dynamic property shapes, and nested unmodeled schemas as an explicit
+  per-tool review obligation on the first scan. Include that obligation in
+  `--fail-on-review` and Authority Diff instead of allowing hidden arguments to
+  produce a clean baseline.
+- Recompute author-supplied control fingerprints before comparison and require
+  duplicated risk, schema-closure, argument-policy, and review fields to agree
+  across their report locations. Escape active Markdown link/image syntax in
+  schema-controlled cells as well as terminal and bidirectional controls.
 - Add scanner-specific aggregate budgets for JSON nodes/material, tool
   definitions, exposed and unexposed arguments, enum members, and
   report-expanding control collections. Reject oversized files before parsing,
