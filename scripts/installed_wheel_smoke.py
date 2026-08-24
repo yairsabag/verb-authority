@@ -8,10 +8,13 @@ report-format migration and the diff CLI's release threshold.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import importlib.metadata
 import inspect
+import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -25,16 +28,19 @@ import verb_authority
 import verb_authority_diff
 import verb_authority_scan
 from verb_authority import (
+    Confidence,
     GuardedToolRunner,
     Param,
+    Policy,
     Registry,
     Risk,
     Tool,
     build_policy,
     dispatch,
+    infer_policy,
 )
 from verb_authority_diff import DIFF_VERSION, DiffError, diff_reports
-from verb_authority_scan import REPORT_VERSION, scan_documents
+from verb_authority_scan import REPORT_VERSION, render_markdown, scan_documents
 
 
 def _check(condition: Any, message: str) -> None:
@@ -136,6 +142,173 @@ def _trusted_fixed_validation() -> None:
             not decision.allow and "type/bounds" in decision.reason,
             f"trusted_fixed value bypassed its declared {boundary} boundary",
         )
+
+
+def _serialized_policy_runtime_boundary() -> None:
+    def operate(amount):
+        return {"amount": amount}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [Param("amount", "integer", cap=10, sink=False)],
+            fn=operate,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    policy = build_policy(registry)
+    policy.policy["operate"]["amount"] = Policy.TYPED_BOUNDED.value
+    policy.risk["operate"] = Risk.FINANCIAL.value
+    call = {"name": "operate", "input": {"amount": 7}}
+    gated = verb_authority.gate(
+        registry,
+        policy,
+        "operate",
+        {"amount": 7},
+        {"amount": "data"},
+    )
+    dispatched = dispatch(registry, policy, call)
+    stopped = GuardedToolRunner(registry, policy).run(
+        call,
+        confirm=lambda request: False,
+    )
+    _check(
+        gated.allow
+        and gated.needs_confirm
+        and dispatched.allow
+        and dispatched.needs_confirm
+        and not stopped.invoked
+        and stopped.decision.needs_confirm,
+        "valid serialized policy/risk values diverged across runtime APIs",
+    )
+
+    for field in ("policy", "risk"):
+        malformed = build_policy(registry)
+        if field == "policy":
+            malformed.policy["operate"]["amount"] = "not-a-policy"
+        else:
+            malformed.risk["operate"] = "not-a-risk"
+        direct_decisions = (
+            verb_authority.gate(
+                registry,
+                malformed,
+                "operate",
+                {"amount": 7},
+                {"amount": "data"},
+            ),
+            dispatch(registry, malformed, call),
+        )
+        _check(
+            all(
+                not decision.allow and "policy is malformed" in decision.reason
+                for decision in direct_decisions
+            ),
+            f"malformed serialized {field} escaped a direct API",
+        )
+        try:
+            GuardedToolRunner(registry, malformed)
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError(
+                f"guarded runner accepted malformed serialized {field}"
+            )
+
+
+def _authority_name_precedence() -> None:
+    cases = (
+        (Param("account_id", "integer"), 17, Confidence.HIGH, False),
+        (Param("reply_to", "string"), "approved-thread", Confidence.HIGH, False),
+        (
+            Param("message_id", "string"),
+            "approved-message",
+            Confidence.UNCERTAIN,
+            True,
+        ),
+    )
+    for param, value, expected_confidence, expected_review in cases:
+        inferred, confidence = infer_policy(param)
+        _check(
+            inferred is Policy.TRUSTED_FIXED
+            and confidence is expected_confidence,
+            f"authority selector {param.name!r} was relaxed by a broad rule",
+        )
+        registry = Registry()
+        registry.add(Tool("write_selection", [param], risk=Risk.WRITE))
+        policy = build_policy(registry)
+        in_review = ("write_selection", param.name) in policy.review
+        decision = dispatch(
+            registry,
+            policy,
+            {"name": "write_selection", "input": {param.name: value}},
+        )
+        _check(
+            in_review is expected_review
+            and not decision.allow
+            and "locked sink" in decision.reason,
+            f"authority selector {param.name!r} silently accepted data",
+        )
+
+
+def _exact_authority_and_action_identity() -> None:
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", "json", sink=True)],
+            risk=Risk.WRITE,
+        )
+    )
+    for proposed, trusted in (
+        (0.0, -0.0),
+        ({"first": 1, "second": 2}, {"second": 2, "first": 1}),
+    ):
+        decision = dispatch(
+            registry,
+            build_policy(registry),
+            {"name": "set_value", "input": {"value": proposed}},
+            trusted_args={"value": trusted},
+        )
+        _check(
+            not decision.allow and "locked sink" in decision.reason,
+            "observable JSON differences shared trusted authority",
+        )
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "commit_value",
+            [Param("value", "json", sink=False)],
+            fn=lambda value: value,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def capture(value):
+        requests = []
+        result = runner.run(
+            {"name": "commit_value", "input": {"value": value}},
+            confirm=lambda request: requests.append(request) or False,
+        )
+        _check(
+            not result.invoked and len(requests) == 1,
+            "exact action did not stop at confirmation",
+        )
+        return requests[0]
+
+    positive_zero = capture(0.0)
+    negative_zero = capture(-0.0)
+    first_order = capture({"first": 1, "second": 2})
+    second_order = capture({"second": 2, "first": 1})
+    _check(
+        positive_zero.arguments_json != negative_zero.arguments_json
+        and positive_zero.action_id != negative_zero.action_id
+        and first_order.arguments_json != second_order.arguments_json
+        and first_order.action_id != second_order.action_id,
+        "confirmation identity collapsed signed zero or object order",
+    )
 
 
 def _registry_replacement_drift() -> None:
@@ -370,7 +543,7 @@ def _confirmation_action_snapshot() -> None:
     )
     _check(
         "שלום" not in request.arguments_json and "\\u05e9" in request.arguments_json,
-        "confirmation arguments_json is not canonical ASCII-escaped JSON",
+        "confirmation arguments_json is not ASCII-escaped JSON",
     )
     _check(
         request.risk is Risk.FINANCIAL
@@ -608,7 +781,7 @@ def _json_depth_integer_and_result_boundaries() -> None:
     )
     _check(
         not result.invoked and not result.executed and not confirmations,
-        "oversized integer reached canonical confirmation serialization",
+        "oversized integer reached confirmation serialization",
     )
 
     registry = Registry()
@@ -627,6 +800,125 @@ def _json_depth_integer_and_result_boundaries() -> None:
         not result.invoked and not result.executed,
         "oversized enum candidate escaped as an encoder exception",
     )
+
+
+def _graph_and_ledger_resource_boundaries() -> None:
+    calls = []
+
+    def shared_dag(count):
+        value = {"leaf": "value"}
+        for _ in range(count):
+            value = [value, value]
+        return value
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=lambda payload: calls.append(payload),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    result = GuardedToolRunner(registry).run(
+        {
+            "name": "consume",
+            "input": {"payload": shared_dag(30)},
+        }
+    )
+    _check(
+        not result.invoked and not result.executed and not calls,
+        "compact shared DAG expanded across the plain-JSON boundary",
+    )
+
+    original_node_limit = verb_authority.MAX_JSON_NODES
+    original_snapshot_byte_limit = verb_authority.MAX_JSON_MATERIAL_BYTES
+    try:
+        verb_authority.MAX_JSON_NODES = 64
+        repeated = [0] * 1_000
+        result = GuardedToolRunner(registry).run(
+            {"name": "consume", "input": {"payload": repeated}}
+        )
+        _check(
+            not result.invoked and not result.executed and not calls,
+            "repeated input scalars evaded the total snapshot-node budget",
+        )
+
+        invocations = []
+        result_registry = Registry()
+        result_registry.add(
+            Tool(
+                "read_value",
+                [],
+                fn=lambda: invocations.append("invoked") or repeated,
+                risk=Risk.READ_ONLY,
+            )
+        )
+        result = GuardedToolRunner(result_registry).run(
+            {"name": "read_value", "input": {}}
+        )
+        _check(
+            result.invoked
+            and not result.executed
+            and result.contract_violation == "unsupported_result"
+            and "do not retry" in result.decision.reason
+            and invocations == ["invoked"],
+            "oversized result lost snapshot/no-retry telemetry",
+        )
+
+        verb_authority.MAX_JSON_NODES = 4
+        verb_authority.MAX_JSON_MATERIAL_BYTES = 17
+        _check(
+            verb_authority._snapshot_json_value([{"a": "é"}])
+            == [{"a": "é"}],
+            "ordinary JSON failed exactly at the documented snapshot bounds",
+        )
+        verb_authority.MAX_JSON_MATERIAL_BYTES = 8
+        try:
+            verb_authority._snapshot_json_value("é" * 100_000)
+        except ValueError as exc:
+            _check(
+                "serialized-material limit" in str(exc),
+                "oversized text failed for an unexpected reason",
+            )
+        else:
+            raise AssertionError("one oversized string evaded the snapshot budget")
+    finally:
+        verb_authority.MAX_JSON_NODES = original_node_limit
+        verb_authority.MAX_JSON_MATERIAL_BYTES = original_snapshot_byte_limit
+
+    original_byte_limit = verb_authority.MAX_LEDGER_UTF8_BYTES
+    try:
+        verb_authority.MAX_LEDGER_UTF8_BYTES = 32
+        invocations = []
+        registry = Registry()
+        registry.add(
+            Tool(
+                "read_value",
+                [],
+                fn=lambda: invocations.append("invoked") or "x" * 64,
+                risk=Risk.READ_ONLY,
+            )
+        )
+        runner = GuardedToolRunner(registry)
+        first = runner.run({"name": "read_value", "input": {}})
+        second = runner.run({"name": "read_value", "input": {}})
+        _check(
+            first.invoked
+            and not first.executed
+            and first.contract_violation == "ledger_capacity_exceeded"
+            and "do not retry" in first.decision.reason,
+            "ledger overflow lost invoked/no-retry telemetry",
+        )
+        _check(
+            not second.invoked
+            and not second.executed
+            and "start a new session" in second.decision.reason
+            and invocations == ["invoked"],
+            "saturated ledger did not deny every later invocation",
+        )
+    finally:
+        verb_authority.MAX_LEDGER_UTF8_BYTES = original_byte_limit
 
 
 def _policy_and_ledger_integrity() -> None:
@@ -779,6 +1071,45 @@ def _async_rejection() -> None:
         "awaitable result omitted its contract-violation code",
     )
     _check(awaitable.cr_frame is None, "rejected coroutine result was not closed")
+
+    effects = []
+
+    class HostileResult:
+        def __await__(self):
+            effects.append("await hook ran")
+            if False:
+                yield None
+
+        @property
+        def __class__(self):
+            effects.append("class spoof read")
+            raise RuntimeError("must not be inspected")
+
+        def close(self):
+            effects.append("close hook ran")
+
+        def aclose(self):
+            effects.append("aclose hook ran")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_message",
+            [],
+            fn=lambda: HostileResult(),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    result = GuardedToolRunner(registry).run(
+        {"name": "read_message", "input": {}}
+    )
+    _check(
+        result.invoked
+        and not result.executed
+        and result.contract_violation == "unsupported_result"
+        and not effects,
+        "rejected result triggered class/close/aclose protocol hooks",
+    )
 
     async def stream_messages():
         yield {"reply_to": "attacker@evil.example"}
@@ -1041,9 +1372,13 @@ def _constraint_diff_and_migration() -> None:
             increase_only_exit == 0,
             "review-only drift incorrectly tripped the authority-increase threshold",
         )
+        child_env = os.environ.copy()
+        child_env.pop("PYTHONPATH", None)
+        child_env.pop("PYTHONHOME", None)
         review_process = subprocess.run(
             [
                 sys.executable,
+                "-I",
                 "-m",
                 "verb_authority",
                 "diff",
@@ -1057,6 +1392,7 @@ def _constraint_diff_and_migration() -> None:
             ],
             check=False,
             capture_output=True,
+            env=child_env,
             text=True,
         )
         _check(
@@ -1072,6 +1408,440 @@ def _constraint_diff_and_migration() -> None:
             and residual_rendered["changes"][0]["kind"]
             == "unmodeled_schema_changed",
             "diff CLI review threshold output lost unmodeled schema drift",
+        )
+
+
+def _scanner_resource_boundaries() -> None:
+    limit_names = (
+        "MAX_SCAN_INPUT_BYTES",
+        "MAX_SCAN_JSON_NODES",
+        "MAX_SCAN_JSON_MATERIAL_BYTES",
+        "MAX_SCAN_TOOL_DEFINITIONS",
+        "MAX_SCAN_ARGUMENTS",
+        "MAX_SCAN_ENUM_MEMBERS",
+        "MAX_SCAN_CONTROL_COLLECTION_MEMBERS",
+    )
+    original_limits = {
+        name: getattr(verb_authority_scan, name) for name in limit_names
+    }
+
+    def restore_limits() -> None:
+        for name, value in original_limits.items():
+            setattr(verb_authority_scan, name, value)
+
+    def expect_schema_error(callback: Any, expected: str) -> None:
+        try:
+            callback()
+        except verb_authority_scan.SchemaError as exc:
+            _check(expected in str(exc), f"unexpected scanner error: {exc}")
+        else:
+            raise AssertionError(f"installed scanner did not enforce {expected}")
+
+    try:
+        verb_authority_scan.MAX_SCAN_JSON_NODES = 3
+        verb_authority_scan.validate_plain_json([0, 1])
+        verb_authority_scan.MAX_SCAN_JSON_NODES = 2
+        expect_schema_error(
+            lambda: verb_authority_scan.validate_plain_json([0, 1]),
+            "total node limit",
+        )
+
+        restore_limits()
+        verb_authority_scan.MAX_SCAN_JSON_MATERIAL_BYTES = 6
+        verb_authority_scan.validate_plain_json("abc")
+        verb_authority_scan.MAX_SCAN_JSON_MATERIAL_BYTES = 5
+        expect_schema_error(
+            lambda: verb_authority_scan.validate_plain_json("abc"),
+            "material limit",
+        )
+
+        restore_limits()
+        two_tools = {
+            "tools": [
+                {"name": "first", "inputSchema": {}},
+                {"name": "second", "inputSchema": {}},
+            ]
+        }
+        definitions = verb_authority_scan.parse_tool_definitions(two_tools)
+        verb_authority_scan.MAX_SCAN_TOOL_DEFINITIONS = 1
+        expect_schema_error(
+            lambda: verb_authority_scan.parse_tool_definitions(two_tools),
+            "tool-definition limit",
+        )
+        expect_schema_error(
+            lambda: verb_authority_scan.scan_definitions(definitions),
+            "tool-definition limit",
+        )
+        expect_schema_error(
+            lambda: scan_documents(
+                [
+                    {"tools": [two_tools["tools"][0]]},
+                    {"tools": [two_tools["tools"][1]]},
+                ]
+            ),
+            "tool-definition limit",
+        )
+
+        restore_limits()
+        two_arguments = {
+            "tools": [
+                {
+                    "name": "send",
+                    "inputSchema": {
+                        "properties": {
+                            "recipient": {"type": "string"},
+                            "body": {"type": "string"},
+                        }
+                    },
+                }
+            ]
+        }
+        argument_definitions = verb_authority_scan.parse_tool_definitions(
+            two_arguments
+        )
+        verb_authority_scan.MAX_SCAN_ARGUMENTS = 1
+        expect_schema_error(
+            lambda: verb_authority_scan.parse_tool_definitions(two_arguments),
+            "argument limit",
+        )
+        expect_schema_error(
+            lambda: verb_authority_scan.scan_definitions(argument_definitions),
+            "argument limit",
+        )
+        expect_schema_error(
+            lambda: scan_documents([two_arguments]), "argument limit"
+        )
+
+        restore_limits()
+        enum_document = {
+            "tools": [
+                {
+                    "name": "choose",
+                    "inputSchema": {
+                        "properties": {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["a", "b"],
+                            }
+                        }
+                    },
+                }
+            ]
+        }
+        verb_authority_scan.MAX_SCAN_ENUM_MEMBERS = 2
+        scan_documents([enum_document])
+        verb_authority_scan.MAX_SCAN_ENUM_MEMBERS = 1
+        expect_schema_error(
+            lambda: scan_documents([enum_document]), "enum-member limit"
+        )
+
+        restore_limits()
+        controls = {
+            "version": 1,
+            "tools": {
+                "choose": {
+                    "risk": {
+                        "tier": "write",
+                        "evidence": "declared",
+                        "effects": ["changes_mode"],
+                    },
+                    "arguments": {
+                        "mode": {
+                            "authority": "constrained",
+                            "evidence": "declared",
+                            "bounds": [
+                                {
+                                    "source": "approved modes",
+                                    "bounds_mutability": "trusted_party",
+                                }
+                            ],
+                        }
+                    },
+                    "unexposed_arguments": {
+                        "tenant": {
+                            "exposure": "server_fixed",
+                            "enforced_by": "authenticated session",
+                            "evidence": "declared",
+                        }
+                    },
+                }
+            },
+        }
+        verb_authority_scan.MAX_SCAN_ARGUMENTS = 1
+        expect_schema_error(
+            lambda: scan_documents(
+                [enum_document], control_declarations=controls
+            ),
+            "argument limit",
+        )
+        restore_limits()
+        verb_authority_scan.MAX_SCAN_CONTROL_COLLECTION_MEMBERS = 1
+        expect_schema_error(
+            lambda: scan_documents(
+                [enum_document], control_declarations=controls
+            ),
+            "control collection-member limit",
+        )
+
+        restore_limits()
+        report = scan_documents(
+            [{"tools": [{"name": "read", "inputSchema": {}}]}]
+        )
+        verb_authority_scan.MAX_SCAN_JSON_NODES = 10
+        try:
+            diff_reports(report, copy.deepcopy(report))
+        except DiffError as exc:
+            _check(
+                "total node limit" in str(exc),
+                f"unexpected installed diff resource error: {exc}",
+            )
+        else:
+            raise AssertionError("installed diff indexed an over-budget report")
+
+        restore_limits()
+        with TemporaryDirectory(prefix="verb-authority-wheel-budget-") as directory:
+            root = Path(directory)
+            tiny_path = root / "tiny.json"
+            tiny_path.write_text('{"x":0}', encoding="utf-8")
+            verb_authority_scan.MAX_SCAN_INPUT_BYTES = 7
+            verb_authority_scan.load_json_path(str(tiny_path))
+            verb_authority_scan.MAX_SCAN_INPUT_BYTES = 6
+            expect_schema_error(
+                lambda: verb_authority_scan.load_json_path(str(tiny_path)),
+                "UTF-8 input limit",
+            )
+
+            schema_path = root / "too-many-arguments.json"
+            schema_path.write_text(json.dumps(two_arguments), encoding="utf-8")
+            restore_limits()
+            verb_authority_scan.MAX_SCAN_ARGUMENTS = 1
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(stderr):
+                    verb_authority_scan.main(
+                        [str(schema_path), "--format", "json"]
+                    )
+            except SystemExit as exc:
+                _check(exc.code == 2, "installed scanner CLI did not exit 2")
+            else:
+                raise AssertionError(
+                    "installed scanner CLI accepted an over-budget schema"
+                )
+            error = stderr.getvalue()
+            _check(
+                "argument limit" in error and "Traceback" not in error,
+                "installed scanner CLI did not fail cleanly on its resource cap",
+            )
+    finally:
+        restore_limits()
+
+
+def _daybreak_scanner_diff_regressions() -> None:
+    with TemporaryDirectory(prefix="verb-authority-wheel-daybreak-") as directory:
+        root = Path(directory)
+        before_path = root / "decimal-before.json"
+        after_path = root / "decimal-after.json"
+        output_path = root / "decimal-diff.json"
+        before_path.write_text(
+            '{"tools":[{"name":"set_policy","inputSchema":{"properties":'
+            '{"amount":{"type":"number","maximum":9007199254740992.0},'
+            '"mode":{"type":"number","enum":[9007199254740992.0]}}}}]}',
+            encoding="utf-8",
+        )
+        after_path.write_text(
+            '{"tools":[{"name":"set_policy","inputSchema":{"properties":'
+            '{"amount":{"type":"number","maximum":9007199254740993.0},'
+            '"mode":{"type":"number","enum":[9007199254740993.0]}}}}]}',
+            encoding="utf-8",
+        )
+        before = scan_documents(
+            [verb_authority_scan.load_json_path(str(before_path))]
+        )
+        after = scan_documents(
+            [verb_authority_scan.load_json_path(str(after_path))]
+        )
+        before_arguments = {
+            argument["name"]: argument
+            for argument in before["tools"][0]["arguments"]
+        }
+        after_arguments = {
+            argument["name"]: argument
+            for argument in after["tools"][0]["arguments"]
+        }
+        _check(
+            before_arguments["amount"]["constraints"]["maximum"]
+            == "9007199254740992"
+            and after_arguments["amount"]["constraints"]["maximum"]
+            == "9007199254740993"
+            and before_arguments["mode"]["constraints"]["enum"]
+            != after_arguments["mode"]["constraints"]["enum"],
+            "installed scanner collapsed adjacent decimals above 2^53",
+        )
+        decimal_diff = diff_reports(before, after)
+        _check(
+            decimal_diff["summary"]["authority_increases"] == 1
+            and decimal_diff["summary"]["reviews"] == 1,
+            "installed diff lost exact decimal maximum/enum drift",
+        )
+        for threshold in ("--fail-on-increase", "--fail-on-review"):
+            exit_code = verb_authority_diff.main(
+                [
+                    str(before_path),
+                    str(after_path),
+                    "--format",
+                    "json",
+                    "--output",
+                    str(output_path),
+                    threshold,
+                ]
+            )
+            _check(exit_code == 2, f"installed diff ignored {threshold}")
+
+        base_report = scan_documents([_constraint_document(100, 40, ["safe"])])
+        malformed_reports = []
+        missing_generator = copy.deepcopy(base_report)
+        missing_generator.pop("generator")
+        malformed_reports.append(("missing-generator", missing_generator))
+        hybrid = copy.deepcopy(base_report)
+        hybrid.pop("report_version")
+        hybrid["inputSchema"] = {}
+        malformed_reports.append(("report-hybrid", hybrid))
+        legacy = copy.deepcopy(base_report)
+        legacy["report_version"] = 2
+        malformed_reports.append(("legacy-v2", legacy))
+        report_tool = copy.deepcopy(base_report["tools"][0])
+        malformed_reports.extend(
+            (
+                ("report-tool-direct", copy.deepcopy(report_tool)),
+                ("report-tool-list", [copy.deepcopy(report_tool)]),
+                ("report-tool-tools", {"tools": [copy.deepcopy(report_tool)]}),
+                (
+                    "report-tool-result",
+                    {"result": {"tools": [copy.deepcopy(report_tool)]}},
+                ),
+                (
+                    "report-tool-sources",
+                    {"sources": [{"tools": [copy.deepcopy(report_tool)]}]},
+                ),
+                (
+                    "report-tool-functions",
+                    {"functions": [copy.deepcopy(report_tool)]},
+                ),
+                (
+                    "report-tool-openai",
+                    {
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": copy.deepcopy(report_tool),
+                            }
+                        ]
+                    },
+                ),
+            )
+        )
+        unknown_nested = copy.deepcopy(base_report)
+        unknown_nested["tools"][0]["risk_inference"]["extra_score"] = 1.5
+        malformed_reports.append(("unknown-nested-number", unknown_nested))
+        for label, report in malformed_reports:
+            path = root / f"{label}.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            try:
+                verb_authority_diff.load_report_or_schema(
+                    str(path), label=label
+                )
+            except DiffError:
+                pass
+            else:
+                raise AssertionError(
+                    f"installed diff raw-scanned report-shaped input: {label}"
+                )
+
+        def discriminator_document(target: str) -> dict[str, Any]:
+            return {
+                "tools": [
+                    {
+                        "name": "set_value",
+                        "inputSchema": {
+                            "properties": {
+                                "value": {
+                                    "type": "object",
+                                    "discriminator": {
+                                        "mapping": {"default": target}
+                                    },
+                                }
+                            }
+                        },
+                    }
+                ]
+            }
+
+        discriminator_diff = diff_reports(
+            scan_documents([discriminator_document("#/A")]),
+            scan_documents([discriminator_document("#/B")]),
+        )
+        _check(
+            discriminator_diff["summary"]["reviews"] == 1
+            and discriminator_diff["changes"][0]["kind"]
+            == "unmodeled_schema_changed",
+            "installed scanner dropped annotation-named discriminator data",
+        )
+
+        hostile = "hostile\r\x1b[31m\u202e\u2028\u2029"
+        hostile_tool = f"send_{hostile}"
+        hostile_argument = f"recipient_{hostile}"
+        hostile_report = scan_documents(
+            [
+                {
+                    "tools": [
+                        {
+                            "name": hostile_tool,
+                            "inputSchema": {
+                                "properties": {
+                                    hostile_argument: {
+                                        "type": "string",
+                                        "format": "email",
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                }
+            ],
+            control_declarations={
+                "version": 1,
+                "attribution": {"name": hostile, "source": hostile},
+                "tools": {
+                    hostile_tool: {
+                        "risk": {
+                            "tier": "write",
+                            "evidence": "declared",
+                            "effects": [hostile],
+                        },
+                        "arguments": {
+                            hostile_argument: {
+                                "authority": "locked",
+                                "evidence": "declared",
+                                "note": hostile,
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        markdown = render_markdown(hostile_report)
+        _check(
+            "\r" not in markdown
+            and "\x1b" not in markdown
+            and "\u202e" not in markdown
+            and "\u2028" not in markdown
+            and "\u2029" not in markdown
+            and "\\r" in markdown
+            and "\\u001b" in markdown
+            and "\\u202e" in markdown
+            and "\\u2028" in markdown
+            and "\\u2029" in markdown,
+            "installed scanner emitted live terminal or bidi controls",
         )
 
 
@@ -1094,6 +1864,9 @@ def main() -> int:
     checks = (
         _plain_dict_boundary,
         _trusted_fixed_validation,
+        _serialized_policy_runtime_boundary,
+        _authority_name_precedence,
+        _exact_authority_and_action_identity,
         _registry_replacement_drift,
         _forged_callable_metadata_denial,
         _callable_binding_and_code_drift,
@@ -1103,11 +1876,14 @@ def main() -> int:
         _numeric_result_taint,
         _object_key_and_container_taint,
         _json_depth_integer_and_result_boundaries,
+        _graph_and_ledger_resource_boundaries,
         _policy_and_ledger_integrity,
         _ledger_invocation_serialization,
         _async_rejection,
         _unicode_homograph_rejection,
         _constraint_diff_and_migration,
+        _scanner_resource_boundaries,
+        _daybreak_scanner_diff_regressions,
     )
     for check in checks:
         check()

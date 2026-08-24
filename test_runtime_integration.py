@@ -461,7 +461,93 @@ def test_runner_rejects_custom_awaitable_without_calling_its_close_hook():
 
     assert execution.invoked
     assert not execution.executed
-    assert execution.contract_violation == "awaitable_result"
+    assert execution.contract_violation == "unsupported_result"
+    assert effects == []
+
+
+def test_result_class_spoof_and_close_hooks_are_never_consulted():
+    effects = []
+
+    class HostileResult:
+        def __await__(self):
+            effects.append("await hook ran")
+            if False:
+                yield None
+
+        @property
+        def __class__(self):
+            effects.append("class spoof read")
+            raise RuntimeError("inspect must not reach this")
+
+        def close(self):
+            effects.append("close hook ran")
+
+        def aclose(self):
+            effects.append("aclose hook ran")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_message",
+            [],
+            fn=lambda: HostileResult(),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_message", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.contract_violation == "unsupported_result"
+    assert effects == []
+
+
+def test_confirmation_class_spoof_and_close_hooks_are_never_consulted():
+    effects = []
+    transfers = []
+
+    class HostileConfirmation:
+        def __await__(self):
+            effects.append("await hook ran")
+            if False:
+                yield None
+
+        @property
+        def __class__(self):
+            effects.append("class spoof read")
+            raise RuntimeError("inspect must not reach this")
+
+        def close(self):
+            effects.append("close hook ran")
+
+        def aclose(self):
+            effects.append("aclose hook ran")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "transfer_funds",
+            [Param("destination", sink=True)],
+            fn=lambda destination: transfers.append(destination),
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {
+            "name": "transfer_funds",
+            "input": {"destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=lambda request: HostileConfirmation(),
+    )
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert transfers == []
     assert effects == []
 
 
@@ -1576,6 +1662,7 @@ def test_runner_rejects_polymorphic_tool_results_without_exposing_them(result):
     assert not execution.executed
     assert execution.result is None
     assert execution.contract_violation == "unsupported_result"
+    assert "do not retry" in execution.decision.reason
     assert not runner.ledger.is_tainted(31337)
 
 
@@ -1583,6 +1670,13 @@ def _nested_lists(count, leaf="value"):
     value = leaf
     for _ in range(count):
         value = [value]
+    return value
+
+
+def _shared_json_dag(count):
+    value = {"leaf": "value"}
+    for _ in range(count):
+        value = [value, value]
     return value
 
 
@@ -1668,6 +1762,340 @@ def test_runner_rejects_overdeep_result_as_unsupported_after_invocation():
     assert not execution.executed
     assert execution.result is None
     assert execution.contract_violation == "unsupported_result"
+    assert "do not retry" in execution.decision.reason
+
+
+@pytest.mark.parametrize("layers", [16, 30])
+def test_runner_rejects_compact_shared_input_dag_before_expansion(layers):
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=lambda payload: calls.append(payload),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {
+            "name": "consume",
+            "input": {"payload": _shared_json_dag(layers)},
+        }
+    )
+
+    assert not execution.invoked
+    assert not execution.executed
+    assert "snapshotted safely" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_rejects_compact_shared_result_dag_after_invocation():
+    result = _shared_json_dag(30)
+    registry = Registry()
+    registry.add(
+        Tool("read_value", [], fn=lambda: result, risk=Risk.READ_ONLY)
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run({"name": "read_value", "input": {}})
+
+    assert execution.invoked
+    assert not execution.executed
+    assert execution.result is None
+    assert execution.contract_violation == "unsupported_result"
+
+
+def test_runner_accepts_duplicate_equal_subtrees_from_wire_json():
+    calls = []
+    payload = json.loads(
+        '{"left":{"values":[1,2]},"right":{"values":[1,2]}}'
+    )
+    assert payload["left"] == payload["right"]
+    assert payload["left"] is not payload["right"]
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=lambda payload: calls.append(payload),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    execution = runner.run(
+        {"name": "consume", "input": {"payload": payload}}
+    )
+
+    assert execution.invoked and execution.executed
+    assert calls == [payload]
+
+
+def test_snapshot_budget_counts_values_keys_and_serialized_material_incrementally(
+    monkeypatch,
+):
+    value = [{"a": "é"}]
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 4)
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 17)
+
+    assert authority._snapshot_json_value(value) == value
+
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 3)
+    with pytest.raises(ValueError, match="total node limit"):
+        authority._snapshot_json_value(value)
+
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 4)
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 16)
+    with pytest.raises(ValueError, match="serialized-material limit"):
+        authority._snapshot_json_value(value)
+
+
+def test_snapshot_budget_short_circuits_one_oversized_utf8_string(monkeypatch):
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 8)
+    oversized = "é" * 1_000_000
+
+    with pytest.raises(ValueError, match="serialized-material limit"):
+        authority._snapshot_json_value(oversized)
+
+
+def test_snapshot_material_budget_charges_repeated_large_integers(monkeypatch):
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 100)
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 64)
+
+    with pytest.raises(ValueError, match="serialized-material limit"):
+        authority._snapshot_json_value([10**50] * 10)
+
+
+def test_tool_input_and_trusted_args_share_one_snapshot_budget(monkeypatch):
+    tool_call = {"name": "set_value", "input": {"value": "approved"}}
+    trusted_args = {"value": "approved"}
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 7)
+
+    approved_call, approved_trusted = authority._snapshot_tool_call(
+        tool_call,
+        trusted_args,
+    )
+    assert approved_call == tool_call
+    assert approved_trusted == trusted_args
+
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 6)
+    with pytest.raises(ValueError, match="total node limit"):
+        authority._snapshot_tool_call(tool_call, trusted_args)
+
+
+def test_runner_rejects_million_repeated_input_scalars_before_invocation(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 64)
+    payload = [0] * 1_000_000
+    registry = Registry()
+    registry.add(
+        Tool(
+            "consume",
+            [Param("payload", "json", sink=False)],
+            fn=lambda payload: calls.append(payload),
+            risk=Risk.READ_ONLY,
+        )
+    )
+
+    execution = GuardedToolRunner(registry).run(
+        {"name": "consume", "input": {"payload": payload}}
+    )
+
+    assert not execution.invoked and not execution.executed
+    assert "snapshotted safely" in execution.decision.reason
+    assert calls == []
+
+
+def test_runner_rejects_million_repeated_result_scalars_with_no_retry_telemetry(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 64)
+    payload = [0] * 1_000_000
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_value",
+            [],
+            fn=lambda: calls.append("invoked") or payload,
+            risk=Risk.READ_ONLY,
+        )
+    )
+
+    execution = GuardedToolRunner(registry).run(
+        {"name": "read_value", "input": {}}
+    )
+
+    assert execution.invoked and not execution.executed
+    assert execution.result is None
+    assert execution.contract_violation == "unsupported_result"
+    assert "do not retry" in execution.decision.reason
+    assert calls == ["invoked"]
+
+
+def test_unknown_argument_flood_is_rejected_before_ledger_history_scans(
+    monkeypatch,
+):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "write_value",
+            [Param("value", "string", sink=False)],
+            risk=Risk.WRITE,
+        )
+    )
+    ledger = ProvenanceLedger()
+    ledger.record_result(
+        {"content": "history contains https://attacker.invalid/path"}
+    )
+    scans = []
+    original_is_tainted = ProvenanceLedger.is_tainted
+
+    def counted_is_tainted(self, value):
+        scans.append(value)
+        return original_is_tainted(self, value)
+
+    monkeypatch.setattr(ProvenanceLedger, "is_tainted", counted_is_tainted)
+    unknown_arguments = {
+        f"unknown_{index}": f"https://attacker.invalid/{index}"
+        for index in range(100)
+    }
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "write_value", "input": unknown_arguments},
+        ledger=ledger,
+    )
+
+    assert not decision.allow
+    assert "unknown param" in decision.reason
+    assert scans == []
+
+
+def test_unknown_tool_flood_is_rejected_before_ledger_history_scans(monkeypatch):
+    registry = Registry()
+    registry.add(Tool("read_value", [], risk=Risk.READ_ONLY))
+    ledger = ProvenanceLedger()
+    ledger.record_result(
+        {"content": "history contains https://attacker.invalid/path"}
+    )
+    scans = []
+    original_is_tainted = ProvenanceLedger.is_tainted
+
+    def counted_is_tainted(self, value):
+        scans.append(value)
+        return original_is_tainted(self, value)
+
+    monkeypatch.setattr(ProvenanceLedger, "is_tainted", counted_is_tainted)
+    unknown_arguments = {
+        f"unknown_{index}": f"https://attacker.invalid/{index}"
+        for index in range(100)
+    }
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "not_registered", "input": unknown_arguments},
+        ledger=ledger,
+    )
+
+    assert not decision.allow
+    assert "not in the registry" in decision.reason
+    assert scans == []
+
+
+@pytest.mark.parametrize(
+    ("entry_limit", "byte_limit", "result"),
+    [
+        (2, authority.MAX_LEDGER_UTF8_BYTES, "three-index-entries"),
+        (authority.MAX_LEDGER_ENTRIES, 32, "x" * 64),
+    ],
+)
+def test_ledger_capacity_overflow_is_atomic_and_saturates_the_session(
+    monkeypatch,
+    entry_limit,
+    byte_limit,
+    result,
+):
+    ledger = ProvenanceLedger()
+    before = (
+        set(ledger._tainted),
+        set(ledger._tainted_containers),
+        set(ledger._blobs),
+        set(ledger._canon_blobs),
+        ledger._utf8_bytes,
+        ledger.version,
+    )
+    monkeypatch.setattr(authority, "MAX_LEDGER_ENTRIES", entry_limit)
+    monkeypatch.setattr(authority, "MAX_LEDGER_UTF8_BYTES", byte_limit)
+
+    with pytest.raises(ValueError, match="start a new session"):
+        ledger.record_result(result)
+
+    assert ledger.saturated
+    assert ledger.version == before[-1] + 1
+    assert set(ledger._tainted) == before[0]
+    assert set(ledger._tainted_containers) == before[1]
+    assert set(ledger._blobs) == before[2]
+    assert set(ledger._canon_blobs) == before[3]
+    assert ledger._utf8_bytes == before[4]
+    assert ledger.is_tainted("any later value fails closed")
+
+
+def test_runner_reports_ledger_capacity_after_invocation_and_never_retries(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(authority, "MAX_LEDGER_UTF8_BYTES", 32)
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_value",
+            [],
+            fn=lambda: calls.append("invoked") or "x" * 64,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    first = runner.run({"name": "read_value", "input": {}})
+    second = runner.run({"name": "read_value", "input": {}})
+
+    assert first.invoked and not first.executed
+    assert first.result is None
+    assert first.contract_violation == "ledger_capacity_exceeded"
+    assert "do not retry" in first.decision.reason
+    assert runner.ledger.saturated
+    assert not second.invoked and not second.executed
+    assert "start a new session" in second.decision.reason
+    assert calls == ["invoked"]
+
+
+def test_direct_dispatch_denies_a_saturated_ledger_even_without_arguments(
+    monkeypatch,
+):
+    monkeypatch.setattr(authority, "MAX_LEDGER_ENTRIES", 0)
+    ledger = ProvenanceLedger()
+    with pytest.raises(ValueError, match="capacity exhausted"):
+        ledger.record_result(None)
+    registry = Registry()
+    registry.add(Tool("read_value", [], risk=Risk.READ_ONLY))
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "read_value", "input": {}},
+        ledger=ledger,
+    )
+
+    assert not decision.allow
+    assert "start a new session" in decision.reason
 
 
 def test_huge_integer_is_denied_before_confirmation_serialization():

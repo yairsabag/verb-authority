@@ -9,12 +9,15 @@ shared with substantially less disclosure than the original schema.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import html
 import json
 import math
 import sys
+import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -61,19 +64,146 @@ _SCHEMA_MAP_KEYWORDS = frozenset(
         "$defs",
         "definitions",
         "dependencies",
-        "dependentRequired",
         "dependentSchemas",
         "patternProperties",
         "properties",
     }
 )
-_SCHEMA_RAW_VALUE_KEYWORDS = frozenset({"const", "enum"})
+_SCHEMA_SINGLE_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_SCHEMA_ARRAY_SUBSCHEMA_KEYWORDS = frozenset(
+    {"allOf", "anyOf", "oneOf", "prefixItems"}
+)
 _MODELED_ARGUMENT_CONSTRAINTS = frozenset({"enum", "maxLength", "maximum"})
 _SHA256_HEX_LENGTH = 64
+MAX_JSON_DEPTH = 128
+MAX_SCAN_INPUT_BYTES = 8 * 1024 * 1024
+MAX_SCAN_JSON_NODES = 100_000
+MAX_SCAN_JSON_MATERIAL_BYTES = 2 * 1024 * 1024
+MAX_SCAN_TOOL_DEFINITIONS = 500
+MAX_SCAN_ARGUMENTS = 2_000
+MAX_SCAN_ENUM_MEMBERS = 10_000
+MAX_SCAN_CONTROL_COLLECTION_MEMBERS = 2_000
 
 
 class SchemaError(ValueError):
     """Raised when an input does not contain recognizable tool definitions."""
+
+
+class _ScannerBudget:
+    """Incremental resource budget for one logical scanner operation."""
+
+    __slots__ = (
+        "remaining_nodes",
+        "remaining_material_bytes",
+        "remaining_tools",
+        "remaining_arguments",
+        "remaining_enum_members",
+        "remaining_control_collection_members",
+    )
+
+    def __init__(self) -> None:
+        limits = (
+            ("total node", MAX_SCAN_JSON_NODES),
+            ("material byte", MAX_SCAN_JSON_MATERIAL_BYTES),
+            ("tool-definition", MAX_SCAN_TOOL_DEFINITIONS),
+            ("argument", MAX_SCAN_ARGUMENTS),
+            ("enum-member", MAX_SCAN_ENUM_MEMBERS),
+            ("control collection-member", MAX_SCAN_CONTROL_COLLECTION_MEMBERS),
+        )
+        if any(type(limit) is not int or limit < 1 for _, limit in limits):
+            raise SchemaError("scanner resource limits are invalid")
+        self.remaining_nodes = MAX_SCAN_JSON_NODES
+        self.remaining_material_bytes = MAX_SCAN_JSON_MATERIAL_BYTES
+        self.remaining_tools = MAX_SCAN_TOOL_DEFINITIONS
+        self.remaining_arguments = MAX_SCAN_ARGUMENTS
+        self.remaining_enum_members = MAX_SCAN_ENUM_MEMBERS
+        self.remaining_control_collection_members = (
+            MAX_SCAN_CONTROL_COLLECTION_MEMBERS
+        )
+
+    def consume_material(self, amount: int) -> None:
+        self.remaining_material_bytes -= amount
+        if self.remaining_material_bytes < 0:
+            raise SchemaError(
+                "scanner JSON exceeds the conservative material limit of "
+                f"{MAX_SCAN_JSON_MATERIAL_BYTES} bytes"
+            )
+
+    def consume_node(self) -> None:
+        self.remaining_nodes -= 1
+        if self.remaining_nodes < 0:
+            raise SchemaError(
+                "scanner JSON exceeds the total node limit of "
+                f"{MAX_SCAN_JSON_NODES}"
+            )
+        # Conservatively charge a scalar position or adjacent comma/colon.
+        self.consume_material(1)
+
+    def consume_text(self, value: str) -> None:
+        # Quotes plus the ASCII-safe representation used by JSON reports.
+        self.consume_material(2)
+        for character in value:
+            codepoint = ord(character)
+            if 0xD800 <= codepoint <= 0xDFFF:
+                raise SchemaError("scanner JSON contains invalid Unicode")
+            if codepoint <= 0x1F or codepoint == 0x7F:
+                self.consume_material(6)
+            elif codepoint in (0x22, 0x5C):
+                self.consume_material(2)
+            elif codepoint <= 0x7F:
+                self.consume_material(1)
+            elif codepoint <= 0xFFFF:
+                self.consume_material(6)
+            else:
+                self.consume_material(12)
+
+    def _consume_count(self, field: str, amount: int) -> None:
+        attribute = f"remaining_{field}"
+        remaining = getattr(self, attribute) - amount
+        setattr(self, attribute, remaining)
+        if remaining < 0:
+            limits = {
+                "tools": MAX_SCAN_TOOL_DEFINITIONS,
+                "arguments": MAX_SCAN_ARGUMENTS,
+                "enum_members": MAX_SCAN_ENUM_MEMBERS,
+                "control_collection_members": MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
+            }
+            labels = {
+                "tools": "tool-definition",
+                "arguments": "argument",
+                "enum_members": "enum-member",
+                "control_collection_members": "control collection-member",
+            }
+            raise SchemaError(
+                f"scanner input exceeds the {labels[field]} limit of "
+                f"{limits[field]}"
+            )
+
+    def consume_tools(self, amount: int) -> None:
+        self._consume_count("tools", amount)
+
+    def consume_arguments(self, amount: int) -> None:
+        self._consume_count("arguments", amount)
+
+    def consume_enum_members(self, amount: int) -> None:
+        self._consume_count("enum_members", amount)
+
+    def consume_control_collection_members(self, amount: int) -> None:
+        self._consume_count("control_collection_members", amount)
 
 
 def _validate_plain_json(
@@ -81,28 +211,59 @@ def _validate_plain_json(
     *,
     field: str = "JSON input",
     active: set[int] | None = None,
+    seen: set[int] | None = None,
+    depth: int = 0,
+    budget: _ScannerBudget | None = None,
 ) -> None:
-    """Require a finite, cycle-free tree of exact built-in JSON types."""
+    """Require a finite, alias-free tree of exact JSON-compatible types."""
 
+    budget = _ScannerBudget() if budget is None else budget
+    budget.consume_node()
     value_type = type(value)
     if value_type in (str, int, bool) or value is None:
         if value_type is str:
+            budget.consume_text(value)
+        elif value is None:
+            budget.consume_material(4)
+        elif value_type is bool:
+            budget.consume_material(4 if value else 5)
+        else:
             try:
-                value.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise SchemaError(f"{field} contains invalid Unicode") from exc
+                budget.consume_material(len(str(value)))
+            except ValueError as exc:
+                raise SchemaError(f"{field} contains an oversized integer") from exc
         return
     if value_type is float:
         if not math.isfinite(value):
             raise SchemaError(f"{field} contains a non-finite number")
+        budget.consume_material(32)
+        return
+    if value_type is Decimal:
+        if not value.is_finite():
+            raise SchemaError(f"{field} contains a non-finite number")
+        try:
+            budget.consume_material(len(str(value)))
+        except (MemoryError, ValueError) as exc:
+            raise SchemaError(f"{field} contains an oversized decimal") from exc
         return
     if value_type not in (dict, list):
         raise SchemaError(f"{field} must contain only plain JSON values")
+    if depth >= MAX_JSON_DEPTH:
+        raise SchemaError(
+            f"{field} exceeds the maximum nesting depth of {MAX_JSON_DEPTH}"
+        )
+    budget.consume_material(1)  # closing list/object bracket
 
     active = set() if active is None else active
+    seen = set() if seen is None else seen
     identity = id(value)
     if identity in active:
         raise SchemaError(f"{field} contains a cycle")
+    if identity in seen:
+        raise SchemaError(
+            f"{field} contains a repeated container alias; plain JSON must be a tree"
+        )
+    seen.add(identity)
     active.add(identity)
     try:
         if value_type is dict:
@@ -110,21 +271,46 @@ def _validate_plain_json(
                 if type(key) is not str:
                     raise SchemaError(f"{field} contains a non-string object key")
                 try:
-                    key.encode("utf-8")
-                except UnicodeEncodeError as exc:
-                    raise SchemaError(f"{field} contains invalid Unicode") from exc
-                _validate_plain_json(child, field=field, active=active)
+                    budget.consume_node()
+                    budget.consume_text(key)
+                except SchemaError as exc:
+                    raise SchemaError(f"{field}: {exc}") from exc
+                _validate_plain_json(
+                    child,
+                    field=field,
+                    active=active,
+                    seen=seen,
+                    depth=depth + 1,
+                    budget=budget,
+                )
         else:
             for child in value:
-                _validate_plain_json(child, field=field, active=active)
+                _validate_plain_json(
+                    child,
+                    field=field,
+                    active=active,
+                    seen=seen,
+                    depth=depth + 1,
+                    budget=budget,
+                )
     finally:
         active.remove(identity)
 
 
-def validate_plain_json(value: Any, *, field: str = "JSON input") -> None:
+def validate_plain_json(
+    value: Any,
+    *,
+    field: str = "JSON input",
+    _budget: _ScannerBudget | None = None,
+) -> None:
     """Validate a public API value against the scanner's strict JSON boundary."""
 
-    _validate_plain_json(value, field=field)
+    try:
+        _validate_plain_json(value, field=field, budget=_budget)
+    except RecursionError as exc:
+        raise SchemaError(f"{field} exceeds the maximum nesting depth") from exc
+    except MemoryError as exc:
+        raise SchemaError(f"{field} exceeds available scanner resources") from exc
 
 
 def _reject_json_constant(value: str) -> Any:
@@ -142,18 +328,49 @@ def _json_object_without_duplicates(
     return value
 
 
+def _scanner_input_limit() -> int:
+    if type(MAX_SCAN_INPUT_BYTES) is not int or MAX_SCAN_INPUT_BYTES < 1:
+        raise SchemaError("scanner input-byte limit is invalid")
+    return MAX_SCAN_INPUT_BYTES
+
+
+def _read_bounded_json_text(stream: Any) -> str:
+    limit = _scanner_input_limit()
+    chunks: list[str] = []
+    total_bytes = 0
+    while True:
+        chunk = stream.read(64 * 1024)
+        if chunk == "":
+            break
+        if type(chunk) is not str:
+            raise SchemaError("JSON input stream must provide text")
+        try:
+            total_bytes += len(chunk.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise SchemaError("JSON input contains invalid Unicode") from exc
+        if total_bytes > limit:
+            raise SchemaError(
+                f"JSON input exceeds the UTF-8 input limit of {limit} bytes"
+            )
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
 def _load_json_stream(stream: Any) -> Any:
     try:
-        value = json.load(
-            stream,
+        value = json.loads(
+            _read_bounded_json_text(stream),
             object_pairs_hook=_json_object_without_duplicates,
             parse_constant=_reject_json_constant,
+            parse_float=Decimal,
         )
+        _validate_plain_json(value)
     except SchemaError:
         raise
+    except MemoryError as exc:
+        raise SchemaError("JSON input exceeds available scanner resources") from exc
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise SchemaError(f"invalid JSON input: {exc}") from exc
-    _validate_plain_json(value)
     return value
 
 
@@ -164,7 +381,13 @@ def load_json_path(path: str, *, allow_stdin: bool = False) -> Any:
         if not allow_stdin:
             raise SchemaError("stdin is not supported for this input")
         return _load_json_stream(sys.stdin)
-    with Path(path).open(encoding="utf-8") as source:
+    input_path = Path(path)
+    limit = _scanner_input_limit()
+    if input_path.stat().st_size > limit:
+        raise SchemaError(
+            f"JSON input exceeds the UTF-8 input limit of {limit} bytes"
+        )
+    with input_path.open(encoding="utf-8") as source:
         return _load_json_stream(source)
 
 
@@ -217,15 +440,13 @@ def _tool_from_mapping(
     )
 
 
-def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
-    """Normalize common exported tool-schema envelopes.
+def _parse_tool_definitions_unchecked(document: Any) -> list[ToolDefinition]:
+    """Normalize one already validated tool-schema envelope.
 
     Supported shapes include MCP ``tools/list`` results, OpenAI function tools,
     Anthropic tools, and the attributed ``sources`` envelope used by the public
     Atlas fixture.
     """
-
-    _validate_plain_json(document, field="schema document")
 
     if type(document) is list:
         if not document:
@@ -258,9 +479,9 @@ def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
 
     result = document.get("result")
     if isinstance(result, dict) and isinstance(result.get("tools"), list):
-        return parse_tool_definitions(result["tools"])
+        return _parse_tool_definitions_unchecked(result["tools"])
     if isinstance(document.get("tools"), list):
-        return parse_tool_definitions(document["tools"])
+        return _parse_tool_definitions_unchecked(document["tools"])
     if isinstance(document.get("functions"), list):
         if any(type(function) is not dict for function in document["functions"]):
             raise SchemaError("function definitions must be JSON objects")
@@ -272,6 +493,19 @@ def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
         return [_tool_from_mapping(document)]
 
     raise SchemaError("no recognizable tool definitions found")
+
+
+def parse_tool_definitions(document: Any) -> list[ToolDefinition]:
+    """Validate and normalize one exported tool-schema document."""
+
+    try:
+        budget = _ScannerBudget()
+        _validate_plain_json(document, field="schema document", budget=budget)
+        definitions = _parse_tool_definitions_unchecked(document)
+        _consume_definition_limits(definitions, budget)
+        return definitions
+    except MemoryError as exc:
+        raise SchemaError("schema document exceeds available scanner resources") from exc
 
 
 def _property_type(schema: dict[str, Any]) -> str:
@@ -294,16 +528,113 @@ def _enum_value_fingerprint(value: Any) -> str:
     """Return a stable, type-preserving digest without reporting enum values."""
 
     try:
-        encoded = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        return _canonical_sha256(value)
+    except SchemaError as exc:
         raise SchemaError("enum members must be JSON-compatible values") from exc
-    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    """Return a finite Decimal's exact value in bounded canonical notation."""
+
+    if not value.is_finite():
+        raise SchemaError("JSON numbers must be finite")
+    sign, raw_digits, exponent = value.as_tuple()
+    digits = list(raw_digits)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    if not any(digits):
+        return "0"
+
+    prefix = "-" if sign else ""
+    digit_text = "".join(str(digit) for digit in digits)
+    point = len(digit_text) + exponent
+    if 0 < point <= 128:
+        if point >= len(digit_text):
+            return prefix + digit_text + ("0" * (point - len(digit_text)))
+        return prefix + digit_text[:point] + "." + digit_text[point:]
+    if -128 < point <= 0:
+        return prefix + "0." + ("0" * -point) + digit_text
+
+    adjusted_exponent = point - 1
+    coefficient = digit_text[:1]
+    if len(digit_text) > 1:
+        coefficient += "." + digit_text[1:]
+    exponent_sign = "+" if adjusted_exponent >= 0 else ""
+    return f"{prefix}{coefficient}e{exponent_sign}{adjusted_exponent}"
+
+
+def canonical_decimal_text(value: Decimal | float) -> str:
+    """Canonical report representation for a non-integer JSON number.
+
+    JSON text is loaded as :class:`Decimal`, so no decimal digits are first
+    rounded through a binary float. Direct Python ``float`` inputs necessarily
+    describe an already-rounded value; their shortest round-tripping decimal
+    representation is canonicalized here.
+    """
+
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise SchemaError("JSON numbers must be finite")
+        value = Decimal(repr(value))
+    if type(value) is not Decimal:
+        raise SchemaError("value must be a decimal JSON number")
+    return _canonical_decimal_text(value)
+
+
+def _contains_exact_noninteger(value: Any) -> bool:
+    if type(value) in (float, Decimal):
+        return True
+    if type(value) is dict:
+        return any(_contains_exact_noninteger(item) for item in value.values())
+    if type(value) is list:
+        return any(_contains_exact_noninteger(item) for item in value)
+    return False
+
+
+def _typed_canonical_bytes(value: Any) -> bytes:
+    """Encode a plain JSON value without collisions between JSON types."""
+
+    value_type = type(value)
+    if value is None:
+        return b"n"
+    if value_type is bool:
+        return b"b1" if value else b"b0"
+    if value_type is int:
+        encoded = str(value).encode("ascii")
+        return b"i" + str(len(encoded)).encode("ascii") + b":" + encoded
+    if value_type is float:
+        if not math.isfinite(value):
+            raise SchemaError("schema material contains a non-finite number")
+        encoded = canonical_decimal_text(value).encode("ascii")
+        return b"d" + str(len(encoded)).encode("ascii") + b":" + encoded
+    if value_type is Decimal:
+        encoded = _canonical_decimal_text(value).encode("ascii")
+        return b"d" + str(len(encoded)).encode("ascii") + b":" + encoded
+    if value_type is str:
+        encoded = value.encode("utf-8")
+        return b"s" + str(len(encoded)).encode("ascii") + b":" + encoded
+    if value_type is list:
+        return (
+            b"l"
+            + str(len(value)).encode("ascii")
+            + b":"
+            + b"".join(_typed_canonical_bytes(item) for item in value)
+        )
+    if value_type is dict:
+        encoded_items = []
+        for key in sorted(value):
+            if type(key) is not str:
+                raise SchemaError("schema material contains a non-string key")
+            encoded_items.append(_typed_canonical_bytes(key))
+            encoded_items.append(_typed_canonical_bytes(value[key]))
+        return (
+            b"o"
+            + str(len(value)).encode("ascii")
+            + b":"
+            + b"".join(encoded_items)
+        )
+    raise SchemaError("schema material must contain only plain JSON values")
 
 
 def _schema_material(value: Any) -> Any:
@@ -315,8 +646,6 @@ def _schema_material(value: Any) -> Any:
     likewise copied without interpreting their object keys as annotations.
     """
 
-    if type(value) is list:
-        return [_schema_material(item) for item in value]
     if type(value) is not dict:
         return value
 
@@ -326,26 +655,56 @@ def _schema_material(value: Any) -> Any:
             continue
         if key in _SCHEMA_MAP_KEYWORDS and type(item) is dict:
             material[key] = {
-                name: _schema_material(subschema)
+                name: (
+                    _schema_material(subschema)
+                    if type(subschema) in (dict, bool)
+                    else subschema
+                )
                 for name, subschema in item.items()
             }
-        elif key in _SCHEMA_RAW_VALUE_KEYWORDS:
-            material[key] = item
+        elif key in _SCHEMA_SINGLE_SUBSCHEMA_KEYWORDS:
+            if type(item) is dict or type(item) is bool:
+                material[key] = _schema_material(item)
+            elif key == "items" and type(item) is list:
+                material[key] = [
+                    _schema_material(subschema)
+                    if type(subschema) in (dict, bool)
+                    else subschema
+                    for subschema in item
+                ]
+            else:
+                material[key] = item
+        elif key in _SCHEMA_ARRAY_SUBSCHEMA_KEYWORDS and type(item) is list:
+            material[key] = [
+                _schema_material(subschema)
+                if type(subschema) in (dict, bool)
+                else subschema
+                for subschema in item
+            ]
         else:
-            material[key] = _schema_material(item)
+            # Unknown and raw-value keyword payloads are data, not schemas.
+            # Preserve annotation-named members nested inside them. For
+            # example, discriminator.mapping.default changes validation
+            # behavior and must remain in the fingerprint material.
+            material[key] = item
     return material
 
 
 def _canonical_sha256(value: Any) -> str:
     try:
-        encoded = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        if _contains_exact_noninteger(value):
+            encoded = b"verb-authority-decimal-canonical-v1\0" + (
+                _typed_canonical_bytes(value)
+            )
+        else:
+            encoded = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise SchemaError("schema material must be canonical plain JSON") from exc
     return hashlib.sha256(encoded).hexdigest()
 
@@ -429,10 +788,13 @@ def _normalized_constraints(
         if not (
             type(maximum) is int
             or (type(maximum) is float and math.isfinite(maximum))
+            or (type(maximum) is Decimal and maximum.is_finite())
         ):
             raise SchemaError("schema maximum must be a finite number")
         if redact_values:
             constraints["maximum_present"] = True
+        elif type(maximum) in (float, Decimal):
+            constraints["maximum"] = canonical_decimal_text(maximum)
         else:
             constraints["maximum"] = maximum
 
@@ -465,13 +827,28 @@ def _normalized_constraints(
     return constraints
 
 
+def _policy_json_value(value: Any) -> Any:
+    """Make exact parsed decimals safe for the scanner-only policy model."""
+
+    if type(value) is Decimal:
+        return canonical_decimal_text(value)
+    if type(value) is list:
+        return [_policy_json_value(item) for item in value]
+    if type(value) is dict:
+        return {key: _policy_json_value(item) for key, item in value.items()}
+    return value
+
+
 def _param(name: str, schema: Any) -> Param:
     if not isinstance(schema, dict):
         schema = {}
     param_type = _property_type(schema)
     enum = schema.get("enum") if param_type == "enum" else None
     constraints = _normalized_constraints(schema)
-    cap = constraints.get("maximum")
+    # ``Param.cap`` is used here only to establish that a numeric argument is
+    # bounded; report and diff semantics use the exact normalized constraint.
+    # The runtime Param API intentionally accepts only built-in numbers.
+    cap = 0.0 if "maximum" in constraints else None
     max_len = constraints.get("max_length")
     sink = schema.get("x-verb-authority-sink")
     if not isinstance(sink, bool):
@@ -479,7 +856,7 @@ def _param(name: str, schema: Any) -> Param:
     return Param(
         name=name,
         type=param_type,
-        enum=enum if isinstance(enum, list) else None,
+        enum=_policy_json_value(enum) if isinstance(enum, list) else None,
         max_len=max_len,
         cap=cap,
         sink=sink,
@@ -515,6 +892,63 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     if len(required) != len(set(required)):
         raise SchemaError(f"tool '{definition.name}' required names must be unique")
     return properties, set(required)
+
+
+def _consume_definition_limits(
+    definitions: list[ToolDefinition], budget: _ScannerBudget
+) -> None:
+    """Charge schema cardinalities once, before report expansion begins."""
+
+    budget.consume_tools(len(definitions))
+    for definition in definitions:
+        _consume_definition_detail_limits(definition, budget)
+
+
+def _consume_definition_detail_limits(
+    definition: ToolDefinition, budget: _ScannerBudget
+) -> None:
+    properties, _ = _properties(definition)
+    budget.consume_arguments(len(properties))
+    for property_schema in properties.values():
+        if type(property_schema) is dict:
+            enum = property_schema.get("enum")
+            if type(enum) is list:
+                budget.consume_enum_members(len(enum))
+
+
+def _consume_control_declaration_limits(
+    document: Any, budget: _ScannerBudget
+) -> None:
+    """Bound declaration-driven report expansion before normalization/copying."""
+
+    if type(document) is not dict:
+        return
+    raw_tools = document.get("tools")
+    if type(raw_tools) is not dict:
+        return
+    for raw_tool in raw_tools.values():
+        if type(raw_tool) is not dict:
+            continue
+
+        raw_unexposed = raw_tool.get("unexposed_arguments")
+        if type(raw_unexposed) is dict:
+            # Unexposed controls become argument rows in the report and must
+            # share the same aggregate argument ceiling as schema arguments.
+            budget.consume_arguments(len(raw_unexposed))
+
+        raw_risk = raw_tool.get("risk")
+        if type(raw_risk) is dict and type(raw_risk.get("effects")) is list:
+            budget.consume_control_collection_members(len(raw_risk["effects"]))
+
+        raw_arguments = raw_tool.get("arguments")
+        if type(raw_arguments) is not dict:
+            continue
+        for raw_argument in raw_arguments.values():
+            if type(raw_argument) is not dict:
+                continue
+            raw_bounds = raw_argument.get("bounds")
+            if type(raw_bounds) is list:
+                budget.consume_control_collection_members(len(raw_bounds))
 
 
 def _optional_text(value: Any, *, field: str) -> str | None:
@@ -982,7 +1416,10 @@ def _declared_controls_report(
             "unexposed_arguments": unexposed_arguments,
         }
         if "risk" in declared_tool:
-            tool_item["risk"] = declared_tool["risk"]
+            # The same declaration is also exposed on the inferred tool
+            # report. Keep the public report an actual JSON tree rather than
+            # sharing a compact Python object graph between those locations.
+            tool_item["risk"] = copy.deepcopy(declared_tool["risk"])
         tools.append(tool_item)
 
     report = {
@@ -995,15 +1432,21 @@ def _declared_controls_report(
     return report
 
 
-def scan_definitions(
+def _scan_definitions_bounded(
     definitions: list[ToolDefinition],
     *,
     redact_names: bool = False,
     control_declarations: Any | None = None,
+    budget: _ScannerBudget,
+    definitions_validated: bool,
+    controls_validated: bool,
+    limits_counted: bool,
 ) -> dict[str, Any]:
     if not definitions:
         raise SchemaError("no tool definitions found")
 
+    if not limits_counted:
+        budget.consume_tools(len(definitions))
     for definition in definitions:
         if type(definition) is not ToolDefinition:
             raise SchemaError("tool definitions must use ToolDefinition values")
@@ -1017,24 +1460,46 @@ def scan_definitions(
                 raise SchemaError(
                     f"tool '{definition.name}' {source_field} must be text"
                 )
-        _validate_plain_json(
-            definition.input_schema,
-            field=f"tool '{definition.name}' input schema",
-        )
-        _validate_plain_json(
-            definition.annotations,
-            field=f"tool '{definition.name}' annotations",
-        )
+        if not definitions_validated:
+            _validate_plain_json(
+                definition.name,
+                field="tool definition name",
+                budget=budget,
+            )
+            for source_field, source_value in (
+                ("source_id", definition.source_id),
+                ("source_url", definition.source_url),
+            ):
+                if source_value is not None:
+                    _validate_plain_json(
+                        source_value,
+                        field=f"tool '{definition.name}' {source_field}",
+                        budget=budget,
+                    )
+            _validate_plain_json(
+                definition.input_schema,
+                field=f"tool '{definition.name}' input schema",
+                budget=budget,
+            )
+            _validate_plain_json(
+                definition.annotations,
+                field=f"tool '{definition.name}' annotations",
+                budget=budget,
+            )
         _properties(definition)
+        if not limits_counted:
+            _consume_definition_detail_limits(definition, budget)
 
-    if control_declarations is not None:
+    if control_declarations is not None and not controls_validated:
         _validate_plain_json(
             control_declarations,
             field="control declarations",
+            budget=budget,
         )
 
     declarations = None
     if control_declarations is not None:
+        _consume_control_declaration_limits(control_declarations, budget)
         declarations = _validate_control_declarations(
             definitions, control_declarations
         )
@@ -1213,7 +1678,30 @@ def scan_definitions(
         report["control_declaration_fingerprint_sha256"] = (
             _control_declaration_fingerprint(declared_controls)
         )
+    validate_plain_json(report, field="generated scanner report")
     return report
+
+
+def scan_definitions(
+    definitions: list[ToolDefinition],
+    *,
+    redact_names: bool = False,
+    control_declarations: Any | None = None,
+) -> dict[str, Any]:
+    """Scan normalized definitions under one aggregate resource budget."""
+
+    try:
+        return _scan_definitions_bounded(
+            definitions,
+            redact_names=redact_names,
+            control_declarations=control_declarations,
+            budget=_ScannerBudget(),
+            definitions_validated=False,
+            controls_validated=False,
+            limits_counted=False,
+        )
+    except MemoryError as exc:
+        raise SchemaError("tool definitions exceed available scanner resources") from exc
 
 
 def scan_documents(
@@ -1222,18 +1710,56 @@ def scan_documents(
     redact_names: bool = False,
     control_declarations: Any | None = None,
 ) -> dict[str, Any]:
-    definitions: list[ToolDefinition] = []
-    for document in documents:
-        definitions.extend(parse_tool_definitions(document))
-    return scan_definitions(
-        definitions,
-        redact_names=redact_names,
-        control_declarations=control_declarations,
-    )
+    try:
+        budget = _ScannerBudget()
+        definitions: list[ToolDefinition] = []
+        for document in documents:
+            _validate_plain_json(
+                document,
+                field="schema document",
+                budget=budget,
+            )
+            parsed = _parse_tool_definitions_unchecked(document)
+            _consume_definition_limits(parsed, budget)
+            definitions.extend(parsed)
+        controls_validated = control_declarations is not None
+        if controls_validated:
+            _validate_plain_json(
+                control_declarations,
+                field="control declarations",
+                budget=budget,
+            )
+        return _scan_definitions_bounded(
+            definitions,
+            redact_names=redact_names,
+            control_declarations=control_declarations,
+            budget=budget,
+            definitions_validated=True,
+            controls_validated=controls_validated,
+            limits_counted=True,
+        )
+    except MemoryError as exc:
+        raise SchemaError("schema documents exceed available scanner resources") from exc
 
 
 def _markdown_cell(value: Any) -> str:
-    return html.escape(str(value), quote=False).replace("|", "\\|").replace("\n", " ")
+    safe: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character == "\n":
+            safe.append(" ")
+        elif character == "\r":
+            safe.append("\\r")
+        elif character == "\t":
+            safe.append("\\t")
+        elif category.startswith("C") or category in {"Zl", "Zp"}:
+            escape = "\\u" if codepoint <= 0xFFFF else "\\U"
+            width = 4 if codepoint <= 0xFFFF else 8
+            safe.append(f"{escape}{codepoint:0{width}x}")
+        else:
+            safe.append(character)
+    return html.escape("".join(safe), quote=False).replace("|", "\\|")
 
 
 def _constraint_details(argument: dict[str, Any]) -> str:

@@ -125,8 +125,13 @@ The runner accepts plain built-in JSON-shaped values (`dict`, `list`, strings,
 finite numbers, booleans, and `None`). Normalize framework containers before
 calling it. A root-to-leaf path is limited to 64 list/dict containers,
 including the root input object, and integers are limited to 512 decimal
-digits. Values outside either portable serialization bound fail closed before
-confirmation or invocation. Every registered parameter must appear explicitly in the tool
+digits. Each logical snapshot is also limited to 100,000 total JSON values and
+object keys and 8 MiB of conservatively estimated ASCII-escaped JSON material.
+The tool name, proposed input, and `trusted_args` share one such budget. It is
+charged incrementally, so one oversized string or a million repeated scalar
+values fails without first expanding or serializing the whole value. Values
+outside any portable serialization bound fail closed before confirmation or
+invocation. Every registered parameter must appear explicitly in the tool
 call, including a parameter declared with `Param(..., required=False)`. If the
 provider or Python callable has a default, the application must materialize
 that value before the gate. A protected materialized value must also appear,
@@ -141,11 +146,16 @@ state as explicit parameters instead.
 
 Before confirmation, the runner isolates the tool call and trusted arguments
 and snapshots registration/policy metadata. The callback receives an
-immutable `ConfirmationRequest` whose canonical, ASCII-escaped
-`arguments_json` encodes the exact private argument snapshot that can run. A UI
+immutable `ConfirmationRequest` whose ASCII-escaped, insertion-order-preserving
+`arguments_json` encodes the exact private argument snapshot that can run.
+Signed `0.0`/`-0.0` and nested object member order remain distinct in both the
+snapshot and `action_id`, because Python tool implementations can observe
+those differences. Runtime `Decision.reason` text ASCII-escapes control,
+bidirectional, and non-ASCII characters from tool and parameter labels before
+it reaches a log or terminal. A UI
 may decode and show individual fields only through a trusted renderer that
 neutralizes bidi/control characters and escapes each output context. Without
-such a renderer, show the canonical ASCII-escaped JSON verbatim; never inject
+such a renderer, show the ASCII-escaped JSON verbatim; never inject
 decoded fields directly into markup or a terminal. The request also contains
 the effective risk and its evidence, the declared-risk conflict state, and
 `registration_id`, `executable_id`, `ledger_version`, and `action_id`
@@ -181,6 +191,19 @@ ledger epoch. This is not a lock for globals, databases, or other application
 state; externally synchronize those resources and avoid unsynchronized
 mutation during a call.
 
+The public `gate` and `dispatch` paths apply the same frozen-policy validation
+as the runner: valid string forms such as `"trusted_fixed"` and `"financial"`
+are normalized to their enums, while malformed, unbound, or weakened policy
+material produces a closed `Decision` instead of escaping a runtime exception.
+
+One session ledger retains at most 10,000 exact/search-index entries and 8 MiB
+of UTF-8 text material. It never evicts old taint. If publishing a completed
+tool result would exceed either budget, that write is not partially committed,
+the ledger becomes permanently saturated, and every later call is denied until
+the application starts a new session with a fresh ledger. The already-entered
+tool must not be retried: the runner reports `invoked=True`, `executed=False`,
+and `contract_violation="ledger_capacity_exceeded"` with that instruction.
+
 The runner is deliberately synchronous. It rejects coroutine and async-
 generator implementations before invocation, rejects awaitable results, and
 closes native coroutine results without invoking hooks on arbitrary awaitable
@@ -197,8 +220,9 @@ in the result. Process-control `BaseException` subclasses still propagate.
 Never automatically retry when `invoked=True`, even if `executed=False`: the
 implementation may have produced an external side effect before raising or
 violating the result contract. A result beyond the JSON depth or integer bound
-is reported after invocation as `contract_violation="unsupported_result"`
-without exposing the result.
+or the total node/material snapshot budget is reported after invocation as
+`contract_violation="unsupported_result"` without exposing the result. A
+snapshot-budget denial also carries an explicit no-retry instruction.
 Free outbound payloads may be authored by data, but they still must satisfy
 their declared runtime type and bounds such as `max_len`.
 
@@ -274,6 +298,18 @@ python -m verb_authority scan tools.json \
   --redact-names --format json --output authority-report.json
 ```
 
+Scanner inputs have their own fail-closed resource boundary. Each JSON file is
+limited to 8 MiB of UTF-8 before parsing. One logical scan, aggregated across
+all schema documents and a control sidecar, is limited to 100,000 JSON values
+and object keys, 2 MiB of conservatively estimated ASCII-safe JSON material,
+500 tool definitions, 2,000 schema or unexposed arguments, 10,000 enum members,
+and 2,000 declaration collection members across risk effects and argument
+bounds. The generated report is checked against the same node/material limits.
+`parse_tool_definitions`, `scan_definitions`, `scan_documents`, and the CLI
+enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
+reports before indexing them. An over-limit CLI input exits with status 2 and
+is not partially scanned or compared.
+
 Named JSON reports use report format v3. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a
 SHA-256 fingerprint for each enum member. Raw enum members are omitted, but
@@ -285,6 +321,13 @@ reports also include per-tool and per-argument
 `schema_material_fingerprint_sha256` and
 `unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
 can likewise be dictionary-guessed or correlated.
+
+JSON decimal constraints are parsed without first rounding through a binary
+float. A `maximum` parsed from a decimal or exponent token uses a canonical
+decimal string in the JSON report so the exact value remains serializable and
+comparable; JSON integer tokens remain integers. Callers of the Python API that
+supply a native `float` have already accepted Python's binary rounding, and the
+scanner records that float's shortest round-tripping decimal representation.
 
 `--redact-names` also removes exact numeric constraint values and enum-member
 hashes, plus all exact per-tool and per-argument schema-material hashes. A
@@ -429,6 +472,8 @@ raw schema with the v3 scanner before comparing it. When implementation
 controls are part of the comparison, pass the sidecars with
 `--before-controls` and `--after-controls`. Control evidence remains visibly
 author-supplied; a diff does not turn a declaration into verified enforcement.
+Malformed or legacy report-shaped input is rejected as a report and is never
+reinterpreted as a raw tool schema.
 
 The two CLI thresholds are independent. `--fail-on-increase` returns status 2
 only for authority increases; review-only and protection increases remain
@@ -470,7 +515,10 @@ with:
 
 Both inputs accept only the exact strings `"true"` or `"false"`. The beta.6
 pin in the example above predates `fail_on_review`; pin beta.8 or later after
-that release is published to use the second threshold.
+that release is published to use the second threshold. The action removes
+`PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
+and comparison, preventing modules in the consumer checkout from shadowing
+`pip` or the installed Verb Authority package.
 
 The v3 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
@@ -497,7 +545,10 @@ The project is one importable module with five cooperating pieces:
   type-checked; free-text bodies are treated as outbound payloads.
 - **Safe-by-default inference.** Policies are inferred from the existing tool
   schema. Ambiguous parameters on consequential tools stay locked and appear in
-  a one-time review queue.
+  a one-time review queue. Authority-bearing names are evaluated before broad
+  numeric or payload rules: an integer `account_id` and a string `reply_to`
+  remain locked, while an ambiguous `message_id` remains locked for review.
+  Payload names are token-bound rather than matched as arbitrary substrings.
 - **Declared capabilities.** `Param(..., sink=True|False)` lets a tool schema
   resolve overloaded names such as `path` without relying on the heuristic.
 - **Declared verb-risk tiers.** Applications declare tools as read-only, write,
@@ -515,6 +566,9 @@ The project is one importable module with five cooperating pieces:
   text. NFKC normalization and recursive script detection reject a locked JSON
   string or key containing more than one of the tracked Latin, Greek, and
   Cyrillic scripts.
+  The ledger is bounded and fail-closed: capacity exhaustion saturates the
+  session instead of evicting old evidence, so callers must create a fresh
+  session and must not retry the tool call that already produced the result.
 
 The gate rejects unknown tools, unknown arguments, and every omitted registered
 parameter. `Param.required` remains schema metadata, not an implicit-default
@@ -565,7 +619,9 @@ ledger.record_result(result)
 This direct-dispatch example leaves confirmation-to-execution atomicity,
 callable identity, result validation, and result capture to the application.
 Thread one ledger through the session and record each plain JSON result
-immediately after the tool returns. Prefer `GuardedToolRunner` when those
+immediately after the tool returns. If `record_result` raises a capacity error,
+the tool has already run: do not retry it, discard the saturated session, and
+start a fresh ledger. Prefer `GuardedToolRunner` when those
 operations should share the frozen runtime boundary described above. The
 ledger is a containment layer, not sound taint tracking: it recognizes values
 (including every exact key, exact containers, and typed scalar leaves nested

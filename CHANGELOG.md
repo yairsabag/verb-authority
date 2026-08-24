@@ -32,12 +32,13 @@ tag or GitHub release was created, and the version is intentionally not reused.
 - Snapshot plain built-in JSON-shaped tool inputs and capture the registered
   callable before confirmation, so callback-side mutation cannot change the
   call that passed the gate.
-- Bind confirmation to an immutable request containing canonical
+- Bind confirmation to an immutable request containing exact-order
   `arguments_json`, effective and declared risk evidence, conflict state,
   registration and executable identities, ledger version, and an action
-  identity. Serialize arguments as canonical ASCII-escaped JSON for stable
+  identity. Serialize arguments as ASCII-escaped JSON while preserving signed
+  zero and object insertion order for exact observable action identity and safe
   transport. A trusted confirmation renderer must neutralize bidi/control
-  characters and escape its output context; without one, display the canonical
+  characters and escape its output context; without one, display the
   ASCII-escaped JSON verbatim rather than decoded fields.
   The public executable identity is an address-free code/signature digest, and
   the action identity is a content commitment rather than a nonce or replay
@@ -54,21 +55,42 @@ tag or GitHub release was created, and the version is intentionally not reused.
   not semantically frozen action material.
 - Compare trusted values recursively with exact types instead of Python's
   coercive equality, preventing `True`, `1`, and `1.0` from sharing authority;
+  keep signed zero and object insertion order distinct for trusted-value
+  equality and confirmation action identities;
   enforce finite number, integer, boolean, enum, and bounded-string checks for
   every authority policy, including `trusted_fixed`.
+- Evaluate authority-bearing names before broad numeric, enum, boolean, or
+  payload rules. Numeric account identifiers and explicit destinations remain
+  locked, while ambiguous identifier selectors stay locked and enter the
+  consequential-tool review queue. Payload matching is token-bound rather
+  than substring-based.
+- Normalize valid string-valued policy/risk enum entries consistently in the
+  direct gate, dispatcher, and guarded runner; malformed policy material now
+  returns a closed decision from direct APIs instead of escaping an exception.
+  Escape controls, bidi characters, and other non-ASCII label text in runtime
+  decision reasons before they reach logs or terminals.
 - Fail closed on malformed normalized calls and on values outside the runner's
   plain built-in JSON-shaped boundary. Bound paths to 64 list/dict containers
-  and integers to 512 decimal digits before confirmation serialization;
-  overdeep or oversized tool results become `unsupported_result` after
-  invocation rather than escaping as encoder/recursion exceptions.
+  and integers to 512 decimal digits before confirmation serialization. Bound
+  each logical snapshot to 100,000 total values/object keys and 8 MiB of
+  conservatively estimated ASCII-escaped JSON material, shared across the tool
+  name, proposed input, and trusted arguments and charged incrementally before
+  full encoding. Repeated-scalar arrays, oversized strings, and unknown
+  argument/tool floods therefore stop before invocation or ledger-history
+  scans; overdeep or oversized tool results become `unsupported_result` after
+  invocation with explicit no-retry telemetry rather than escaping as
+  encoder/recursion exceptions.
 - Require every registered runtime parameter to be explicit. The application
   must materialize provider or callable defaults before gating and must also
   place protected materialized values in `trusted_args`; `required=False`
   remains beta schema/API metadata and no longer authorizes implicit defaults.
 - Validate callable signatures against the registration, reject coroutine and
   async-generator implementations before invocation, reject awaitable results,
-  safely close native coroutine results without invoking arbitrary awaitable
-  hooks, and require successful results to be plain finite JSON.
+  validate arbitrary result objects against the exact plain-JSON boundary
+  before classifying only exact native async types, safely close those through
+  unbound interpreter methods without consulting spoofed `__class__`,
+  `close`, or `aclose` hooks, and require successful results to be plain finite
+  JSON.
   Limit beta.8 implementations to exact plain Python functions; reject forged
   signature metadata, bound methods, callable objects/classes, builtins, and
   partials whose hidden state is not represented by declared arguments.
@@ -86,7 +108,14 @@ tag or GitHub release was created, and the version is intentionally not reused.
   FTP, WS(S), protocol-relative, and `www.` URI forms; cover Unicode Cyrillic
   supplement/extended characters after NFKC normalization; reject mixed-script
   homographs recursively inside locked JSON; and fail closed on cyclic or
-  polymorphic containers.
+  polymorphic containers. Reject aliased Python container graphs as non-JSON
+  before a compact shared DAG can expand exponentially; separately decoded
+  equal JSON subtrees remain valid.
+- Bound each ledger session to 10,000 retained entries and 8 MiB of UTF-8 text
+  material. Capacity preflight is atomic and fail-closed: no old taint is
+  evicted, overflow saturates the session, the already-invoked call reports
+  `ledger_capacity_exceeded` with an explicit no-retry instruction, and later
+  calls require a fresh ledger.
 - Add a source-pinned, non-executing AgentDojo schema exporter and record the
   first static scan across all four public tool suites (74 suite exposures,
   118 parameters) without presenting it as an attack or utility benchmark.
@@ -102,8 +131,20 @@ tag or GitHub release was created, and the version is intentionally not reused.
   version and module locations.
 - Fail a release before checksumming or upload unless its tag normalizes to the
   project version and exactly one wheel plus one source distribution carry the
-  expected name and version; refuse unexpected local or pre-existing release
-  assets.
+  expected name and version; require the exact pure-Python
+  `py3-none-any` wheel filename, matching internal `WHEEL` metadata, and refuse
+  unexpected local or pre-existing release assets.
+- Isolate both composite-action Python entry points with `-I` and remove
+  `PYTHONPATH`/`PYTHONHOME`, so consumer-workspace `pip.py`,
+  `verb_authority.py`, or a planted console script cannot turn a real widening
+  into a false pass. Put schema paths behind an explicit end-of-options boundary
+  so option-looking filenames cannot request CLI help and false-pass. Exercise
+  both module-shadow and option-looking path cases in CI.
+- Apply the same isolated-Python and scrubbed-environment boundary to installed
+  wheel installation and smoke checks, their child process,
+  metadata/assertion helpers, and installed console commands. CI plants a
+  hostile module beside the copied smoke script and requires proof that it was
+  never imported.
 - Include the research landscape, installed-wheel audit smoke, and release
   identity verifier in the source distribution.
 
@@ -132,6 +173,21 @@ tag or GitHub release was created, and the version is intentionally not reused.
   explicit examples/defaults/runtime-value booleans and publish whether schema
   material and unmodeled-schema fingerprints are present, dictionary-guessable,
   and scoped to full named validation material or redacted modeled shape.
+- Parse JSON decimals without a binary-float round trip, preserve maxima parsed
+  from decimal tokens as canonical text in serializable v3 reports, and commit
+  exact decimal enum values to distinct fingerprints. Direct Python floats
+  retain their already-rounded shortest round-tripping representation.
+- Reject every report-shaped input with missing markers, malformed v3 fields,
+  or a legacy version instead of reinterpreting it as a raw schema. Preserve
+  annotation-named data nested under unsupported schema keywords in unmodeled
+  fingerprints, reject over-deep schemas cleanly, and terminal-escape controls
+  and bidirectional formatting in text diff output.
+- Add scanner-specific aggregate budgets for JSON nodes/material, tool
+  definitions, exposed and unexposed arguments, enum members, and
+  report-expanding control collections. Reject oversized files before parsing,
+  enforce the same ceilings across every public scanner entry point, recheck
+  generated reports, and bound loaded reports before Authority Diff indexes
+  them; CLI over-limit failures exit 2 without a traceback.
 
 ### Documentation
 

@@ -29,7 +29,13 @@ import re
 import sys
 import threading
 import unicodedata
-from types import FunctionType, MethodType
+from types import (
+    AsyncGeneratorType,
+    CoroutineType,
+    FunctionType,
+    GeneratorType,
+    MethodType,
+)
 
 
 # === roles a parameter value may play =====================================
@@ -298,9 +304,16 @@ def verb_risk(tool_name: str) -> Risk:
 
 # === per-parameter inference (safe-by-default, with confidence) ===========
 _SINK = re.compile(
-    r"(^to$|recipient|account|iban|^url$|_url$|endpoint|host|webhook|^path$|_path$|"
-    r"^file$|_file$|cmd|command|token|password|secret|credential|api[_-]?key)", re.I)
-_PAYLOAD = re.compile(r"(body|message|content|^text$|summary|reply|note|description)", re.I)
+    r"(^to$|_to$|recipient|account|iban|^url$|_url$|endpoint|host|webhook|"
+    r"^path$|_path$|^file$|_file$|cmd|command|token|password|secret|credential|"
+    r"api[_-]?key)",
+    re.I,
+)
+_SELECTOR = re.compile(r"(?:^|_)(?:id|ids|key|keys)$", re.I)
+_PAYLOAD = re.compile(
+    r"(?:^|_)(?:body|message|content|text|summary|reply|note|description)$",
+    re.I,
+)
 
 
 def infer_policy(p: Param):
@@ -316,11 +329,18 @@ def infer_policy(p: Param):
         if _PAYLOAD.search(p.name) or (p.type == "string" and (p.max_len or 0) > 200):
             return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
         return Policy.TYPED_BOUNDED, Confidence.HIGH
-    # --- no declaration: fall back to name-based inference (unchanged) ---
-    if p.type in ("number", "integer", "enum", "boolean"):
-        return Policy.TYPED_BOUNDED, Confidence.HIGH
+    # --- no declaration: fall back to conservative name-based inference ---
+    # Authority-bearing names win before broad type or payload rules.  A
+    # numeric account identifier is still an account selector, and names such
+    # as ``reply_to`` must not become authorable merely because another token
+    # resembles free text.  Generic ``*_id``/``*_key`` selectors remain locked
+    # but uncertain so consequential tools surface them in PolicySet.review.
     if p.type in ("email", "uri") or _SINK.search(p.name):
         return Policy.TRUSTED_FIXED, Confidence.HIGH
+    if _SELECTOR.search(p.name):
+        return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
+    if p.type in ("number", "integer", "enum", "boolean"):
+        return Policy.TYPED_BOUNDED, Confidence.HIGH
     if _PAYLOAD.search(p.name) or (p.type == "string" and (p.max_len or 0) > 200):
         return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
     return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN   # locked-safe until you confirm
@@ -402,8 +422,8 @@ class Decision:
 class ConfirmationRequest:
     """Immutable description of the exact private action awaiting approval.
 
-    ``arguments_json`` is the canonical ASCII-escaped JSON encoding of the same
-    isolated argument snapshot the runner will execute. Confirmation UIs
+    ``arguments_json`` is the exact-order ASCII-escaped JSON encoding of the
+    same isolated argument snapshot the runner will execute. Confirmation UIs
     should parse and render it as structured fields, not inject it into markup.
     ``action_id`` commits that exact encoding to the frozen registration,
     effective risk, and executable.
@@ -453,7 +473,16 @@ def _same_authority_value(proposed: Any, trusted: Any) -> bool:
     if type(proposed) in (str, bytes, bool, int):
         return proposed == trusted
     if type(proposed) is float:
-        return math.isfinite(proposed) and proposed == trusted
+        if not (math.isfinite(proposed) and math.isfinite(trusted)):
+            return False
+        if proposed != trusted:
+            return False
+        # Python equality collapses the observably distinct JSON numbers 0.0
+        # and -0.0.  Preserve the sign bit at this authority boundary.
+        return proposed != 0.0 or math.copysign(1.0, proposed) == math.copysign(
+            1.0,
+            trusted,
+        )
     if type(proposed) in (list, tuple):
         return len(proposed) == len(trusted) and all(
             _same_authority_value(left, right)
@@ -462,13 +491,24 @@ def _same_authority_value(proposed: Any, trusted: Any) -> bool:
     if type(proposed) is dict:
         if not all(type(key) is str for key in proposed):
             return proposed is trusted
-        if proposed.keys() != trusted.keys():
+        # Keyword invocation and application code can observe insertion order;
+        # dict-keys equality is set-like, so compare the ordered key sequence.
+        if tuple(proposed) != tuple(trusted):
             return False
         return all(
             _same_authority_value(proposed[key], trusted[key])
             for key in proposed
         )
     return proposed is trusted
+
+
+def _safe_reason_text(value: str) -> str:
+    """Escape controls and bidi/non-ASCII text before it reaches a reason."""
+
+    try:
+        return json.dumps(value, ensure_ascii=True)[1:-1]
+    except Exception:
+        return "<unrenderable>"
 
 
 def _has_lone_surrogate(value: str) -> bool:
@@ -483,7 +523,80 @@ MAX_JSON_DEPTH = 64
 MAX_JSON_INTEGER_DIGITS = 512
 """Maximum decimal digits accepted for an integer at a runtime boundary."""
 
+MAX_JSON_NODES = 100_000
+"""Maximum values plus object keys retained in one JSON snapshot."""
+
+MAX_JSON_MATERIAL_BYTES = 8 * 1024 * 1024
+"""Maximum conservative serialized material charged to one JSON snapshot."""
+
 _MAX_JSON_INTEGER_ABS = 10 ** MAX_JSON_INTEGER_DIGITS
+
+
+class _JSONSnapshotBudgetExceeded(ValueError):
+    """Internal signal that a plain-JSON snapshot exceeded a resource bound."""
+
+
+class _JSONSnapshotBudget:
+    """Incremental node/material budget shared by one logical snapshot."""
+
+    __slots__ = ("remaining_nodes", "remaining_material_bytes")
+
+    def __init__(self) -> None:
+        if (
+            type(MAX_JSON_NODES) is not int
+            or MAX_JSON_NODES < 1
+            or type(MAX_JSON_MATERIAL_BYTES) is not int
+            or MAX_JSON_MATERIAL_BYTES < 0
+        ):
+            raise _JSONSnapshotBudgetExceeded(
+                "plain-JSON snapshot limits are invalid"
+            )
+        self.remaining_nodes = MAX_JSON_NODES
+        self.remaining_material_bytes = MAX_JSON_MATERIAL_BYTES
+
+    def consume_material(self, amount: int) -> None:
+        self.remaining_material_bytes -= amount
+        if self.remaining_material_bytes < 0:
+            raise _JSONSnapshotBudgetExceeded(
+                "plain-JSON snapshot exceeds the serialized-material limit"
+            )
+
+    def consume_node(self) -> None:
+        self.remaining_nodes -= 1
+        if self.remaining_nodes < 0:
+            raise _JSONSnapshotBudgetExceeded(
+                "plain-JSON snapshot exceeds the total node limit"
+            )
+        # One byte conservatively covers an adjacent comma/colon or a scalar's
+        # structural position. Containers add their second bracket below.
+        self.consume_material(1)
+
+    def consume_text(self, value: str) -> None:
+        """Charge conservative ASCII-escaped JSON bytes incrementally.
+
+        The walk stops as soon as the remaining budget is exceeded. This keeps
+        an oversized single string from allocating another full-size byte
+        buffer merely to discover that it cannot cross the boundary.
+        """
+
+        # Opening and closing JSON quotes. Non-ASCII code points are charged as
+        # the ``ensure_ascii=True`` form used by runtime commitments: six bytes
+        # for one BMP escape or twelve for a surrogate pair.
+        self.consume_material(2)
+        for character in value:
+            codepoint = ord(character)
+            if 0xD800 <= codepoint <= 0xDFFF:
+                raise ValueError("lone surrogates are not valid tool-call text")
+            if codepoint <= 0x1F or codepoint == 0x7F:
+                self.consume_material(6)
+            elif codepoint in (0x22, 0x5C):
+                self.consume_material(2)
+            elif codepoint <= 0x7F:
+                self.consume_material(1)
+            elif codepoint <= 0xFFFF:
+                self.consume_material(6)
+            else:
+                self.consume_material(12)
 
 
 def _snapshot_json_value(
@@ -491,57 +604,82 @@ def _snapshot_json_value(
     seen: set[int] | None = None,
     *,
     _depth: int = 0,
+    _budget: _JSONSnapshotBudget | None = None,
 ) -> Any:
     """Copy one provider-shaped value without invoking application methods.
 
     Lone UTF-16 surrogates are rejected at the boundary. They are not Unicode
     scalar values and otherwise produce encoder/UI-dependent behavior. JSON
-    is also bounded to :data:`MAX_JSON_DEPTH` containers per path and
-    :data:`MAX_JSON_INTEGER_DIGITS` decimal integer digits so later recursive
-    checks and canonical serialization cannot escape as runtime exceptions.
+    is also bounded to :data:`MAX_JSON_DEPTH` containers per path,
+    :data:`MAX_JSON_INTEGER_DIGITS` decimal integer digits,
+    :data:`MAX_JSON_NODES` total values/object keys, and
+    :data:`MAX_JSON_MATERIAL_BYTES` conservative serialized material so later
+    recursive checks and canonical serialization cannot escape as runtime
+    exceptions.
     """
 
+    budget = _JSONSnapshotBudget() if _budget is None else _budget
+    budget.consume_node()
     if type(value) is str:
-        if _has_lone_surrogate(value):
-            raise ValueError("lone surrogates are not valid tool-call text")
+        budget.consume_text(value)
         return value
-    if value is None or type(value) is bool:
+    if value is None:
+        budget.consume_material(4)
+        return value
+    if type(value) is bool:
+        budget.consume_material(4 if value else 5)
         return value
     if type(value) is int:
         if not (-_MAX_JSON_INTEGER_ABS < value < _MAX_JSON_INTEGER_ABS):
             raise ValueError("tool-call integers exceed the portable JSON limit")
+        budget.consume_material(len(str(value)))
         return value
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError("non-finite numbers are not valid tool-call JSON")
+        # CPython's finite binary-float rendering is much shorter; 32 bytes is
+        # a portable conservative charge that avoids formatting just to count.
+        budget.consume_material(32)
         return value
     if type(value) not in (list, dict):
         raise TypeError("tool calls must contain only JSON-compatible values")
     if _depth >= MAX_JSON_DEPTH:
         raise ValueError("tool-call JSON exceeds the maximum nesting depth")
+    budget.consume_material(1)  # the second list/object bracket
 
+    # Plain JSON is a tree, not an object graph.  Keep every container identity
+    # for the whole walk (rather than only the active recursion path) so a
+    # compact Python DAG cannot be expanded exponentially while it is copied.
+    # Equal subtrees decoded from wire JSON remain valid because they are
+    # distinct list/dict instances.
     seen = set() if seen is None else seen
     identity = id(value)
     if identity in seen:
-        raise ValueError("cyclic tool-call values are not supported")
+        raise ValueError("cyclic or aliased tool-call values are not supported")
     seen.add(identity)
-    try:
-        if type(value) is list:
-            return [
-                _snapshot_json_value(item, seen, _depth=_depth + 1)
-                for item in value
-            ]
-        if not all(
-            type(key) is str and not _has_lone_surrogate(key)
-            for key in value
-        ):
+    if type(value) is list:
+        return [
+            _snapshot_json_value(
+                item,
+                seen,
+                _depth=_depth + 1,
+                _budget=budget,
+            )
+            for item in value
+        ]
+    copied: dict[str, Any] = {}
+    for key, item in value.items():
+        if type(key) is not str:
             raise TypeError("tool-call object keys must be strings")
-        return {
-            key: _snapshot_json_value(item, seen, _depth=_depth + 1)
-            for key, item in value.items()
-        }
-    finally:
-        seen.remove(identity)
+        budget.consume_node()
+        budget.consume_text(key)
+        copied[key] = _snapshot_json_value(
+            item,
+            seen,
+            _depth=_depth + 1,
+            _budget=budget,
+        )
+    return copied
 
 
 def _snapshot_tool_call(
@@ -560,9 +698,19 @@ def _snapshot_tool_call(
         raise TypeError("tool call input must be a dictionary")
     if trusted_args is not None and type(trusted_args) is not dict:
         raise TypeError("trusted_args must be a dictionary")
+    budget = _JSONSnapshotBudget()
+    budget.consume_node()
+    budget.consume_text(name)
     return (
-        {"name": name, "input": _snapshot_json_value(tool_input)},
-        None if trusted_args is None else _snapshot_json_value(trusted_args),
+        {
+            "name": name,
+            "input": _snapshot_json_value(tool_input, _budget=budget),
+        },
+        (
+            None
+            if trusted_args is None
+            else _snapshot_json_value(trusted_args, _budget=budget)
+        ),
     )
 
 
@@ -721,12 +869,19 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
     if type(provenance) is not dict:
         return Decision(False, "argument provenance must be a plain dictionary")
     try:
-        args = _snapshot_json_value(args)
+        argument_budget = _JSONSnapshotBudget()
+        argument_budget.consume_node()
+        argument_budget.consume_text(tool)
+        args = _snapshot_json_value(args, _budget=argument_budget)
     except Exception:
         return Decision(
             False,
             "tool arguments must contain only finite, plain JSON values",
         )
+    try:
+        provenance = _snapshot_json_value(provenance)
+    except Exception:
+        return Decision(False, "argument provenance is malformed")
     if not all(
         type(name) is str
         and type(source) is str
@@ -734,47 +889,70 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
         for name, source in provenance.items()
     ):
         return Decision(False, "argument provenance is malformed")
-    provenance = dict(provenance)
-    current_binding, current_version = _policy_registry_source(reg)
-    expected_binding = getattr(ps, "registry_binding", None)
-    expected_version = getattr(ps, "registry_version", None)
-    if expected_binding is not None and expected_binding != current_binding:
-        return Decision(False, "registry and policy registration diverged")
-    if expected_version is not None and expected_version != current_version:
-        return Decision(False, "registry and policy registration diverged")
+    try:
+        if type(reg) is _FrozenRegistry and type(ps) is _FrozenPolicySet:
+            runtime_registry = reg
+            runtime_policy = ps
+        else:
+            if type(reg) is not Registry or type(ps) is not PolicySet:
+                raise TypeError("runtime inputs must be exact registry and policy values")
+            runtime_registry = _freeze_registry(reg, validate_callable=False)
+            current_binding = _material_sha256(
+                _registry_material(runtime_registry)
+            )
+            if (
+                ps.registry_binding != current_binding
+                or ps.registry_version != reg.version
+            ):
+                return Decision(False, "registry and policy registration diverged")
+            runtime_policy = _freeze_policy_set(ps, runtime_registry)
+    except Exception:
+        return Decision(
+            False,
+            "registry or policy is malformed; rebuild the policy from the registry",
+        )
+    reg = runtime_registry
+    ps = runtime_policy
+    display_tool = _safe_reason_text(tool)
     if tool not in reg.tools:
-        return Decision(False, f"verb '{tool}' is not in the registry")
+        return Decision(False, f"verb '{display_tool}' is not in the registry")
     by_name = {p.name: p for p in reg.tools[tool].params}
     implementation = reg.tools[tool].fn
     if implementation is not None:
         try:
             _validate_callable_signature(tool, set(by_name), implementation)
         except Exception as exc:
-            return Decision(False, f"registered implementation is incompatible: {exc}")
-    pol = ps.policy[tool]
-    for name, param in by_name.items():
-        if name not in args:
-            if param.required:
-                return Decision(False, f"required param '{name}' is missing")
             return Decision(
                 False,
-                f"param '{name}' has an implicit optional default; "
+                "registered implementation is incompatible: "
+                + _safe_reason_text(str(exc)),
+            )
+    pol = ps.policy[tool]
+    for name, param in by_name.items():
+        display_name = _safe_reason_text(name)
+        if name not in args:
+            if param.required:
+                return Decision(False, f"required param '{display_name}' is missing")
+            return Decision(
+                False,
+                f"param '{display_name}' has an implicit optional default; "
                 "materialize and validate it before gating",
             )
     for name, val in args.items():
+        display_name = _safe_reason_text(name)
         if name not in pol:
-            return Decision(False, f"unknown param '{name}'")
+            return Decision(False, f"unknown param '{display_name}'")
         # Structural check first: a mixed-script value in a locked sink is a
         # homograph impersonation regardless of declared provenance.
         if pol[name] is Policy.TRUSTED_FIXED and _contains_mixed_script(val):
-            return Decision(False, f"param '{name}' mixes scripts (homograph); rejected as impersonation")
+            return Decision(False, f"param '{display_name}' mixes scripts (homograph); rejected as impersonation")
         prov = provenance.get(name, "data")
         if pol[name] is Policy.TRUSTED_FIXED and prov == "data":
-            return Decision(False, f"param '{name}' is a locked sink; data may not author it")
+            return Decision(False, f"param '{display_name}' is a locked sink; data may not author it")
         # Provenance decides who may author the value; it never waives the
         # registered type, enum, length, or numeric cap.
         if not _type_ok(by_name[name], val):
-            return Decision(False, f"param '{name}' failed its type/bounds check")
+            return Decision(False, f"param '{display_name}' failed its type/bounds check")
     if tool in ps.confirm:
         return Decision(True, f"risk policy ({ps.risk[tool].value}); needs human confirmation",
                         needs_confirm=True)
@@ -820,6 +998,17 @@ def _json_leaf_token(value: Any) -> tuple[str, Any] | None:
     return None
 
 
+MAX_LEDGER_ENTRIES = 10_000
+"""Maximum retained exact/search index entries in one provenance session."""
+
+MAX_LEDGER_UTF8_BYTES = 8 * 1024 * 1024
+"""Maximum retained UTF-8 text material in one provenance session."""
+
+
+class _LedgerCapacityExceeded(ValueError):
+    """Internal signal that a session ledger must be replaced, not retried."""
+
+
 @dataclass
 class ProvenanceLedger:
     """Remembers values that originated from tool results within one session.
@@ -850,6 +1039,11 @@ class ProvenanceLedger:
     -- attacker [at] evil [dot] com, a base64 blob, a translated string -- has
     no verbatim substring in the tainted text, so it escapes. That needs real
     dataflow tracking through transforms (CaMeL's interpreter), not matching.
+
+    Retention is fail-closed and bounded. Once either the entry or UTF-8 text
+    budget is exhausted, the attempted write is not partially committed, the
+    ledger becomes saturated, and every later call is denied. Start a new
+    application session with a fresh ledger; never evict old taint in place.
     """
     _tainted: set[tuple[str, Any]] = field(
         default_factory=set, init=False, repr=False, compare=False
@@ -857,12 +1051,14 @@ class ProvenanceLedger:
     _tainted_containers: set[tuple[str, str]] = field(
         default_factory=set, init=False, repr=False, compare=False
     )
-    _blobs: list[str] = field(
-        default_factory=list, init=False, repr=False, compare=False
+    _blobs: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
     )
-    _canon_blobs: list[str] = field(
-        default_factory=list, init=False, repr=False, compare=False
+    _canon_blobs: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
     )
+    _utf8_bytes: int = field(default=0, init=False, repr=False, compare=False)
+    _saturated: bool = field(default=False, init=False, repr=False, compare=False)
     _version: int = field(default=0, init=False, repr=False, compare=False)
     _lock: threading.RLock = field(
         default_factory=threading.RLock,
@@ -876,28 +1072,109 @@ class ProvenanceLedger:
         with self._lock:
             return self._version
 
+    @property
+    def saturated(self) -> bool:
+        """Whether capacity exhaustion has permanently closed this session."""
+
+        with self._lock:
+            return self._saturated
+
+    def _mark_saturated(self) -> None:
+        if not self._saturated:
+            self._saturated = True
+            self._version += 1
+        raise _LedgerCapacityExceeded(
+            "provenance ledger capacity exhausted; start a new session and "
+            "do not retry the already-invoked tool"
+        )
+
     def record_result(self, result: Any) -> None:
-        """Register every typed JSON leaf, container, and object key."""
+        """Atomically register typed leaves, containers, and object keys."""
 
         normalized_result = _snapshot_json_value(result)
-        taint_values = list(_iter_json_taint_values(normalized_result))
-        container_tokens = {
-            token
-            for container in _iter_json_containers(normalized_result)
-            if (token := _json_container_token(container)) is not None
-        }
         with self._lock:
-            for leaf, is_key in taint_values:
+            if self._saturated:
+                self._mark_saturated()
+
+            pending_tainted: set[tuple[str, Any]] = set()
+            pending_containers: set[tuple[str, str]] = set()
+            pending_blobs: set[str] = set()
+            pending_canon_blobs: set[str] = set()
+            pending_utf8_bytes = 0
+
+            def reserve(text: str) -> None:
+                nonlocal pending_utf8_bytes
+                pending_utf8_bytes += len(text.encode("utf-8"))
+
+            def capacity_exceeded() -> bool:
+                pending_entries = (
+                    len(pending_tainted)
+                    + len(pending_containers)
+                    + len(pending_blobs)
+                    + len(pending_canon_blobs)
+                )
+                retained_entries = (
+                    len(self._tainted)
+                    + len(self._tainted_containers)
+                    + len(self._blobs)
+                    + len(self._canon_blobs)
+                )
+                return (
+                    retained_entries + pending_entries > MAX_LEDGER_ENTRIES
+                    or self._utf8_bytes + pending_utf8_bytes
+                    > MAX_LEDGER_UTF8_BYTES
+                )
+
+            if capacity_exceeded():
+                self._mark_saturated()
+
+            for leaf, is_key in _iter_json_taint_values(normalized_result):
                 token = _json_leaf_token(leaf)
                 if token is None:
                     continue
-                self._tainted.add(token)
+                if token not in self._tainted and token not in pending_tainted:
+                    pending_tainted.add(token)
+                    if type(leaf) is str:
+                        reserve(leaf)
+                if capacity_exceeded():
+                    self._mark_saturated()
                 if type(leaf) is str and (
                     not is_key or _has_risk_shaped_form(leaf)
                 ):
-                    self._blobs.append(leaf)
-                    self._canon_blobs.append(_canonical(leaf))
-            self._tainted_containers.update(container_tokens)
+                    if leaf not in self._blobs and leaf not in pending_blobs:
+                        pending_blobs.add(leaf)
+                        reserve(leaf)
+                    if capacity_exceeded():
+                        self._mark_saturated()
+                    canonical = _canonical(leaf)
+                    if (
+                        canonical not in self._canon_blobs
+                        and canonical not in pending_canon_blobs
+                    ):
+                        pending_canon_blobs.add(canonical)
+                        reserve(canonical)
+                if capacity_exceeded():
+                    self._mark_saturated()
+
+            for container in _iter_json_containers(normalized_result):
+                token = _json_container_token(container)
+                if (
+                    token is not None
+                    and token not in self._tainted_containers
+                    and token not in pending_containers
+                ):
+                    pending_containers.add(token)
+                    reserve(token[1])
+                if capacity_exceeded():
+                    self._mark_saturated()
+
+            # Commit only after every candidate fits. Capacity failure above
+            # leaves all taint/search stores unchanged and closes the session.
+            self._tainted.update(pending_tainted)
+            self._tainted_containers.update(pending_containers)
+            self._blobs.update(pending_blobs)
+            self._canon_blobs.update(pending_canon_blobs)
+            self._utf8_bytes += pending_utf8_bytes
             self._version += 1
 
     def is_tainted(self, value: Any) -> bool:
@@ -909,11 +1186,16 @@ class ProvenanceLedger:
         tainted so the direct dispatch API fails closed instead of recursing.
         """
 
+        with self._lock:
+            if self._saturated:
+                return True
         try:
             normalized_value = _snapshot_json_value(value)
         except Exception:
             return True
         with self._lock:
+            if self._saturated:
+                return True
             return self._is_tainted_value(normalized_value, set(), 0)
 
     def _is_tainted_value(
@@ -995,9 +1277,12 @@ def _ledger_internal_binding(ledger: ProvenanceLedger) -> tuple[int, ...]:
     if (
         type(ledger._tainted) is not set
         or type(ledger._tainted_containers) is not set
-        or type(ledger._blobs) is not list
-        or type(ledger._canon_blobs) is not list
+        or type(ledger._blobs) is not set
+        or type(ledger._canon_blobs) is not set
         or type(ledger._lock) is not _RLOCK_TYPE
+        or type(ledger._utf8_bytes) is not int
+        or ledger._utf8_bytes < 0
+        or type(ledger._saturated) is not bool
         or type(ledger._version) is not int
         or ledger._version < 0
     ):
@@ -1125,6 +1410,47 @@ def _iter_json_containers(obj: Any, seen: set[int] | None = None):
         seen.remove(identity)
 
 
+def _registered_param_names_for_early_rejection(
+    registry: Any,
+    tool_name: str,
+) -> tuple[bool, frozenset[str]] | None:
+    """Return structurally obvious registered names without trusting policy.
+
+    This is only an availability fast path: unknown arguments can be rejected
+    before each one is compared with ledger history. Any malformed or
+    ambiguous registration falls through to the full gate, which remains the
+    authority decision point.
+    """
+
+    try:
+        if type(registry) is Registry:
+            if type(registry.tools) is not dict:
+                return None
+            if tool_name not in registry.tools:
+                return False, frozenset()
+            tool = registry.tools.get(tool_name)
+            if type(tool) is not Tool or type(tool.params) is not list:
+                return None
+            if not all(
+                type(param) is Param
+                and type(param.name) is str
+                and bool(param.name)
+                for param in tool.params
+            ):
+                return None
+            return True, frozenset(param.name for param in tool.params)
+        if type(registry) is _FrozenRegistry:
+            if tool_name not in registry.tools:
+                return False, frozenset()
+            tool = registry.tools.get(tool_name)
+            if type(tool) is not _FrozenTool:
+                return None
+            return True, frozenset(param.name for param in tool.params)
+    except Exception:
+        return None
+    return None
+
+
 # === drop-in dispatcher (the 5-line integration point) ===================
 def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
              trusted_args: dict | None = None,
@@ -1153,6 +1479,14 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
         trusted_args = {}
     if type(trusted_args) is not dict:
         return Decision(False, "trusted_args must be a plain dictionary")
+    if ledger is not None:
+        if type(ledger) is not ProvenanceLedger:
+            return Decision(False, "ledger must be an exact ProvenanceLedger")
+        if ledger.saturated:
+            return Decision(
+                False,
+                "provenance ledger capacity exhausted; start a new session",
+            )
     try:
         approved_call, approved_trusted_args = _snapshot_tool_call(
             tool_use,
@@ -1166,6 +1500,23 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
     tool = approved_call["name"]
     args = approved_call["input"]
     trusted_args = approved_trusted_args or {}
+    early_registration = _registered_param_names_for_early_rejection(
+        reg,
+        tool,
+    )
+    if early_registration is not None:
+        registered_tool, registered_param_names = early_registration
+        if not registered_tool:
+            return Decision(
+                False,
+                f"verb '{_safe_reason_text(tool)}' is not in the registry",
+            )
+        for name in args:
+            if name not in registered_param_names:
+                return Decision(
+                    False,
+                    f"unknown param '{_safe_reason_text(name)}'",
+                )
     provenance = {}
     for n in args:
         if ledger is not None and ledger.is_tainted(args.get(n)):
@@ -1178,6 +1529,11 @@ def dispatch(reg: Registry, ps: PolicySet, tool_use: dict,
             provenance[n] = "trusted" if matches_trusted else "data"
         else:
             provenance[n] = "data"
+    if ledger is not None and ledger.saturated:
+        return Decision(
+            False,
+            "provenance ledger capacity exhausted; start a new session",
+        )
     return gate(reg, ps, tool, args, provenance)
 
 
@@ -1843,13 +2199,19 @@ def _live_policy_state(
 
 
 def _canonical_arguments(arguments: dict[str, Any]) -> str:
-    """Canonical, ASCII-only JSON for safe transport to confirmation UIs."""
+    """Exact-order, ASCII-only JSON for safe transport to confirmation UIs.
+
+    Object insertion order is preserved because Python keyword invocation can
+    observe it.  Numeric spelling also preserves the distinction between
+    ``0.0`` and ``-0.0``.  The resulting action commitment therefore describes
+    the exact isolated argument value that can be passed to the callable.
+    """
 
     return json.dumps(
         arguments,
         ensure_ascii=True,
         allow_nan=False,
-        sort_keys=True,
+        sort_keys=False,
         separators=(",", ":"),
     )
 
@@ -1893,9 +2255,20 @@ def _confirmation_request(
 
 def _is_async_callable(implementation: Callable[..., Any]) -> bool:
     shape = _raw_callable_shape("<async-check>", implementation)
-    return inspect.iscoroutinefunction(shape.target) or inspect.isasyncgenfunction(
-        shape.target
+    return bool(
+        shape.target.__code__.co_flags
+        & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR)
     )
+
+
+def _is_native_awaitable(value: Any) -> bool:
+    """Recognize only interpreter-native awaitables without protocol lookup."""
+
+    if type(value) is CoroutineType:
+        return True
+    if type(value) is not GeneratorType:
+        return False
+    return bool(value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE)
 
 
 def _close_awaitable(value: Any) -> None:
@@ -1909,10 +2282,11 @@ def _close_awaitable(value: Any) -> None:
     to suppress resource warnings; other awaitables are rejected untouched.
     """
 
-    if not (inspect.iscoroutine(value) or inspect.isgenerator(value)):
-        return
     try:
-        value.close()
+        if type(value) is CoroutineType:
+            CoroutineType.close(value)
+        elif type(value) is GeneratorType:
+            GeneratorType.close(value)
     except Exception:
         pass
 
@@ -1920,8 +2294,10 @@ def _close_awaitable(value: Any) -> None:
 def _close_async_generator(value: Any) -> None:
     """Close an async-generator result even when called inside a running loop."""
 
+    if type(value) is not AsyncGeneratorType:
+        return
     try:
-        close_awaitable = value.aclose()
+        close_awaitable = AsyncGeneratorType.aclose(value)
     except Exception:
         return
 
@@ -2032,6 +2408,11 @@ class GuardedToolRunner:
                 False,
                 "provenance ledger internals changed; rebuild the guarded runner",
             )
+        if self._session_ledger.saturated:
+            return Decision(
+                False,
+                "provenance ledger capacity exhausted; start a new session",
+            )
         if _live_registry_state(self.registry) != self._bundle.source_state:
             return Decision(False, "registry changed; rebuild the guarded runner")
         if self._source_policy is not None and _live_policy_state(
@@ -2051,51 +2432,95 @@ class GuardedToolRunner:
         """Invoke and publish while the caller holds ``approved_ledger._lock``."""
 
         tool_name = approved_call["name"]
+        display_tool = _safe_reason_text(tool_name)
         try:
             result = implementation(**approved_call["input"])
         except Exception:
             return ExecutionResult(
-                Decision(False, f"verb '{tool_name}' raised during invocation"),
+                Decision(False, f"verb '{display_tool}' raised during invocation"),
                 executed=False,
                 invoked=True,
                 contract_violation="invocation_exception",
             )
-        if inspect.isasyncgen(result):
-            _close_async_generator(result)
-            return ExecutionResult(
-                Decision(
-                    False,
-                    f"verb '{tool_name}' returned an async generator; "
-                    "the synchronous runner rejected the result",
-                ),
-                executed=False,
-                invoked=True,
-                contract_violation="async_generator_result",
-            )
-        if inspect.isawaitable(result):
-            _close_awaitable(result)
-            return ExecutionResult(
-                Decision(
-                    False,
-                    f"verb '{tool_name}' returned an awaitable; "
-                    "the synchronous runner rejected the result",
-                ),
-                executed=False,
-                invoked=True,
-                contract_violation="awaitable_result",
-            )
         try:
             approved_result = _snapshot_json_value(result)
-            approved_ledger.record_result(approved_result)
-        except Exception:
+        except _JSONSnapshotBudgetExceeded:
             return ExecutionResult(
                 Decision(
                     False,
-                    f"verb '{tool_name}' returned a non-plain JSON result",
+                    f"verb '{display_tool}' returned a result beyond the "
+                    "plain-JSON snapshot budget; do not retry this "
+                    "already-invoked tool",
                 ),
                 executed=False,
                 invoked=True,
                 contract_violation="unsupported_result",
+            )
+        except Exception:
+            # Validate the exact plain-JSON boundary before classifying native
+            # asynchronous objects.  ABC/inspect predicates use protocol and
+            # ``__class__`` machinery on arbitrary objects; a rejected result
+            # must not get a second attacker-controlled callback opportunity.
+            if type(result) is AsyncGeneratorType:
+                _close_async_generator(result)
+                return ExecutionResult(
+                    Decision(
+                        False,
+                        f"verb '{display_tool}' returned an async generator; "
+                        "the synchronous runner rejected the result; do not "
+                        "retry this already-invoked tool",
+                    ),
+                    executed=False,
+                    invoked=True,
+                    contract_violation="async_generator_result",
+                )
+            if _is_native_awaitable(result):
+                _close_awaitable(result)
+                return ExecutionResult(
+                    Decision(
+                        False,
+                        f"verb '{display_tool}' returned an awaitable; "
+                        "the synchronous runner rejected the result; do not "
+                        "retry this already-invoked tool",
+                    ),
+                    executed=False,
+                    invoked=True,
+                    contract_violation="awaitable_result",
+                )
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{display_tool}' returned a non-plain JSON result; "
+                    "do not retry this already-invoked tool",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="unsupported_result",
+            )
+        try:
+            approved_ledger.record_result(approved_result)
+        except _LedgerCapacityExceeded:
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{display_tool}' completed but the provenance "
+                    "ledger capacity was exhausted; start a new session and "
+                    "do not retry this already-invoked tool",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="ledger_capacity_exceeded",
+            )
+        except Exception:
+            return ExecutionResult(
+                Decision(
+                    False,
+                    f"verb '{display_tool}' result could not be recorded "
+                    "safely in the provenance ledger",
+                ),
+                executed=False,
+                invoked=True,
+                contract_violation="ledger_recording_failure",
             )
         return ExecutionResult(
             decision,
@@ -2140,17 +2565,18 @@ class GuardedToolRunner:
                 return ExecutionResult(decision, executed=False)
 
             tool_name = approved_call["name"]
+            display_tool = _safe_reason_text(tool_name)
             implementation = self._bundle.registry.tools[tool_name].fn
             if implementation is None:
                 return ExecutionResult(
-                    Decision(False, f"verb '{tool_name}' has no implementation"),
+                    Decision(False, f"verb '{display_tool}' has no implementation"),
                     executed=False,
                 )
             if _is_async_callable(implementation):
                 return ExecutionResult(
                     Decision(
                         False,
-                        f"verb '{tool_name}' has an async implementation; "
+                        f"verb '{display_tool}' has an async implementation; "
                         "the synchronous runner rejects it",
                     ),
                     executed=False,
@@ -2183,21 +2609,23 @@ class GuardedToolRunner:
         # Confirmation is trusted application/UI code and may block. It runs
         # outside the session lock; the complete action is revalidated below.
         confirmation = confirm(request)
-        if inspect.isasyncgen(confirmation):
+        if confirmation is True:
+            pass
+        elif type(confirmation) is AsyncGeneratorType:
             _close_async_generator(confirmation)
             return ExecutionResult(
                 Decision(False, "confirmation callback must be synchronous"),
                 executed=False,
                 contract_violation="awaitable_confirmation",
             )
-        if inspect.isawaitable(confirmation):
+        elif _is_native_awaitable(confirmation):
             _close_awaitable(confirmation)
             return ExecutionResult(
                 Decision(False, "confirmation callback must be synchronous"),
                 executed=False,
                 contract_violation="awaitable_confirmation",
             )
-        if confirmation is not True:
+        else:
             return ExecutionResult(decision, executed=False)
 
         with approved_ledger._lock:

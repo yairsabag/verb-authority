@@ -57,6 +57,10 @@ def _write_wheel(
     metadata_name: str = PROJECT_NAME,
     metadata_version: str = PROJECT_VERSION,
     suffix: str = "py3-none-any",
+    root_is_purelib: str = "true",
+    tags: tuple[str, ...] = ("py3-none-any",),
+    wheel_dist_info_name: str | None = None,
+    include_wheel_metadata: bool = True,
 ) -> Path:
     wheel_path = dist / f"{ARTIFACT_NAME}-{filename_version}-{suffix}.whl"
     metadata_member = (
@@ -67,6 +71,22 @@ def _write_wheel(
             metadata_member,
             _metadata(name=metadata_name, version=metadata_version),
         )
+        if include_wheel_metadata:
+            dist_info_name = wheel_dist_info_name or (
+                f"{ARTIFACT_NAME}-{filename_version}.dist-info"
+            )
+            wheel.writestr(
+                f"{dist_info_name}/WHEEL",
+                "\n".join(
+                    (
+                        "Wheel-Version: 1.0",
+                        "Generator: release-verifier-test",
+                        f"Root-Is-Purelib: {root_is_purelib}",
+                        *(f"Tag: {tag}" for tag in tags),
+                        "",
+                    )
+                ),
+            )
     return wheel_path
 
 
@@ -135,6 +155,74 @@ def test_second_wheel_is_rejected(tmp_path):
         match=r"found 2 wheel\(s\) and 1 sdist\(s\)",
     ):
         verify_artifacts(project_path, wheel.parent)
+
+
+def test_non_universal_wheel_tag_is_rejected(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(dist, suffix="cp312-cp312-macosx_14_0_arm64")
+    _write_sdist(dist)
+
+    with pytest.raises(
+        VerificationError,
+        match="does not match the expected pure-Python artifact",
+    ):
+        verify_artifacts(project_path, dist)
+
+
+def test_internal_wheel_tag_must_match_universal_filename(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(
+        dist,
+        root_is_purelib="false",
+        tags=("cp312-cp312-macosx_14_0_arm64",),
+    )
+    _write_sdist(dist)
+
+    with pytest.raises(
+        VerificationError,
+        match="Root-Is-Purelib: true|compatibility tags",
+    ):
+        verify_artifacts(project_path, dist)
+
+
+def test_internal_wheel_tag_set_must_be_exact(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(
+        dist,
+        tags=("py3-none-any", "cp312-none-any"),
+    )
+    _write_sdist(dist)
+
+    with pytest.raises(VerificationError, match="compatibility tags"):
+        verify_artifacts(project_path, dist)
+
+
+def test_wheel_metadata_must_share_the_metadata_dist_info(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(dist, wheel_dist_info_name="other.dist-info")
+    _write_sdist(dist)
+
+    with pytest.raises(VerificationError, match="same dist-info directory"):
+        verify_artifacts(project_path, dist)
+
+
+def test_wheel_metadata_is_required(tmp_path):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _write_wheel(dist, include_wheel_metadata=False)
+    _write_sdist(dist)
+
+    with pytest.raises(VerificationError, match="exactly one dist-info/WHEEL"):
+        verify_artifacts(project_path, dist)
 
 
 def test_unexpected_release_directory_entry_is_rejected(tmp_path):

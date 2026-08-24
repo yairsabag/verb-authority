@@ -5,14 +5,16 @@ from pathlib import Path
 import pytest
 
 import verb_authority
+import verb_authority_scan as scanner
 from verb_authority_diff import (
     DIFF_VERSION,
     DiffError,
     diff_reports,
+    load_report_or_schema,
     main,
     render_text,
 )
-from verb_authority_scan import scan_documents
+from verb_authority_scan import load_json_path, scan_documents
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -150,6 +152,82 @@ def test_cli_fails_on_simultaneous_constraint_widening(tmp_path):
     assert exit_code == 2
     diff = json.loads(output_path.read_text(encoding="utf-8"))
     assert diff["summary"]["authority_increases"] == 3
+
+
+def test_decimal_constraints_above_float_precision_are_lossless(tmp_path):
+    before_path = tmp_path / "before-decimal.json"
+    after_path = tmp_path / "after-decimal.json"
+    output_path = tmp_path / "decimal-diff.json"
+    before_path.write_text(
+        '{"tools":[{"name":"set_policy","inputSchema":{"properties":'
+        '{"amount":{"type":"number","maximum":9007199254740992.0},'
+        '"mode":{"type":"number","enum":[9007199254740992.0]}}}}]}',
+        encoding="utf-8",
+    )
+    after_path.write_text(
+        '{"tools":[{"name":"set_policy","inputSchema":{"properties":'
+        '{"amount":{"type":"number","maximum":9007199254740993.0},'
+        '"mode":{"type":"number","enum":[9007199254740993.0]}}}}]}',
+        encoding="utf-8",
+    )
+
+    before_report = scan_documents([load_json_path(str(before_path))])
+    after_report = scan_documents([load_json_path(str(after_path))])
+    before_arguments = {
+        item["name"]: item for item in before_report["tools"][0]["arguments"]
+    }
+    after_arguments = {
+        item["name"]: item for item in after_report["tools"][0]["arguments"]
+    }
+
+    assert before_arguments["amount"]["constraints"]["maximum"] == (
+        "9007199254740992"
+    )
+    assert after_arguments["amount"]["constraints"]["maximum"] == (
+        "9007199254740993"
+    )
+    assert before_arguments["mode"]["constraints"]["enum"] != (
+        after_arguments["mode"]["constraints"]["enum"]
+    )
+    assert before_report["schema_fingerprint_sha256"] != (
+        after_report["schema_fingerprint_sha256"]
+    )
+
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-increase",
+            ]
+        )
+        == 2
+    )
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+    diff = json.loads(output_path.read_text(encoding="utf-8"))
+    assert diff["summary"]["authority_increases"] == 1
+    assert diff["summary"]["reviews"] == 1
+    assert {change["kind"] for change in diff["changes"]} == {
+        "maximum_changed",
+        "enum_changed",
+    }
 
 
 def test_cli_can_fail_closed_on_unmodeled_schema_review(tmp_path):
@@ -391,6 +469,29 @@ def test_annotation_only_changes_do_not_create_schema_drift_noise():
     assert diff["summary"]["changes"] == 0
 
 
+def test_annotation_named_data_inside_unknown_keyword_is_fingerprinted():
+    before = _single_argument_report(
+        {
+            "type": "object",
+            "discriminator": {"mapping": {"default": "#/A"}},
+        }
+    )
+    after = _single_argument_report(
+        {
+            "type": "object",
+            "discriminator": {"mapping": {"default": "#/B"}},
+        }
+    )
+
+    diff = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] != after[
+        "schema_fingerprint_sha256"
+    ]
+    assert diff["summary"]["reviews"] == 1
+    assert diff["changes"][0]["kind"] == "unmodeled_schema_changed"
+
+
 def test_duplicate_argument_names_are_rejected_before_indexing():
     before = _single_argument_report({"type": "number", "maximum": 100})
     after = copy.deepcopy(before)
@@ -415,6 +516,41 @@ def test_malformed_report_containers_raise_clean_diff_errors(malformation):
 
     with pytest.raises(DiffError):
         diff_reports(before, after)
+
+
+def test_diff_reports_rejects_over_budget_report_before_indexing(monkeypatch):
+    report = _single_argument_report({"type": "number", "maximum": 100})
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 10)
+
+    with pytest.raises(DiffError, match="total node limit"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize("output_format", ("text", "json"))
+def test_diff_cli_rejects_over_budget_report_without_traceback(
+    tmp_path, capsys, monkeypatch, output_format
+):
+    report = _single_argument_report({"type": "number", "maximum": 100})
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(report), encoding="utf-8")
+    after_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 10)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                output_format,
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "total node limit" in error
+    assert "Traceback" not in error
 
 
 def test_invalid_schema_fingerprint_is_rejected():
@@ -471,6 +607,232 @@ def test_cli_rejects_malformed_report_with_exit_two(tmp_path, capsys):
     stderr = capsys.readouterr().err
     assert "duplicate argument name" in stderr
     assert "Traceback" not in stderr
+
+
+def _replace_with_invalid_generator_raw_shape(report):
+    report.clear()
+    report.update(
+        {
+            "generator": "not-verb-authority",
+            "tools": [{"name": "set_value", "inputSchema": {}}],
+        }
+    )
+
+
+def _strip_report_header_but_keep_report_tool_markers(report):
+    tools = report["tools"]
+    report.clear()
+    report.update({"tools": tools, "inputSchema": {}})
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        (lambda report: report.pop("generator"), "report-shaped"),
+        (
+            lambda report: (
+                report.pop("report_version"),
+                report.update({"inputSchema": {}}),
+            ),
+            "unsupported report version",
+        ),
+        (lambda report: report.update({"report_version": 2}), "legacy report"),
+        (_replace_with_invalid_generator_raw_shape, "report-shaped"),
+        (_strip_report_header_but_keep_report_tool_markers, "report-shaped"),
+    ],
+    ids=(
+        "missing-generator",
+        "missing-version-hybrid",
+        "legacy-v2",
+        "invalid-generator-only",
+        "nested-report-tool-markers",
+    ),
+)
+def test_report_shaped_inputs_never_fall_through_to_raw_scanning(
+    tmp_path, mutation, message
+):
+    report = _single_argument_report({"type": "number", "maximum": 100})
+    mutation(report)
+    path = tmp_path / "report-shaped.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(DiffError, match=message):
+        load_report_or_schema(str(path), label="candidate")
+
+
+def _wrap_report_tool(wrapper, tool):
+    wrappers = {
+        "direct-tool": tool,
+        "top-level-list": [tool],
+        "tools-envelope": {"tools": [tool]},
+        "mcp-result": {"result": {"tools": [tool]}},
+        "atlas-sources": {"sources": [{"id": "source", "tools": [tool]}]},
+        "functions-envelope": {"functions": [tool]},
+        "openai-function": {
+            "tools": [{"type": "function", "function": tool}]
+        },
+    }
+    return wrappers[wrapper]
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    (
+        "direct-tool",
+        "top-level-list",
+        "tools-envelope",
+        "mcp-result",
+        "atlas-sources",
+        "functions-envelope",
+        "openai-function",
+    ),
+)
+@pytest.mark.parametrize("failure_flag", ("--fail-on-increase", "--fail-on-review"))
+def test_report_tool_sentinels_are_rejected_in_every_supported_envelope(
+    tmp_path, capsys, wrapper, failure_flag
+):
+    before_document = {
+        "tools": [
+            {
+                "name": "set_value",
+                "inputSchema": {
+                    "properties": {
+                        "recipient": {"type": "string", "format": "email"}
+                    }
+                },
+            }
+        ]
+    }
+    report = scan_documents([before_document])
+    candidate = _wrap_report_tool(wrapper, copy.deepcopy(report["tools"][0]))
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(before_document), encoding="utf-8")
+    after_path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path), failure_flag])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "report-shaped" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize("output_format", ("text", "json"))
+def test_cli_rejects_unknown_nested_report_number_without_traceback(
+    tmp_path, capsys, output_format
+):
+    before = _single_argument_report({"type": "number", "maximum": 100})
+    after = copy.deepcopy(before)
+    after["tools"][0]["risk_inference"]["extra_score"] = 1.5
+    before_path = tmp_path / "before-report.json"
+    after_path = tmp_path / "after-report.json"
+    output_path = tmp_path / "diff-output"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                output_format,
+                "--output",
+                str(output_path),
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "unsupported fields: extra_score" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda report: report["tools"][0]["declared_risk"].update(
+            {"extra_score": 1.5}
+        ),
+        lambda report: next(
+            argument
+            for argument in report["declared_controls"]["tools"][0]["arguments"]
+            if argument["name"] == "bidWei"
+        )["bounds"][0].update({"extra_score": 1.5}),
+        lambda report: report["declared_controls"]["tools"][0].update(
+            {"extra_score": 1.5}
+        ),
+    ),
+    ids=("declared-risk", "declared-bound", "declared-tool"),
+)
+def test_unknown_declared_control_fields_are_rejected(mutation):
+    report = _avp9_report()
+    mutation(report)
+
+    with pytest.raises(DiffError, match="unsupported fields: extra_score"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_diff_cli_rejects_overdeep_raw_schema_without_traceback(tmp_path, capsys):
+    nested = {"type": "string"}
+    for _ in range(140):
+        nested = {"allOf": [nested]}
+    document = {
+        "tools": [
+            {
+                "name": "set_value",
+                "inputSchema": {"properties": {"value": nested}},
+            }
+        ]
+    }
+    before_path = tmp_path / "deep-before.json"
+    after_path = tmp_path / "deep-after.json"
+    before_path.write_text(json.dumps(document), encoding="utf-8")
+    after_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path)])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "maximum nesting depth" in error
+    assert "Traceback" not in error
+
+
+def test_text_diff_escapes_terminal_and_bidi_controls():
+    before = _constraint_report(100, 40, ["safe"])
+    after = _constraint_report(200, 40, ["safe"])
+    hostile = "tool\r\x1b[31m\u202e\u2028\u2029"
+    hostile_argument = "amount\r\x1b\u202e\u2028\u2029"
+    hostile_type = "number\r\x1b\u202e\u2028\u2029"
+    for report in (before, after):
+        report["tools"][0]["name"] = hostile
+        amount = next(
+            argument
+            for argument in report["tools"][0]["arguments"]
+            if argument["name"] == "amount"
+        )
+        amount["name"] = hostile_argument
+    next(
+        argument
+        for argument in after["tools"][0]["arguments"]
+        if argument["name"] == hostile_argument
+    )["type"] = hostile_type
+
+    rendered = render_text(diff_reports(before, after))
+
+    assert "\r" not in rendered
+    assert "\x1b" not in rendered
+    assert "\u202e" not in rendered
+    assert "\u2028" not in rendered
+    assert "\u2029" not in rendered
+    assert "\\r" in rendered
+    assert "\\u001b" in rendered
+    assert "\\u202e" in rendered
+    assert "\\u2028" in rendered
+    assert "\\u2029" in rendered
 
 
 def test_declared_risk_effect_change_requires_review():

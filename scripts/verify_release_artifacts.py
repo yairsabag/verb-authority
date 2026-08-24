@@ -101,11 +101,46 @@ def _wheel_identity(wheel_path: Path) -> tuple[str, str]:
                     f"wheel must contain exactly one dist-info/METADATA; "
                     f"found {len(metadata_members)}"
                 )
+            wheel_members = [
+                member
+                for member in wheel.namelist()
+                if member.endswith(".dist-info/WHEEL")
+                and member.count("/") == 1
+            ]
+            if len(wheel_members) != 1:
+                raise VerificationError(
+                    "wheel must contain exactly one dist-info/WHEEL; "
+                    f"found {len(wheel_members)}"
+                )
+            metadata_root = metadata_members[0].rsplit("/", 1)[0]
+            wheel_root = wheel_members[0].rsplit("/", 1)[0]
+            if wheel_root != metadata_root:
+                raise VerificationError(
+                    "wheel METADATA and WHEEL must belong to the same "
+                    "dist-info directory"
+                )
             metadata = wheel.read(metadata_members[0]).decode("utf-8")
+            wheel_metadata = wheel.read(wheel_members[0]).decode("utf-8")
     except (BadZipFile, OSError, UnicodeDecodeError) as exc:
         raise VerificationError(
             f"cannot inspect wheel {wheel_path.name}: {exc}"
         ) from exc
+    parsed_wheel = Parser().parsestr(wheel_metadata)
+    purelib_values = parsed_wheel.get_all("Root-Is-Purelib", [])
+    if (
+        len(purelib_values) != 1
+        or purelib_values[0].strip().lower() != "true"
+    ):
+        raise VerificationError(
+            "wheel WHEEL metadata must contain exactly one "
+            "Root-Is-Purelib: true"
+        )
+    tags = [value.strip() for value in parsed_wheel.get_all("Tag", [])]
+    if len(tags) != 1 or set(tags) != {"py3-none-any"}:
+        raise VerificationError(
+            "wheel WHEEL compatibility tags must be exactly "
+            f"['py3-none-any']; found {tags}"
+        )
     return _metadata_identity(metadata, "wheel")
 
 
@@ -163,12 +198,12 @@ def verify_artifacts(
         )
 
     artifact_name = _artifact_distribution_name(expected_name)
-    expected_wheel_prefix = f"{artifact_name}-{expected_version}-"
+    expected_wheel_name = f"{artifact_name}-{expected_version}-py3-none-any.whl"
     expected_sdist_name = f"{artifact_name}-{expected_version}.tar.gz"
-    if not wheels[0].name.startswith(expected_wheel_prefix):
+    if wheels[0].name != expected_wheel_name:
         raise VerificationError(
-            f"wheel filename {wheels[0].name!r} does not identify "
-            f"{expected_name} {expected_version}"
+            f"wheel filename {wheels[0].name!r} does not match the expected "
+            f"pure-Python artifact {expected_wheel_name!r}"
         )
     if sdists[0].name != expected_sdist_name:
         raise VerificationError(

@@ -3,7 +3,7 @@ import pytest
 from verb_authority import (
     Policy, Confidence, Risk, Param, Tool, Registry,
     infer_policy, infer_risk, verb_risk, build_policy, gate, dispatch,
-    ProvenanceLedger, demo,
+    GuardedToolRunner, ProvenanceLedger, demo,
 )
 
 # --- inference --------------------------------------------------------------
@@ -24,6 +24,43 @@ def test_strong_sink_name_infers_trusted_fixed():
 
 def test_payload_name_infers_outbound_payload():
     assert infer_policy(Param("body", "string"))[0] is Policy.OUTBOUND_PAYLOAD
+
+
+@pytest.mark.parametrize(
+    "param",
+    [
+        Param("account_id", "integer"),
+        Param("reply_to", "string"),
+    ],
+)
+def test_authority_name_wins_before_broad_type_or_payload_rule(param):
+    policy, confidence = infer_policy(param)
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.HIGH
+
+
+def test_ambiguous_message_identifier_stays_locked_and_enters_review():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "send_reply",
+            [Param("message_id", "string")],
+            risk=Risk.WRITE,
+        )
+    )
+
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["send_reply"]["message_id"] is Policy.TRUSTED_FIXED
+    assert ("send_reply", "message_id") in policy_set.review
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "send_reply", "input": {"message_id": "attacker-choice"}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
 
 def test_ambiguous_string_marked_uncertain_and_locked_safe():
     pol, conf = infer_policy(Param("destination", "string"))
@@ -248,6 +285,135 @@ def test_dispatch_allows_when_arg_matches_trusted():
     d = dispatch(reg, ps, tool_use, trusted_args={"to":"alice@company.com"})
     assert d.allow
 
+
+def test_direct_gate_dispatch_and_runner_normalize_string_policy_values():
+    def operate(amount):
+        return {"amount": amount}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [Param("amount", "integer", cap=10, sink=False)],
+            fn=operate,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    policy_set = build_policy(registry)
+    policy_set.policy["operate"]["amount"] = Policy.TYPED_BOUNDED.value
+    policy_set.risk["operate"] = Risk.FINANCIAL.value
+    tool_call = {"name": "operate", "input": {"amount": 7}}
+
+    direct = gate(
+        registry,
+        policy_set,
+        "operate",
+        {"amount": 7},
+        {"amount": "data"},
+    )
+    dispatched = dispatch(registry, policy_set, tool_call)
+    runner = GuardedToolRunner(registry, policy_set)
+    executed = runner.run(tool_call, confirm=lambda request: False)
+
+    assert direct.allow and direct.needs_confirm
+    assert dispatched.allow and dispatched.needs_confirm
+    assert not executed.executed
+    assert executed.decision.allow and executed.decision.needs_confirm
+
+
+@pytest.mark.parametrize("api", ["gate", "dispatch"])
+@pytest.mark.parametrize("invalid_field", ["risk", "policy"])
+def test_direct_apis_fail_closed_on_invalid_serialized_policy_values(
+    api,
+    invalid_field,
+):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [Param("amount", "integer", sink=False)],
+            risk=Risk.FINANCIAL,
+        )
+    )
+    policy_set = build_policy(registry)
+    if invalid_field == "risk":
+        policy_set.risk["operate"] = "not-a-risk"
+    else:
+        policy_set.policy["operate"]["amount"] = "not-a-policy"
+
+    if api == "gate":
+        decision = gate(
+            registry,
+            policy_set,
+            "operate",
+            {"amount": 7},
+            {"amount": "data"},
+        )
+    else:
+        decision = dispatch(
+            registry,
+            policy_set,
+            {"name": "operate", "input": {"amount": 7}},
+        )
+
+    assert not decision.allow
+    assert "policy is malformed" in decision.reason
+
+
+def test_decision_reasons_escape_untrusted_control_and_bidi_labels():
+    registry = Registry()
+    registry.add(Tool("read_value", [], risk=Risk.READ_ONLY))
+    policy_set = build_policy(registry)
+    hostile = "spoof\r\x00\x1b\x7f\u202e"
+
+    unknown_tool = dispatch(
+        registry,
+        policy_set,
+        {"name": hostile, "input": {}},
+    )
+    unknown_param = dispatch(
+        registry,
+        policy_set,
+        {"name": "read_value", "input": {hostile: "x"}},
+    )
+    hostile_registry = Registry()
+    hostile_registry.add(
+        Tool("read_value", [Param(hostile, "string")], risk=Risk.READ_ONLY)
+    )
+    missing_hostile_param = dispatch(
+        hostile_registry,
+        build_policy(hostile_registry),
+        {"name": "read_value", "input": {}},
+    )
+    async def async_tool():
+        return None
+
+    hostile_tool_registry = Registry()
+    hostile_tool_registry.add(
+        Tool(hostile, [], fn=async_tool, risk=Risk.READ_ONLY)
+    )
+    rejected_async = GuardedToolRunner(hostile_tool_registry).run(
+        {"name": hostile, "input": {}}
+    ).decision
+
+    for decision in (
+        unknown_tool,
+        unknown_param,
+        missing_hostile_param,
+        rejected_async,
+    ):
+        assert not decision.allow
+        assert "\r" not in decision.reason
+        assert "\x00" not in decision.reason
+        assert "\x1b" not in decision.reason
+        assert "\x7f" not in decision.reason
+        assert "\u202e" not in decision.reason
+        assert "\\r" in decision.reason
+        assert "\\u0000" in decision.reason
+        assert "\\u001b" in decision.reason
+        assert "\\u007f" in decision.reason
+        assert "\\u202e" in decision.reason
+
 def test_dispatch_does_not_promote_missing_trusted_key_when_value_is_none():
     # dict.get() used to make a missing trusted key compare equal to a proposed
     # None value. Trust requires both explicit key membership and equality.
@@ -286,6 +452,69 @@ def test_dispatch_does_not_promote_cross_type_equal_values(proposed, trusted):
     )
 
     assert not d.allow and "locked sink" in d.reason
+
+
+@pytest.mark.parametrize(
+    "proposed, trusted",
+    [
+        (0.0, -0.0),
+        (-0.0, 0.0),
+        ({"first": 1, "second": 2}, {"second": 2, "first": 1}),
+        ([{"first": 1, "second": 2}], [{"second": 2, "first": 1}]),
+    ],
+)
+def test_dispatch_preserves_exact_observable_authority_value(proposed, trusted):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_value",
+            [Param("value", "json", sink=True)],
+            risk=Risk.WRITE,
+        )
+    )
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "set_value", "input": {"value": proposed}},
+        trusted_args={"value": trusted},
+    )
+
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_confirmation_action_identity_preserves_signed_zero_and_object_order():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "commit_value",
+            [Param("value", "json", sink=False)],
+            fn=lambda value: value,
+            risk=Risk.FINANCIAL,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def capture(value):
+        requests = []
+        result = runner.run(
+            {"name": "commit_value", "input": {"value": value}},
+            confirm=lambda request: requests.append(request) or False,
+        )
+        assert not result.executed
+        assert len(requests) == 1
+        return requests[0]
+
+    positive_zero = capture(0.0)
+    negative_zero = capture(-0.0)
+    first_order = capture({"first": 1, "second": 2})
+    second_order = capture({"second": 2, "first": 1})
+
+    assert positive_zero.arguments_json != negative_zero.arguments_json
+    assert positive_zero.action_id != negative_zero.action_id
+    assert first_order.arguments_json != second_order.arguments_json
+    assert first_order.action_id != second_order.action_id
 
 
 def test_dispatch_does_not_invoke_permissive_custom_equality_for_trust():

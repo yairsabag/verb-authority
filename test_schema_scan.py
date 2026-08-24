@@ -4,13 +4,18 @@ from pathlib import Path
 import pytest
 
 import verb_authority
+import verb_authority_scan as scanner
 from verb_authority_scan import (
     REPORT_VERSION,
     SchemaError,
+    ToolDefinition,
+    load_json_path,
     main,
     parse_tool_definitions,
     render_markdown,
+    scan_definitions,
     scan_documents,
+    validate_plain_json,
 )
 
 
@@ -75,6 +80,23 @@ def test_report_v3_preserves_constraints_without_disclosing_enum_members():
     assert "maximum: 100" in markdown
     assert "max length: 40" in markdown
     assert "enum: 2 fingerprinted member(s)" in markdown
+
+
+def test_direct_float_and_equivalent_json_decimal_share_fingerprints(tmp_path):
+    direct = _constraint_schema(1.5, 40, [1.5])
+    schema_path = tmp_path / "decimal.json"
+    schema_path.write_text(
+        '{"tools":[{"name":"set_policy","inputSchema":{"type":"object",'
+        '"properties":{"amount":{"type":"number","maximum":1.5},'
+        '"message":{"type":"string","maxLength":40},'
+        '"mode":{"type":"string","enum":[1.5]}}}}]}',
+        encoding="utf-8",
+    )
+
+    direct_report = scan_documents([direct])
+    loaded_report = scan_documents([load_json_path(str(schema_path))])
+
+    assert direct_report == loaded_report
 
 
 def test_redacted_constraint_report_uses_only_presence_and_count_sentinels():
@@ -166,6 +188,264 @@ def test_scanner_rejects_non_plain_or_malformed_json_shapes(document):
         scan_documents([document])
 
 
+def test_scanner_rejects_compact_programmatic_schema_dag():
+    shared = {"type": "string", "allOf": [{"maxLength": 20}]}
+    document = {
+        "tools": [
+            {
+                "name": "set_values",
+                "inputSchema": {
+                    "properties": {
+                        "first": shared,
+                        "second": shared,
+                    }
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(SchemaError, match="repeated container alias"):
+        scan_documents([document])
+
+
+def test_scanner_accepts_equal_but_distinct_schema_subtrees():
+    document = {
+        "tools": [
+            {
+                "name": "set_values",
+                "inputSchema": {
+                    "properties": {
+                        "first": {"type": "string", "maxLength": 20},
+                        "second": {"type": "string", "maxLength": 20},
+                    }
+                },
+            }
+        ]
+    }
+
+    report = scan_documents([document])
+
+    assert report["summary"]["parameters"] == 2
+    fingerprints = [
+        argument["schema_material_fingerprint_sha256"]
+        for argument in report["tools"][0]["arguments"]
+    ]
+    assert fingerprints[0] == fingerprints[1]
+
+
+def test_scanner_json_node_and_material_limits_are_exact(monkeypatch):
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 3)
+    validate_plain_json([0, 1])
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 2)
+    with pytest.raises(SchemaError, match="total node limit"):
+        validate_plain_json([0, 1])
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 100)
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_MATERIAL_BYTES", 6)
+    validate_plain_json("abc")
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_MATERIAL_BYTES", 5)
+    with pytest.raises(SchemaError, match="material limit"):
+        validate_plain_json("abc")
+
+
+def test_scanner_file_limit_is_checked_before_json_parsing(tmp_path, monkeypatch):
+    path = tmp_path / "input.json"
+    path.write_text('{"x":0}', encoding="utf-8")
+    monkeypatch.setattr(scanner, "MAX_SCAN_INPUT_BYTES", 7)
+    assert load_json_path(str(path)) == {"x": 0}
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_INPUT_BYTES", 6)
+    with pytest.raises(SchemaError, match="UTF-8 input limit"):
+        load_json_path(str(path))
+
+
+def _definition(name, properties):
+    return ToolDefinition(
+        name=name,
+        input_schema={"properties": properties},
+        annotations={},
+    )
+
+
+def test_all_scanner_entry_points_enforce_tool_and_argument_limits(monkeypatch):
+    first = _definition("first", {"one": {"type": "string"}})
+    second = _definition("second", {"two": {"type": "string"}})
+    document = {
+        "tools": [
+            {
+                "name": definition.name,
+                "inputSchema": definition.input_schema,
+            }
+            for definition in (first, second)
+        ]
+    }
+    monkeypatch.setattr(scanner, "MAX_SCAN_TOOL_DEFINITIONS", 1)
+    with pytest.raises(SchemaError, match="tool-definition limit"):
+        parse_tool_definitions(document)
+    with pytest.raises(SchemaError, match="tool-definition limit"):
+        scan_definitions([first, second])
+    with pytest.raises(SchemaError, match="tool-definition limit"):
+        scan_documents(
+            [
+                {"tools": [document["tools"][0]]},
+                {"tools": [document["tools"][1]]},
+            ]
+        )
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_TOOL_DEFINITIONS", 10)
+    two_arguments = {"one": {"type": "string"}, "two": {"type": "string"}}
+    definition = _definition("one_tool", two_arguments)
+    document = {
+        "tools": [
+            {
+                "name": definition.name,
+                "inputSchema": definition.input_schema,
+            }
+        ]
+    }
+    monkeypatch.setattr(scanner, "MAX_SCAN_ARGUMENTS", 1)
+    with pytest.raises(SchemaError, match="argument limit"):
+        parse_tool_definitions(document)
+    with pytest.raises(SchemaError, match="argument limit"):
+        scan_definitions([definition])
+    with pytest.raises(SchemaError, match="argument limit"):
+        scan_documents([document])
+
+
+def test_enum_budget_is_aggregate_but_not_double_counted(monkeypatch):
+    document = {
+        "tools": [
+            {
+                "name": "choose",
+                "inputSchema": {
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["a", "b"]}
+                    }
+                },
+            }
+        ]
+    }
+    monkeypatch.setattr(scanner, "MAX_SCAN_ENUM_MEMBERS", 2)
+    assert scan_documents([document])["summary"]["parameters"] == 1
+    definitions = parse_tool_definitions(document)
+    assert scan_definitions(definitions)["summary"]["parameters"] == 1
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_ENUM_MEMBERS", 1)
+    with pytest.raises(SchemaError, match="enum-member limit"):
+        parse_tool_definitions(document)
+    definition = _definition(
+        "choose",
+        {"mode": {"type": "string", "enum": ["a", "b"]}},
+    )
+    with pytest.raises(SchemaError, match="enum-member limit"):
+        scan_definitions([definition])
+    with pytest.raises(SchemaError, match="enum-member limit"):
+        scan_documents([document])
+
+
+def test_control_declaration_expansion_is_bounded_before_report_build(monkeypatch):
+    document = {
+        "tools": [
+            {
+                "name": "send",
+                "inputSchema": {
+                    "properties": {"recipient": {"type": "string"}}
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "send": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["sends_message"],
+                },
+                "arguments": {
+                    "recipient": {
+                        "authority": "constrained",
+                        "evidence": "declared",
+                        "bounds": [
+                            {
+                                "source": "approved contacts",
+                                "bounds_mutability": "trusted_party",
+                            }
+                        ],
+                    }
+                },
+                "unexposed_arguments": {
+                    "tenant": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "authenticated session",
+                        "evidence": "declared",
+                    }
+                },
+            }
+        },
+    }
+
+    # The exposed declaration refers to the one already-counted schema argument;
+    # only the additional unexposed argument consumes the remaining argument slot.
+    monkeypatch.setattr(scanner, "MAX_SCAN_ARGUMENTS", 2)
+    monkeypatch.setattr(scanner, "MAX_SCAN_CONTROL_COLLECTION_MEMBERS", 2)
+    assert scan_documents(
+        [document], control_declarations=controls
+    )["summary"]["parameters"] == 1
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_ARGUMENTS", 1)
+    with pytest.raises(SchemaError, match="argument limit"):
+        scan_documents([document], control_declarations=controls)
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_ARGUMENTS", 2)
+    monkeypatch.setattr(scanner, "MAX_SCAN_CONTROL_COLLECTION_MEMBERS", 1)
+    with pytest.raises(SchemaError, match="control collection-member limit"):
+        scan_documents([document], control_declarations=controls)
+
+
+def test_generated_report_is_checked_against_output_budget(monkeypatch):
+    document = {"tools": [{"name": "read", "inputSchema": {}}]}
+    monkeypatch.setattr(scanner, "MAX_SCAN_JSON_NODES", 25)
+
+    with pytest.raises(SchemaError, match="generated scanner report.*total node"):
+        scan_documents([document])
+
+
+@pytest.mark.parametrize("output_format", ("markdown", "json"))
+def test_scanner_cli_rejects_over_budget_schema_without_traceback(
+    tmp_path, capsys, monkeypatch, output_format
+):
+    schema_path = tmp_path / "too-many-arguments.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "send",
+                        "inputSchema": {
+                            "properties": {
+                                "recipient": {"type": "string"},
+                                "body": {"type": "string"},
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scanner, "MAX_SCAN_ARGUMENTS", 1)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path), "--format", output_format])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "argument limit" in error
+    assert "Traceback" not in error
+
+
 def test_cli_rejects_duplicate_json_object_keys_cleanly(tmp_path, capsys):
     schema_path = tmp_path / "duplicate.json"
     schema_path.write_text(
@@ -178,6 +458,105 @@ def test_cli_rejects_duplicate_json_object_keys_cleanly(tmp_path, capsys):
 
     assert exc_info.value.code == 2
     assert "duplicate object key: name" in capsys.readouterr().err
+
+
+def test_cli_rejects_parseable_overdeep_schema_without_traceback(tmp_path, capsys):
+    nested = {"type": "string"}
+    for _ in range(140):
+        nested = {"allOf": [nested]}
+    schema_path = tmp_path / "deep.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "set_value",
+                        "inputSchema": {"properties": {"value": nested}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path), "--format", "json"])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "maximum nesting depth" in error
+    assert "Traceback" not in error
+
+
+def test_markdown_report_escapes_terminal_and_bidi_controls_everywhere():
+    hostile = "hostile\r\x1b[31m\u202e\u2028\u2029"
+    tool_name = f"send_{hostile}"
+    argument_name = f"recipient_{hostile}"
+    document = {
+        "sources": [
+            {
+                "id": hostile,
+                "url": hostile,
+                "tools": [
+                    {
+                        "name": tool_name,
+                        "inputSchema": {
+                            "properties": {
+                                argument_name: {
+                                    "type": "string",
+                                    "format": "email",
+                                }
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "attribution": {"name": hostile, "source": hostile},
+        "tools": {
+            tool_name: {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": [hostile],
+                    "note": hostile,
+                },
+                "arguments": {
+                    argument_name: {
+                        "authority": "locked",
+                        "evidence": "declared",
+                        "note": hostile,
+                    }
+                },
+                "unexposed_arguments": {
+                    hostile: {
+                        "exposure": "server_fixed",
+                        "enforced_by": hostile,
+                        "evidence": "declared",
+                        "note": hostile,
+                    }
+                },
+            }
+        },
+    }
+
+    markdown = render_markdown(
+        scan_documents([document], control_declarations=controls)
+    )
+
+    assert "\r" not in markdown
+    assert "\x1b" not in markdown
+    assert "\u202e" not in markdown
+    assert "\u2028" not in markdown
+    assert "\u2029" not in markdown
+    assert "\\r" in markdown
+    assert "\\u001b" in markdown
+    assert "\\u202e" in markdown
+    assert "\\u2028" in markdown
+    assert "\\u2029" in markdown
 
 
 def test_scans_mcp_tools_list_result():
