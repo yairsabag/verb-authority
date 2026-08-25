@@ -308,6 +308,78 @@ class RiskAssessment:
     review_required: bool
 
 
+@dataclass(frozen=True)
+class RiskAssessmentSnapshot:
+    """Detached, immutable risk evidence exposed to inspection or approval UI.
+
+    Python ``Enum`` members are process-wide singletons whose private metadata
+    can be reassigned by same-process code. Public views therefore carry only
+    canonical primitive values, never the members retained by enforcement.
+    """
+
+    risk: str
+    source: str
+    confidence: str
+    mutability: str
+    matched_tokens: tuple[str, ...]
+    review_required: bool
+
+
+def _policy_literal(value: Policy) -> str:
+    """Return a canonical policy value without consulting mutable Enum data."""
+
+    if value is Policy.TRUSTED_FIXED:
+        return "trusted_fixed"
+    if value is Policy.TYPED_BOUNDED:
+        return "typed_bounded"
+    if value is Policy.OUTBOUND_PAYLOAD:
+        return "outbound_payload"
+    raise ValueError("invalid policy value")
+
+
+def _risk_literal(value: Risk) -> str:
+    """Return a canonical risk value without consulting mutable Enum data."""
+
+    if value is Risk.UNKNOWN:
+        return "unknown"
+    if value is Risk.READ_ONLY:
+        return "read_only"
+    if value is Risk.WRITE:
+        return "write"
+    if value is Risk.FINANCIAL:
+        return "financial"
+    if value is Risk.DESTRUCTIVE:
+        return "destructive"
+    if value is Risk.CODE_EXEC:
+        return "code_exec"
+    raise ValueError("invalid risk value")
+
+
+def _risk_confidence_literal(value: RiskConfidence) -> str:
+    """Return canonical risk-confidence text from member identity."""
+
+    if value is RiskConfidence.HEURISTIC:
+        return "heuristic"
+    if value is RiskConfidence.UNCERTAIN:
+        return "uncertain"
+    raise ValueError("invalid risk confidence")
+
+
+def _risk_assessment_snapshot(
+    assessment: RiskAssessment,
+) -> RiskAssessmentSnapshot:
+    """Detach the complete callback/inspection evidence graph."""
+
+    return RiskAssessmentSnapshot(
+        risk=_risk_literal(assessment.risk),
+        source=str(assessment.source),
+        confidence=_risk_confidence_literal(assessment.confidence),
+        mutability=str(assessment.mutability),
+        matched_tokens=tuple(str(token) for token in assessment.matched_tokens),
+        review_required=bool(assessment.review_required),
+    )
+
+
 # === tool schema ==========================================================
 @dataclass
 class Param:
@@ -1082,7 +1154,8 @@ class ConfirmationRequest:
     same isolated argument snapshot the runner will execute. Confirmation UIs
     should parse and render it as structured fields, not inject it into markup.
     ``action_id`` commits that exact encoding to the frozen registration,
-    effective risk, and executable.
+    effective risk, and executable. Risk fields and their evidence are
+    detached canonical strings: compare them by value, never by Enum identity.
     Compatibility properties retain the small ``Decision`` callback surface
     used by beta callers while making the approved action inspectable.
     """
@@ -1090,9 +1163,9 @@ class ConfirmationRequest:
     decision: Decision
     tool_name: str
     arguments_json: str
-    risk: Risk
-    risk_assessment: RiskAssessment
-    declared_risk: Risk | None
+    risk: str
+    risk_assessment: RiskAssessmentSnapshot
+    declared_risk: str | None
     risk_conflict: bool
     registration_id: str
     executable_id: str
@@ -3300,7 +3373,7 @@ def _confirmation_request(
         {
             "tool": tool_name,
             "arguments_json": arguments_json,
-            "risk": effective_risk.value,
+            "risk": _risk_literal(effective_risk),
             "registration_id": bundle.registration_id,
             "executable_id": executable_id,
             "ledger_version": ledger_version,
@@ -3311,20 +3384,13 @@ def _confirmation_request(
         decision=decision,
         tool_name=tool_name,
         arguments_json=arguments_json,
-        risk=effective_risk,
-        # A confirmation callback receives evidence for display, not the
-        # authoritative object retained by the registration bundle.  Frozen
-        # dataclasses can still be mutated deliberately via object.__setattr__
-        # in the same process, so copy the value for every request.
-        risk_assessment=RiskAssessment(
-            risk=assessment.risk,
-            source=assessment.source,
-            confidence=assessment.confidence,
-            mutability=assessment.mutability,
-            matched_tokens=tuple(assessment.matched_tokens),
-            review_required=assessment.review_required,
+        risk=_risk_literal(effective_risk),
+        # A confirmation callback receives primitive evidence snapshots for
+        # display, never process-wide Enum members retained by enforcement.
+        risk_assessment=_risk_assessment_snapshot(assessment),
+        declared_risk=(
+            _risk_literal(tool.risk) if tool.risk is not None else None
         ),
-        declared_risk=tool.risk,
         risk_conflict=tool_name in bundle.policy_set.risk_conflicts,
         registration_id=bundle.registration_id,
         executable_id=executable_id,
@@ -3468,21 +3534,24 @@ class GuardedToolRunner:
         enforced_policy = self._bundle.policy_set
         inspection_policy = MappingProxyType(
             {
-                name: MappingProxyType(dict(parameters))
+                name: MappingProxyType(
+                    {
+                        parameter: _policy_literal(policy)
+                        for parameter, policy in parameters.items()
+                    }
+                )
                 for name, parameters in enforced_policy.policy.items()
             }
         )
-        inspection_risk = MappingProxyType(dict(enforced_policy.risk))
+        inspection_risk = MappingProxyType(
+            {
+                name: _risk_literal(risk)
+                for name, risk in enforced_policy.risk.items()
+            }
+        )
         inspection_assessments = MappingProxyType(
             {
-                name: RiskAssessment(
-                    risk=assessment.risk,
-                    source=assessment.source,
-                    confidence=assessment.confidence,
-                    mutability=assessment.mutability,
-                    matched_tokens=assessment.matched_tokens,
-                    review_required=assessment.review_required,
-                )
+                name: _risk_assessment_snapshot(assessment)
                 for name, assessment in enforced_policy.risk_inference.items()
             }
         )
@@ -3734,6 +3803,10 @@ class GuardedToolRunner:
                     ),
                     executed=False,
                 )
+            # The callback receives a display object. Retain all enforcement
+            # commitments privately so deliberate frozen-object mutation
+            # cannot rewrite the version that was actually approved.
+            confirmed_ledger_version = request.ledger_version
 
         # Confirmation is trusted application/UI code and may block. It runs
         # outside the session lock; the complete action is revalidated below.
@@ -3770,7 +3843,7 @@ class GuardedToolRunner:
             )
             if not revalidated.allow:
                 return ExecutionResult(revalidated, executed=False)
-            if approved_ledger.version != request.ledger_version:
+            if approved_ledger.version != confirmed_ledger_version:
                 return ExecutionResult(
                     Decision(
                         False,

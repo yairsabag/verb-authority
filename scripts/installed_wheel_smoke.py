@@ -1221,10 +1221,26 @@ def _confirmation_action_snapshot() -> None:
         "confirmation arguments_json is not ASCII-escaped JSON",
     )
     _check(
-        request.risk is Risk.FINANCIAL
-        and request.risk_assessment.risk is Risk.FINANCIAL,
-        "confirmation omitted effective risk evidence",
+        type(request.risk) is str
+        and request.risk == "financial"
+        and type(request.risk_assessment.risk) is str
+        and request.risk_assessment.risk == "financial"
+        and type(request.risk_assessment.confidence) is str,
+        "confirmation omitted detached effective risk evidence",
     )
+    _check(
+        type(request.declared_risk) is str
+        and request.declared_risk == "financial",
+        "confirmation retained a process-wide declared-risk Enum member",
+    )
+    try:
+        request.declared_risk._value_ = "read_only"
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError(
+            "installed confirmation declared risk exposes mutable Enum metadata"
+        )
     _check(
         all(
             (
@@ -1636,6 +1652,40 @@ def _policy_and_ledger_integrity() -> None:
         not result.invoked
         and "ledger internals changed" in result.decision.reason,
         "runner did not detect replacement of a ledger private store",
+    )
+
+    calls = []
+    version_registry = Registry()
+    version_registry.add(
+        Tool(
+            "evaluate",
+            [],
+            fn=lambda: calls.append("invoked"),
+            risk=Risk.UNKNOWN,
+        )
+    )
+    version_runner = GuardedToolRunner(version_registry)
+
+    def forge_display_version(request) -> bool:
+        version_runner.ledger.record_result({"unrelated": "tool result"})
+        object.__setattr__(
+            request,
+            "ledger_version",
+            version_runner.ledger.version,
+        )
+        return True
+
+    forged = version_runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=forge_display_version,
+    )
+    _check(
+        not forged.decision.allow
+        and not forged.invoked
+        and not forged.executed
+        and "provenance ledger changed" in forged.decision.reason
+        and not calls,
+        "confirmation display mutation forged the private ledger commitment",
     )
 
 
@@ -3258,7 +3308,7 @@ def _daybreak_release_candidate_regressions() -> None:
             build_policy(frozen_registry),
         )
         _check(
-            runner.policy_set.risk["evaluate"] is Risk.UNKNOWN
+            runner.policy_set.risk["evaluate"] == "unknown"
             and runner.policy_set.risk_review == ("evaluate",)
             and runner.policy_set.confirm == ("evaluate",)
             and runner.policy_set.risk_conflicts == (),
@@ -3343,6 +3393,38 @@ def _daybreak_release_candidate_regressions() -> None:
         "installed public policy view aliases the enforced confirmation state",
     )
 
+    _check(
+        type(runner.policy_set.risk["evaluate"]) is str
+        and runner.policy_set.risk["evaluate"] == "unknown"
+        and type(runner.policy_set.risk_inference["evaluate"].risk) is str
+        and runner.policy_set.risk_inference["evaluate"].risk == "unknown"
+        and type(runner.policy_set.risk_inference["evaluate"].confidence) is str
+        and runner.policy_set.risk_inference["evaluate"].confidence
+        == "uncertain"
+        and type(captured[0].risk) is str
+        and captured[0].risk == "unknown"
+        and type(captured[0].risk_assessment.risk) is str
+        and captured[0].risk_assessment.risk == "unknown"
+        and type(captured[0].risk_assessment.confidence) is str
+        and captured[0].risk_assessment.confidence == "uncertain",
+        "installed inspection surface retained process-wide Enum leaves",
+    )
+    for primitive in (
+        captured[0].risk,
+        captured[0].risk_assessment.risk,
+        captured[0].risk_assessment.confidence,
+    ):
+        try:
+            primitive._value_ = "forged"
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError(
+                "installed confirmation evidence exposes mutable Enum metadata"
+            )
+
+    object.__setattr__(captured[0].risk_assessment, "risk", "read_only")
+    object.__setattr__(captured[0].risk_assessment, "confidence", "heuristic")
     object.__setattr__(captured[0].risk_assessment, "source", "forged")
     object.__setattr__(
         captured[0].risk_assessment,
@@ -3356,10 +3438,19 @@ def _daybreak_release_candidate_regressions() -> None:
     )
     _check(
         not later.executed
+        and later_requests[0].risk == "unknown"
+        and later_requests[0].risk_assessment.risk == "unknown"
+        and later_requests[0].risk_assessment.confidence == "uncertain"
         and later_requests[0].risk_assessment.source == "tool_name"
         and later_requests[0].risk_assessment.review_required is True
+        and runner._bundle.policy_set.risk["evaluate"] is Risk.UNKNOWN
+        and runner._bundle.policy_set.risk_inference["evaluate"].risk
+        is Risk.UNKNOWN
+        and runner._bundle.policy_set.risk_inference["evaluate"].confidence
+        is verb_authority.RiskConfidence.UNCERTAIN
         and runner._bundle.policy_set.risk_inference["evaluate"].source
-        == "tool_name",
+        == "tool_name"
+        and later_requests[0].action_id == captured[0].action_id,
         "installed confirmation request aliases retained risk evidence",
     )
 
@@ -3395,6 +3486,20 @@ def _daybreak_release_candidate_regressions() -> None:
         value
         for value in gc.get_referents(enforced_outer["set_destination"])
         if type(value) is dict
+    )
+    inspection_assessment = inspection_runner.policy_set.risk_inference[
+        "set_destination"
+    ]
+    _check(
+        type(public_inner["destination"]) is str
+        and public_inner["destination"] == "trusted_fixed"
+        and type(inspection_runner.policy_set.risk["set_destination"]) is str
+        and inspection_runner.policy_set.risk["set_destination"] == "write"
+        and type(inspection_assessment.risk) is str
+        and inspection_assessment.risk == "write"
+        and type(inspection_assessment.confidence) is str
+        and inspection_assessment.confidence == "heuristic",
+        "installed public inspection view retained process-wide Enum leaves",
     )
     public_inner["destination"] = Policy.TYPED_BOUNDED
     inspection_result = inspection_runner.run(

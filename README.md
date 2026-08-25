@@ -165,7 +165,11 @@ such a renderer, show the ASCII-escaped JSON verbatim; never inject
 decoded fields directly into markup or a terminal. The request also contains
 the effective risk and its evidence, the declared-risk conflict state, and
 `registration_id`, `executable_id`, `ledger_version`, and `action_id`
-commitments. `executable_id` is an address-free SHA-256 digest of the function's
+commitments. The public inspection view and confirmation request expose policy,
+risk, and risk-confidence values as detached canonical strings rather than the
+process-wide Enum members retained by enforcement; compare these fields by
+value (for example, `request.risk == "financial"`), not by Enum identity.
+`executable_id` is an address-free SHA-256 digest of the function's
 module/qualified name, code content, and raw non-unwrapped binding signature; a
 separate private binding token detects replacement of the live function object
 without exposing its address. `action_id` is a content commitment, not a
@@ -191,7 +195,10 @@ execution and rebuild the runner when they change action configuration. The
 confirmation callback is likewise
 trusted control-plane code; keep it synchronous and side-effect-safe, and do
 not let untrusted code run inside it. Exceptions from that callback propagate
-to its trusted caller. The session ledger owns a re-entrant lock. The runner
+to its trusted caller. Public evidence snapshots do not alias enforcement
+state, but arbitrary imported code in the same Python process remains inside
+the trusted application boundary and can still interfere with module globals,
+classes, or private objects. The session ledger owns a re-entrant lock. The runner
 holds that shared lock from final revalidation through invocation and atomic
 result publication, so multiple runners using the same ledger serialize that
 critical action section. It deliberately releases the lock while human
@@ -352,6 +359,19 @@ reports also include per-tool and per-argument
 `schema_material_fingerprint_sha256` and
 `unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
 can likewise be dictionary-guessed or correlated.
+
+When Authority Diff imports a named v3 report, it recomputes summary counters
+and reconciles the complete risk tuple (declaration, advisory inference,
+conflict, effective tier, evidence, review, and confirmation) before comparing
+it. It also checks the stable argument policy/confidence/review combinations,
+preserves the scanner's declaration-verification warning, and refuses an open
+schema with declared unexposed controls unless schema review remains explicit.
+This catches internally impossible or partially edited reports. The
+unkeyed SHA-256 fields are content commitments, not authentication: a party
+that can replace an entire stored report can fabricate a different coherent
+report and matching hashes. For an untrusted pull request or artifact, rescan
+the raw schema/control inputs in CI or require a separately signed/attested
+report rather than trusting a checked-in report alone.
 
 JSON decimal constraints are parsed without first rounding through a binary
 float. A `maximum` parsed from a decimal or exponent token uses a canonical
@@ -571,7 +591,9 @@ and comparison, preventing modules in the consumer checkout from shadowing
 The v3 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
 increase; and enum replacements without a strict subset relationship require
-review. Authority Diff is not a complete JSON Schema equivalence checker.
+review. Any effective risk-tier change also requires review; tiers are not
+treated as a safe monotonic ordering. Authority Diff is not a complete JSON
+Schema equivalence checker.
 Removing a modeled argument counts as protection only when the candidate schema
 also rejects unknown arguments; in an open schema the same name remains
 caller-visible without its modeled policy, so the change is an authority
@@ -721,8 +743,10 @@ python trusted_choice_demo.py  # trusted lookup -> gate -> actual local function
 ```
 
 The adaptive evaluation found a mixed-script homograph bypass in the earlier
-implementation. Canonicalization raised the observed break point from tier 2
-to tier 5 in the included attacker; the current break is semantic rewrite.
+implementation. The included current attacker holds tiers 1–6 and first breaks
+at tier 7, where a Base64 value would be interpreted or decoded downstream.
+That is a semantic/representation boundary rather than the original destination
+string reaching the gate.
 That result describes this test arsenal, not a universal security score.
 
 `agent_demo.py` and `resolve_live.py` are optional Anthropic-backed demos and

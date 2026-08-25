@@ -94,7 +94,7 @@ def test_frozen_policy_keeps_explicit_unknown_in_review_and_confirmation():
 
     runner = GuardedToolRunner(registry, build_policy(registry))
 
-    assert runner.policy_set.risk["evaluate"] is Risk.UNKNOWN
+    assert runner.policy_set.risk["evaluate"] == "unknown"
     assert runner.policy_set.risk_review == ("evaluate",)
     assert runner.policy_set.confirm == ("evaluate",)
     assert runner.policy_set.risk_conflicts == ()
@@ -314,6 +314,15 @@ def test_public_policy_mapping_containers_do_not_alias_enforced_policy():
     assert public_outer is not enforced_outer
     assert public_inner is not enforced_inner
     assert public_risk is not enforced_risk
+    assert type(public_inner["destination"]) is str
+    assert public_inner["destination"] == "trusted_fixed"
+    assert type(public_risk["set_destination"]) is str
+    assert public_risk["set_destination"] == "write"
+    public_assessment = runner.policy_set.risk_inference["set_destination"]
+    assert type(public_assessment.risk) is str
+    assert public_assessment.risk == "write"
+    assert type(public_assessment.confidence) is str
+    assert public_assessment.confidence == "heuristic"
 
     public_inner["destination"] = Policy.TYPED_BOUNDED
     public_risk["set_destination"] = Risk.READ_ONLY
@@ -337,6 +346,17 @@ def test_confirmation_request_risk_evidence_is_a_fresh_copy():
 
     def mutate_then_deny(request):
         first_requests.append(request)
+        assert type(request.risk) is str
+        assert type(request.risk_assessment.risk) is str
+        assert type(request.risk_assessment.confidence) is str
+        with pytest.raises(AttributeError):
+            request.risk._value_ = "read_only"
+        with pytest.raises(AttributeError):
+            request.risk_assessment.risk._value_ = "read_only"
+        with pytest.raises(AttributeError):
+            request.risk_assessment.confidence._value_ = "heuristic"
+        object.__setattr__(request.risk_assessment, "risk", "read_only")
+        object.__setattr__(request.risk_assessment, "confidence", "heuristic")
         object.__setattr__(request.risk_assessment, "source", "forged")
         object.__setattr__(request.risk_assessment, "review_required", False)
         return False
@@ -360,9 +380,21 @@ def test_confirmation_request_risk_evidence_is_a_fresh_copy():
         is not first_requests[0].risk_assessment
     )
     assert enforced.source == "tool_name"
+    assert enforced.risk is Risk.UNKNOWN
+    assert enforced.confidence is authority.RiskConfidence.UNCERTAIN
     assert enforced.review_required is True
+    assert runner.policy_set.risk["evaluate"] == "unknown"
+    assert type(runner.policy_set.risk_inference["evaluate"].risk) is str
+    assert runner.policy_set.risk_inference["evaluate"].risk == "unknown"
+    assert type(runner.policy_set.risk_inference["evaluate"].confidence) is str
+    assert runner.policy_set.risk_inference["evaluate"].confidence == "uncertain"
+    assert second_requests[0].risk == "unknown"
+    assert second_requests[0].declared_risk is None
+    assert second_requests[0].risk_assessment.risk == "unknown"
+    assert second_requests[0].risk_assessment.confidence == "uncertain"
     assert second_requests[0].risk_assessment.source == "tool_name"
     assert second_requests[0].risk_assessment.review_required is True
+    assert second_requests[0].action_id == first_requests[0].action_id
 
 
 def test_frozen_policy_validation_shares_tool_name_normalization_budget(
@@ -617,7 +649,7 @@ def test_runner_keeps_incomplete_risk_confirmed(monkeypatch, supply_policy):
     runner = GuardedToolRunner(registry, policy)
     result = runner.run({"name": target, "input": {}})
 
-    assert runner.policy_set.risk[target] is Risk.UNKNOWN
+    assert runner.policy_set.risk[target] == "unknown"
     assert runner.policy_set.risk_inference[target].source == "inference_limit"
     assert target in runner.policy_set.risk_review
     assert target in runner.policy_set.confirm
@@ -651,7 +683,7 @@ def test_runner_keeps_incomplete_read_only_parameter_locked(monkeypatch):
         {"name": "catalog", "input": {target: "attacker-authored"}}
     )
 
-    assert runner.policy_set.policy["catalog"][target] is Policy.TRUSTED_FIXED
+    assert runner.policy_set.policy["catalog"][target] == "trusted_fixed"
     assert ("catalog", target) in runner.policy_set.review
     assert not result.decision.allow
     assert not result.executed
@@ -1691,8 +1723,12 @@ def test_confirmation_is_bound_to_the_private_approved_action_snapshot():
         "amount": 1_000_000,
         "destination": "acct-approved",
     }
-    assert request.risk is Risk.FINANCIAL
-    assert request.risk_assessment.risk is Risk.FINANCIAL
+    assert request.risk == "financial"
+    assert request.risk_assessment.risk == "financial"
+    assert type(request.declared_risk) is str
+    assert request.declared_risk == "financial"
+    with pytest.raises(AttributeError):
+        request.declared_risk._value_ = "read_only"
     assert request.registration_id
     assert request.executable_id
     assert request.action_id
@@ -1766,6 +1802,36 @@ def test_runner_revalidates_ledger_taint_after_confirmation():
     assert not execution.executed
     assert not execution.decision.allow
     assert "locked sink" in execution.decision.reason
+    assert calls == []
+
+
+def test_confirmation_cannot_forge_the_private_ledger_version_commitment():
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "evaluate",
+            [],
+            fn=lambda: calls.append("invoked"),
+            risk=Risk.UNKNOWN,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def advance_ledger_and_forge_display_request(request):
+        runner.ledger.record_result({"unrelated": "tool result"})
+        object.__setattr__(request, "ledger_version", runner.ledger.version)
+        return True
+
+    execution = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=advance_ledger_and_forge_display_request,
+    )
+
+    assert not execution.executed
+    assert not execution.invoked
+    assert not execution.decision.allow
+    assert "provenance ledger changed" in execution.decision.reason
     assert calls == []
 
 

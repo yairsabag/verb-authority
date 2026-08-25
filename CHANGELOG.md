@@ -61,7 +61,11 @@ tag or GitHub release was created, and the version is intentionally not reused.
   inspection view whose policy/risk mapping containers are copied rather than
   aliased to the frozen policy object enforced by the runner. Give every
   confirmation request its own risk-evidence value so callback-side mutation
-  cannot poison later requests or retained registration evidence. Commit exact
+  cannot poison later requests or retained registration evidence. Expose public
+  policy, risk, and risk-confidence leaves as detached canonical strings rather
+  than process-wide Enum singletons, and retain the pre-callback ledger version
+  privately so mutation of the display request cannot forge the revalidation
+  commitment. Commit exact
   registry iteration order to the registration binding because bounded policy
   inference consumes one shared normalization budget in that order; an
   in-place dictionary reorder is therefore detected as configuration drift
@@ -330,6 +334,17 @@ tag or GitHub release was created, and the version is intentionally not reused.
   when the candidate schema remains open, as review when closure is uncertain,
   and as protection only after unknown arguments are demonstrably closed. Mark
   an unexposed declaration on an open schema as review debt in the scanner.
+- Reconcile every imported v3 tool's complete risk state before diffing:
+  inference source/confidence/mutability/tokens, declared tier, conflict,
+  effective tier/source/evidence, review, and confirmation must form a state
+  the scanner can emit. Reject declared risk after control metadata is removed,
+  recompute every report summary counter, and classify every coherent effective
+  risk change as review rather than assuming a monotonic risk ordering. Clarify
+  that report SHA-256 values are content commitments, not authentication of an
+  artifact an attacker can replace wholesale. Validate the stable argument
+  confidence/policy/review matrix, preserve the exact author-declaration warning,
+  and reject an open schema with unexposed controls if its required schema-review
+  marker is false or omitted.
 - Escape active Markdown link/image syntax and neutralize bare-URL autolinks,
   mentions, issue-reference markers, GitHub `GH-NNN` shorthand, and raw commit
   identifiers in schema-controlled cells as well as terminal and bidirectional

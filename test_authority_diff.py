@@ -38,6 +38,43 @@ def _refresh_control_fingerprint(report):
     )
 
 
+def _refresh_report_summary(report):
+    tools = report["tools"]
+    arguments = [argument for tool in tools for argument in tool["arguments"]]
+    summary = report["summary"]
+    summary.update(
+        {
+            "tools": len(tools),
+            "parameters": len(arguments),
+            "protected_parameters": sum(
+                argument["policy"] == "trusted_fixed" for argument in arguments
+            ),
+            "data_fillable_parameters": sum(
+                argument["policy"] != "trusted_fixed" for argument in arguments
+            ),
+            "review_required": sum(
+                argument["review_required"] is True for argument in arguments
+            ),
+            "confirmation_required_tools": sum(
+                tool["needs_confirmation"] is True for tool in tools
+            ),
+            "risk_review_required_tools": sum(
+                tool["risk_review_required"] is True for tool in tools
+            ),
+            "risk_conflicts": sum(
+                tool["risk_conflict"] is True for tool in tools
+            ),
+            "annotation_conflicts": sum(
+                len(tool["annotation_conflicts"]) for tool in tools
+            ),
+        }
+    )
+    if "schema_review_required_tools" in summary:
+        summary["schema_review_required_tools"] = sum(
+            tool.get("schema_review_required", False) is True for tool in tools
+        )
+
+
 def _constraint_document(maximum, max_length, enum):
     return {
         "tools": [
@@ -79,6 +116,35 @@ def _single_argument_report(property_schema):
             }
         ]
     )
+
+
+def _declared_risk_report(tier, *, name="florp"):
+    schema = {
+        "tools": [
+            {
+                "name": name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            name: {
+                "risk": {
+                    "tier": tier,
+                    "evidence": "declared",
+                    "effects": ["test effect"],
+                },
+                "arguments": {},
+            }
+        },
+    }
+    return scan_documents([schema], control_declarations=controls)
 
 
 def test_identical_reports_have_no_authority_changes():
@@ -603,6 +669,16 @@ def test_control_declaration_fingerprint_is_recomputed_before_diffing():
         diff_reports(report, copy.deepcopy(report))
 
 
+def test_control_verification_notice_must_remain_the_scanner_warning():
+    report = _avp9_report()
+    report["declared_controls"]["verification_notice"] = (
+        "All declarations were independently verified."
+    )
+
+    with pytest.raises(DiffError, match="verification_notice is invalid"):
+        diff_reports(report, copy.deepcopy(report))
+
+
 def test_duplicated_declared_risk_must_match_the_report_tool():
     report = _avp9_report()
     report["declared_controls"]["tools"][0]["risk"]["effects"].append(
@@ -621,6 +697,318 @@ def test_declared_risk_cannot_outlive_its_declared_control_tool():
 
     with pytest.raises(DiffError, match="declared risk without the matching"):
         diff_reports(report, copy.deepcopy(report))
+
+
+def test_declared_risk_cannot_outlive_all_declared_control_metadata():
+    report = _avp9_report()
+    report["privacy"]["control_declarations_included"] = False
+    report.pop("declared_controls")
+    report.pop("control_declaration_fingerprint_sha256")
+
+    with pytest.raises(DiffError, match="declared risk without declared control"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize("field", ("risk_evidence", "declared_risk"))
+def test_required_nullable_risk_fields_cannot_be_omitted(field):
+    report = _avp9_report()
+    report["tools"][0].pop(field)
+
+    with pytest.raises(DiffError, match=f"missing {field}"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_missing_declared_risk_is_a_clean_cli_input_error(tmp_path, capsys):
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    after["tools"][0].pop("declared_risk")
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path)])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "missing declared_risk" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize("omit_fields", (False, True))
+def test_open_schema_with_unexposed_controls_cannot_hide_schema_review(
+    omit_fields
+):
+    schema = {
+        "tools": [
+            {
+                "name": "florp",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "florp": {
+                "unexposed_arguments": {
+                    "destination": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "server",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+    report = scan_documents([schema], control_declarations=controls)
+    assert report["tools"][0]["schema_closes_unknown_arguments"] is False
+    assert report["tools"][0]["schema_review_required"] is True
+
+    forged = copy.deepcopy(report)
+    if omit_fields:
+        forged["tools"][0].pop("schema_review_required")
+        forged["summary"].pop("schema_review_required_tools")
+    else:
+        forged["tools"][0]["schema_review_required"] = False
+        forged["summary"]["schema_review_required_tools"] = 0
+
+    with pytest.raises(DiffError, match="unexposed controls on an open schema"):
+        diff_reports(report, forged)
+
+
+def test_argument_confidence_policy_and_review_must_be_coherent():
+    report = _single_argument_report({"type": "string"})
+    argument = report["tools"][0]["arguments"][0]
+    assert argument["confidence"] == "uncertain"
+    assert argument["policy"] == "trusted_fixed"
+    assert argument["review_required"] is True
+    argument["review_required"] = False
+    _refresh_report_summary(report)
+
+    with pytest.raises(DiffError, match="inconsistent policy inference"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("argument_name", "argument_type", "declared_read_only", "expected"),
+    (
+        ("recipient", "string", False, ("trusted_fixed", "high", False)),
+        ("value", "string", False, ("trusted_fixed", "uncertain", True)),
+        ("value", "integer", False, ("typed_bounded", "high", False)),
+        ("value", "string", True, ("typed_bounded", "uncertain", False)),
+        ("message", "string", False, ("outbound_payload", "high", False)),
+    ),
+)
+def test_all_scanner_emitted_argument_inference_rows_validate(
+    argument_name, argument_type, declared_read_only, expected
+):
+    tool_name = "read_item"
+    schema = {
+        "tools": [
+            {
+                "name": tool_name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        argument_name: {"type": argument_type},
+                    },
+                },
+            }
+        ]
+    }
+    controls = None
+    if declared_read_only:
+        controls = {
+            "version": 1,
+            "tools": {
+                tool_name: {
+                    "risk": {
+                        "tier": "read_only",
+                        "evidence": "declared",
+                        "effects": ["reads data"],
+                    }
+                }
+            },
+        }
+    report = scan_documents([schema], control_declarations=controls)
+    argument = report["tools"][0]["arguments"][0]
+
+    assert (
+        argument["policy"],
+        argument["confidence"],
+        argument["review_required"],
+    ) == expected
+    assert diff_reports(report, copy.deepcopy(report))["summary"]["changes"] == 0
+
+
+def test_all_scanner_emitted_risk_state_rows_validate(monkeypatch):
+    undeclared = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "read_item",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    )
+    declared_clean = _declared_risk_report("read_only")
+    conflict = _declared_risk_report("read_only", name="delete_item")
+
+    target = "ｄｅｌｅｔｅ_records"
+    monkeypatch.setattr(
+        verb_authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target) - 1,
+    )
+    inference_limit = _declared_risk_report("read_only", name=target)
+
+    assert undeclared["tools"][0]["risk_source"] == "safe_default"
+    assert declared_clean["tools"][0]["risk_source"] == "control_declaration"
+    assert conflict["tools"][0]["risk_source"] == "conflict_safe_default"
+    assert (
+        inference_limit["tools"][0]["risk_inference"]["source"]
+        == "inference_limit"
+    )
+    for report in (undeclared, declared_clean, conflict, inference_limit):
+        assert diff_reports(report, copy.deepcopy(report))["summary"]["changes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    (
+        ("risk", "read_only"),
+        ("risk_source", "safe_default"),
+        ("risk_evidence", "declared"),
+        ("risk_conflict", True),
+        ("risk_review_required", True),
+        ("needs_confirmation", False),
+    ),
+)
+def test_one_field_risk_tuple_forgery_is_rejected(field, forged_value):
+    report = _avp9_report()
+    report["tools"][0][field] = forged_value
+
+    with pytest.raises(DiffError, match=f"inconsistent {field}"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_one_field_inferred_risk_forgery_is_rejected():
+    report = _avp9_report()
+    report["tools"][0]["inferred_risk"] = "write"
+
+    with pytest.raises(DiffError, match="inconsistent risk"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value", "message"),
+    (
+        ("source", "inference_limit", "inconsistent risk inference"),
+        ("confidence", "uncertain", "inconsistent risk inference"),
+        ("mutability", "trusted_party", "invalid risk inference mutability"),
+        ("matched_tokens", [], "inconsistent risk inference"),
+    ),
+)
+def test_one_field_risk_inference_forgery_is_rejected(
+    field, forged_value, message
+):
+    report = _avp9_report()
+    report["tools"][0]["risk_inference"][field] = forged_value
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("source", "invalid risk inference source"),
+        ("confidence", "invalid risk inference confidence"),
+    ),
+)
+def test_risk_inference_vocabulary_is_closed(field, message):
+    report = _avp9_report()
+    report["tools"][0]["risk_inference"][field] = "arbitrary"
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "summary_field",
+    (
+        "tools",
+        "parameters",
+        "protected_parameters",
+        "data_fillable_parameters",
+        "review_required",
+        "confirmation_required_tools",
+        "risk_review_required_tools",
+        "risk_conflicts",
+        "annotation_conflicts",
+        "schema_review_required_tools",
+    ),
+)
+def test_every_report_summary_counter_is_recomputed(summary_field):
+    report = _avp9_report()
+    report["summary"][summary_field] += 1
+
+    with pytest.raises(DiffError, match=f"summary.{summary_field}"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "thresholds",
+    (
+        (),
+        ("--fail-on-increase",),
+        ("--fail-on-review",),
+        ("--fail-on-increase", "--fail-on-review"),
+    ),
+)
+def test_avp9_risk_only_forgery_exits_two_before_ci_thresholds(
+    tmp_path, capsys, thresholds
+):
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    after["tools"][0]["risk"] = "read_only"
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                *thresholds,
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "inconsistent risk" in error
+    assert "Traceback" not in error
+
+
+def test_coherent_effective_risk_changes_always_require_review():
+    before = _declared_risk_report("read_only")
+    after = _declared_risk_report("write")
+
+    diff = diff_reports(before, after)
+    risk_change = next(
+        change for change in diff["changes"] if change["kind"] == "tool_risk_changed"
+    )
+
+    assert risk_change["classification"] == "review"
+    assert diff["summary"]["reviews"] >= 1
+    assert diff["summary"]["protection_increases"] == 0
 
 
 def test_duplicated_schema_closure_must_match_the_report_tool():
@@ -1143,16 +1531,24 @@ def test_declared_risk_effect_change_requires_review():
 
 def test_new_risk_conflict_requires_review():
     before = _avp9_report()
-    after = copy.deepcopy(before)
-    after["tools"][0]["risk_conflict"] = True
-    after["tools"][0]["risk_review_required"] = True
+    schema = json.loads(
+        (FIXTURES / "avp9_nexus_financial_tool.json").read_text(encoding="utf-8")
+    )
+    controls = json.loads(
+        (FIXTURES / "avp9_nexus_financial_controls.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    controls["tools"]["purchase_bid"]["risk"]["tier"] = "write"
+    after = scan_documents([schema], control_declarations=controls)
 
     diff = diff_reports(before, after)
 
     kinds = {item["kind"] for item in diff["changes"]}
     assert "risk_conflict_changed" in kinds
     assert "risk_review_required_changed" in kinds
-    assert diff["summary"]["reviews"] == 2
+    assert "tool_risk_changed" in kinds
+    assert diff["summary"]["reviews"] >= 3
 
 
 def test_avp9_constrained_amount_becoming_free_is_an_authority_increase():
@@ -1213,6 +1609,7 @@ def test_server_fixed_argument_becoming_exposed_is_an_authority_increase():
         }
     )
     _refresh_control_fingerprint(after)
+    _refresh_report_summary(after)
 
     diff = diff_reports(before, after)
 
@@ -1763,7 +2160,7 @@ def test_same_enforced_bound_orders_structured_mutability_changes(
     assert bound_change["classification"] == classification
 
 
-def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():
+def test_impossible_confirmation_removal_is_rejected_before_ci_thresholds():
     pay_tool = {
         "name": "pay_invoice",
         "inputSchema": {"properties": {"amount": {"type": "integer"}}},
@@ -1784,13 +2181,8 @@ def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():
     )
     after["tools"][0]["needs_confirmation"] = False
 
-    diff = diff_reports(before, after)
-
-    assert diff["summary"]["authority_increases"] == 2
-    assert {change["kind"] for change in diff["changes"]} == {
-        "confirmation_changed",
-        "tool_added",
-    }
+    with pytest.raises(DiffError, match="inconsistent needs_confirmation"):
+        diff_reports(before, after)
 
 
 def test_opening_additional_properties_is_an_authority_increase():

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from verb_authority_scan import (
+    CONTROL_VERIFICATION_NOTICE,
     REPORT_VERSION,
     SchemaError,
     canonical_decimal_text,
@@ -56,6 +57,12 @@ _DECLARED_AUTHORITIES = frozenset(_DECLARED_AUTHORITY_RANK)
 _RISKS = frozenset({"unknown", *_RISK_RANK})
 _RISK_SOURCES = frozenset(
     {"safe_default", "control_declaration", "conflict_safe_default"}
+)
+_RISK_INFERENCE_SOURCES = frozenset({"tool_name", "inference_limit"})
+_RISK_CONFIDENCES = frozenset({"heuristic", "uncertain"})
+_ARGUMENT_CONFIDENCES = frozenset({"high", "uncertain"})
+_CONFIRMATION_RISKS = frozenset(
+    {"unknown", "financial", "destructive", "code_exec"}
 )
 _EVIDENCE = frozenset({"observed", "declared", "attested"})
 _BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
@@ -145,12 +152,98 @@ def _validate_declared_risk(value: Any, *, field: str) -> None:
         _require_text(risk["note"], field=f"{field}.note")
 
 
+def _validate_report_risk_coherence(
+    tool: dict[str, Any],
+    *,
+    name: str,
+    matched_tokens_included: bool,
+) -> None:
+    """Reject report-v3 risk tuples the scanner could never emit."""
+
+    inference = tool["risk_inference"]
+    inference_source = inference["source"]
+    inference_confidence = inference["confidence"]
+    inferred_risk = tool["inferred_risk"]
+    if inference_source not in _RISK_INFERENCE_SOURCES:
+        raise DiffError(f"tool '{name}' has invalid risk inference source")
+    if inference_confidence not in _RISK_CONFIDENCES:
+        raise DiffError(f"tool '{name}' has invalid risk inference confidence")
+    if inference["mutability"] != "caller":
+        raise DiffError(f"tool '{name}' has invalid risk inference mutability")
+
+    matched_tokens = inference.get("matched_tokens")
+    if matched_tokens_included:
+        if any(not token for token in matched_tokens):
+            raise DiffError(f"tool '{name}' has invalid risk inference tokens")
+        if inference_source == "inference_limit":
+            inference_coherent = (
+                inferred_risk == "unknown"
+                and inference_confidence == "uncertain"
+                and matched_tokens == []
+            )
+        elif inferred_risk == "unknown":
+            inference_coherent = (
+                inference_confidence == "uncertain" and matched_tokens == []
+            )
+        else:
+            inference_coherent = (
+                inference_confidence == "heuristic" and bool(matched_tokens)
+            )
+        if not inference_coherent:
+            raise DiffError(f"tool '{name}' has inconsistent risk inference")
+    elif inference_source == "inference_limit" and (
+        inferred_risk != "unknown" or inference_confidence != "uncertain"
+    ):
+        raise DiffError(f"tool '{name}' has inconsistent risk inference")
+
+    declared = tool["declared_risk"]
+    declared_tier = declared["tier"] if declared is not None else None
+    inference_incomplete = inference_source == "inference_limit"
+    expected_conflict = (
+        declared_tier is not None
+        and inferred_risk != "unknown"
+        and declared_tier != inferred_risk
+    )
+    unresolved = (
+        declared_tier is None or expected_conflict or inference_incomplete
+    )
+    expected_risk = "unknown" if unresolved else declared_tier
+    if expected_conflict:
+        expected_source = "conflict_safe_default"
+    elif declared_tier is not None and not inference_incomplete:
+        expected_source = "control_declaration"
+    else:
+        expected_source = "safe_default"
+    expected_evidence = (
+        declared["evidence"]
+        if declared is not None and not expected_conflict and not inference_incomplete
+        else None
+    )
+    expected_confirmation = expected_risk in _CONFIRMATION_RISKS
+
+    expected = {
+        "risk": expected_risk,
+        "risk_source": expected_source,
+        "risk_evidence": expected_evidence,
+        "risk_conflict": expected_conflict,
+        "risk_review_required": unresolved,
+        "needs_confirmation": expected_confirmation,
+    }
+    for field, expected_value in expected.items():
+        if tool[field] != expected_value:
+            raise DiffError(
+                f"tool '{name}' has inconsistent {field}; "
+                "rescan the original schema"
+            )
+
+
 def _validate_report_argument(
     value: Any,
     *,
     tool: str,
     seen: set[str],
     require_fingerprints: bool,
+    effective_risk: str,
 ) -> None:
     argument = _require_object(value, field=f"tool '{tool}' argument")
     _reject_unknown_fields(
@@ -175,15 +268,32 @@ def _validate_report_argument(
     seen.add(name)
     _require_text(argument.get("type"), field=f"argument {tool}.{name}.type")
     _require_bool(argument.get("required"), field=f"argument {tool}.{name}.required")
-    if argument.get("policy") not in _POLICIES:
+    policy = argument.get("policy")
+    if policy not in _POLICIES:
         raise DiffError(f"argument {tool}.{name}.policy is invalid")
-    _require_text(
+    confidence = _require_text(
         argument.get("confidence"), field=f"argument {tool}.{name}.confidence"
     )
-    _require_bool(
+    if confidence not in _ARGUMENT_CONFIDENCES:
+        raise DiffError(f"argument {tool}.{name}.confidence is invalid")
+    review_required = _require_bool(
         argument.get("review_required"),
         field=f"argument {tool}.{name}.review_required",
     )
+    if confidence == "high":
+        inference_coherent = review_required is False
+    elif policy == "trusted_fixed":
+        inference_coherent = review_required is True
+    else:
+        inference_coherent = (
+            policy == "typed_bounded"
+            and effective_risk == "read_only"
+            and review_required is False
+        )
+    if not inference_coherent:
+        raise DiffError(
+            f"argument {tool}.{name} has inconsistent policy inference"
+        )
     _require_text(argument.get("reason"), field=f"argument {tool}.{name}.reason")
     _validated_constraints(argument.get("constraints"), tool=tool, argument=name)
     for fingerprint_field in (
@@ -288,7 +398,11 @@ def _validate_report_tool(
             raise DiffError(
                 f"redacted tool '{name}' exposes risk-inference tokens"
             )
-    _validate_declared_risk(tool.get("declared_risk"), field=f"tool '{name}' risk")
+    if "risk_evidence" not in tool:
+        raise DiffError(f"tool '{name}' is missing risk_evidence")
+    if "declared_risk" not in tool:
+        raise DiffError(f"tool '{name}' is missing declared_risk")
+    _validate_declared_risk(tool["declared_risk"], field=f"tool '{name}' risk")
     for boolean_field in (
         "risk_conflict",
         "risk_review_required",
@@ -296,6 +410,11 @@ def _validate_report_tool(
         "schema_closes_unknown_arguments",
     ):
         _require_bool(tool.get(boolean_field), field=f"tool '{name}' {boolean_field}")
+    _validate_report_risk_coherence(
+        tool,
+        name=name,
+        matched_tokens_included=require_fingerprints,
+    )
     if "schema_review_required" in tool:
         _require_bool(
             tool["schema_review_required"],
@@ -334,6 +453,7 @@ def _validate_report_tool(
             tool=name,
             seen=argument_names,
             require_fingerprints=require_fingerprints,
+            effective_risk=tool["risk"],
         )
     return name, argument_names
 
@@ -373,10 +493,12 @@ def _validate_declared_controls(
     )
     if type(declared.get("version")) is not int or declared.get("version") != 1:
         raise DiffError("declared_controls.version is invalid")
-    _require_text(
+    verification_notice = _require_text(
         declared.get("verification_notice"),
         field="declared_controls.verification_notice",
     )
+    if verification_notice != CONTROL_VERIFICATION_NOTICE:
+        raise DiffError("declared_controls.verification_notice is invalid")
     if "attribution" in declared:
         attribution = _require_object(
             declared["attribution"], field="declared_controls.attribution"
@@ -528,10 +650,11 @@ def _validate_declared_controls(
                     field=f"declared argument note for {name}.{argument_name}",
                 )
 
-        for raw_argument in _require_array(
+        unexposed_arguments = _require_array(
             tool.get("unexposed_arguments"),
             field=f"declared tool '{name}' unexposed arguments",
-        ):
+        )
+        for raw_argument in unexposed_arguments:
             argument = _require_object(
                 raw_argument, field=f"unexposed control for '{name}'"
             )
@@ -578,6 +701,15 @@ def _validate_declared_controls(
                     argument["note"],
                     field=f"unexposed control note for {name}.{argument_name}",
                 )
+        if (
+            unexposed_arguments
+            and report_tool["schema_closes_unknown_arguments"] is False
+            and report_tool.get("schema_review_required") is not True
+        ):
+            raise DiffError(
+                f"tool '{name}' has unexposed controls on an open schema but "
+                "does not require schema review"
+            )
 
     for name, report_tool in report_tools.items():
         if report_tool.get("declared_risk") is not None and name not in tools_seen:
@@ -747,11 +879,50 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         if set(report_arguments[tool_name]) != argument_names:
             raise DiffError(f"tool '{tool_name}' argument index is inconsistent")
 
-    if summary.get("schema_review_required_tools") != sum(
-        tool.get("schema_review_required", False) is True for tool in tools
-    ) and "schema_review_required_tools" in summary:
+    expected_summary = {
+        "tools": len(tools),
+        "parameters": sum(len(tool["arguments"]) for tool in tools),
+        "protected_parameters": sum(
+            argument["policy"] == "trusted_fixed"
+            for tool in tools
+            for argument in tool["arguments"]
+        ),
+        "data_fillable_parameters": sum(
+            argument["policy"] != "trusted_fixed"
+            for tool in tools
+            for argument in tool["arguments"]
+        ),
+        "review_required": sum(
+            argument["review_required"] is True
+            for tool in tools
+            for argument in tool["arguments"]
+        ),
+        "confirmation_required_tools": sum(
+            tool["needs_confirmation"] is True for tool in tools
+        ),
+        "risk_review_required_tools": sum(
+            tool["risk_review_required"] is True for tool in tools
+        ),
+        "risk_conflicts": sum(tool["risk_conflict"] is True for tool in tools),
+        "annotation_conflicts": sum(
+            len(tool["annotation_conflicts"]) for tool in tools
+        ),
+    }
+    for field, expected_value in expected_summary.items():
+        if summary[field] != expected_value:
+            raise DiffError(f"{label} summary.{field} does not match its tools")
+
+    schema_flags = ["schema_review_required" in tool for tool in tools]
+    schema_summary_present = "schema_review_required_tools" in summary
+    if any(schema_flags) and not all(schema_flags):
+        raise DiffError(f"{label} mixes legacy and current schema review fields")
+    if schema_flags and schema_summary_present != all(schema_flags):
+        raise DiffError(f"{label} has inconsistent schema review summary metadata")
+    if schema_summary_present and summary["schema_review_required_tools"] != sum(
+        tool["schema_review_required"] is True for tool in tools
+    ):
         raise DiffError(
-            f"{label} schema_review_required_tools does not match its tools"
+            f"{label} summary.schema_review_required_tools does not match its tools"
         )
 
     controls_included = privacy["control_declarations_included"]
@@ -775,6 +946,10 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
             )
     elif "declared_controls" in report or "control_declaration_fingerprint_sha256" in report:
         raise DiffError(f"{label} has inconsistent declared control metadata")
+    elif any(tool["declared_risk"] is not None for tool in tools):
+        raise DiffError(
+            f"{label} exposes declared risk without declared control metadata"
+        )
 
     if names_redacted is True:
         raise DiffError(
@@ -1666,18 +1841,16 @@ def diff_reports(
             continue
 
         if before_tool["risk"] != after_tool["risk"]:
-            _ranked_change(
-                changes,
-                kind="tool_risk_changed",
-                tool=tool,
-                argument=None,
-                field="risk",
-                before=before_tool["risk"],
-                after=after_tool["risk"],
-                ranks=_RISK_RANK,
-                increase_message="Tool risk increased.",
-                reduction_message="Tool risk decreased.",
-                review_message="Tool risk class changed and needs review.",
+            changes.append(
+                _change(
+                    "review",
+                    "tool_risk_changed",
+                    tool,
+                    field="risk",
+                    before=before_tool["risk"],
+                    after=after_tool["risk"],
+                    message="Tool risk class changed and needs review.",
+                )
             )
 
         for field, kind, message in (
