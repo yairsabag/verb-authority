@@ -345,6 +345,22 @@ tag or GitHub release was created, and the version is intentionally not reused.
   confidence/policy/review matrix, preserve the exact author-declaration warning,
   and reject an open schema with unexposed controls if its required schema-review
   marker is false or omitted.
+- Require every imported v3 report to carry the per-tool
+  `schema_review_required` field and matching
+  `summary.schema_review_required_tools` counter; intermediate unpublished v3
+  reports that omit them now require a rescan instead of receiving a false
+  default. Classify clearing an unresolved schema-review obligation as review,
+  never as a protection increase, and exercise both explicit-false and omitted
+  variants through the isolated installed-wheel CLI.
+- Match imported risk-effect validation to scanner output by rejecting empty,
+  whitespace-padded, or duplicate effects; reject zero-tool v3 reports that the
+  scanner cannot emit. Require scanner-normalized declaration text, canonical
+  declaration ordering (including numeric redacted placeholders), and the
+  scanner's aggregate cardinality ceilings when importing reports. Detach the
+  confirmation request's compatibility `Decision`
+  from the decision returned on callback denial. Remove the inaccurate
+  `Typing :: Typed` classifier while the distribution remains a set of top-level
+  modules, which PEP 561 cannot mark as an inline-typed package.
 - Escape active Markdown link/image syntax and neutralize bare-URL autolinks,
   mentions, issue-reference markers, GitHub `GH-NNN` shorthand, and raw commit
   identifiers in schema-controlled cells as well as terminal and bidirectional

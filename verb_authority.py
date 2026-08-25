@@ -3381,7 +3381,14 @@ def _confirmation_request(
     )
     assessment = bundle.policy_set.risk_inference[tool_name]
     return ConfirmationRequest(
-        decision=decision,
+        # The callback receives its own frozen decision snapshot. Even trusted
+        # callback code using ``object.__setattr__`` must not rewrite the
+        # decision later returned by the runner on denial.
+        decision=Decision(
+            decision.allow,
+            decision.reason,
+            decision.needs_confirm,
+        ),
         tool_name=tool_name,
         arguments_json=arguments_json,
         risk=_risk_literal(effective_risk),

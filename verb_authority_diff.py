@@ -18,6 +18,10 @@ from typing import Any
 
 from verb_authority_scan import (
     CONTROL_VERIFICATION_NOTICE,
+    MAX_SCAN_ARGUMENTS,
+    MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
+    MAX_SCAN_ENUM_MEMBERS,
+    MAX_SCAN_TOOL_DEFINITIONS,
     REPORT_VERSION,
     SchemaError,
     canonical_decimal_text,
@@ -95,6 +99,13 @@ def _require_text(value: Any, *, field: str) -> str:
     return value
 
 
+def _require_scanner_normalized_text(value: Any, *, field: str) -> str:
+    text = _require_text(value, field=field)
+    if not text.strip() or text != text.strip():
+        raise DiffError(f"{field} must be trimmed, non-empty text")
+    return text
+
+
 def _require_bool(value: Any, *, field: str) -> bool:
     if type(value) is not bool:
         raise DiffError(f"{field} must be a boolean")
@@ -147,9 +158,21 @@ def _validate_declared_risk(value: Any, *, field: str) -> None:
         raise DiffError(f"{field}.evidence is invalid")
     effects = _require_string_array(risk.get("effects"), field=f"{field}.effects")
     if not effects or len(effects) != len(set(effects)):
-        raise DiffError(f"{field}.effects must be non-empty and unique")
+        raise DiffError(
+            f"{field}.effects must contain trimmed, non-empty, unique text"
+        )
+    for index, effect in enumerate(effects, start=1):
+        try:
+            _require_scanner_normalized_text(
+                effect,
+                field=f"{field}.effects[{index}]",
+            )
+        except DiffError as exc:
+            raise DiffError(
+                f"{field}.effects must contain trimmed, non-empty, unique text"
+            ) from exc
     if "note" in risk:
-        _require_text(risk["note"], field=f"{field}.note")
+        _require_scanner_normalized_text(risk["note"], field=f"{field}.note")
 
 
 def _validate_report_risk_coherence(
@@ -415,11 +438,15 @@ def _validate_report_tool(
         name=name,
         matched_tokens_included=require_fingerprints,
     )
-    if "schema_review_required" in tool:
-        _require_bool(
-            tool["schema_review_required"],
-            field=f"tool '{name}' schema_review_required",
+    if "schema_review_required" not in tool:
+        raise DiffError(
+            f"tool '{name}' is missing schema_review_required; rescan the "
+            "original schema with the current scanner"
         )
+    _require_bool(
+        tool["schema_review_required"],
+        field=f"tool '{name}' schema_review_required",
+    )
     _require_string_array(
         tool.get("annotation_conflicts"),
         field=f"tool '{name}' annotation conflicts",
@@ -470,13 +497,17 @@ def _validate_bound(value: Any, *, field: str) -> None:
         },
         field=field,
     )
-    _require_text(bound.get("source"), field=f"{field}.source")
+    _require_scanner_normalized_text(
+        bound.get("source"), field=f"{field}.source"
+    )
     if bound.get("bounds_mutability") not in _BOUND_MUTABILITY:
         raise DiffError(f"{field}.bounds_mutability is invalid")
     if bound.get("operational_status") not in _BOUND_STATUS:
         raise DiffError(f"{field}.operational_status is invalid")
     if "enforcement" in bound:
-        _require_text(bound["enforcement"], field=f"{field}.enforcement")
+        _require_scanner_normalized_text(
+            bound["enforcement"], field=f"{field}.enforcement"
+        )
 
 
 def _validate_declared_controls(
@@ -484,6 +515,7 @@ def _validate_declared_controls(
     *,
     report_tools: dict[str, dict[str, Any]],
     report_arguments: dict[str, dict[str, dict[str, Any]]],
+    names_redacted: bool,
 ) -> None:
     declared = _require_object(value, field="declared_controls")
     _reject_unknown_fields(
@@ -511,11 +543,12 @@ def _validate_declared_controls(
         if not attribution:
             raise DiffError("declared_controls.attribution must not be empty")
         for attribution_field, attribution_value in attribution.items():
-            _require_text(
+            _require_scanner_normalized_text(
                 attribution_value,
                 field=f"declared_controls.attribution.{attribution_field}",
             )
     tools_seen: set[str] = set()
+    declared_tool_order: list[str] = []
     for raw_tool in _require_array(
         declared.get("tools"), field="declared_controls.tools"
     ):
@@ -535,6 +568,7 @@ def _validate_declared_controls(
         if name in tools_seen:
             raise DiffError(f"declared controls contain duplicate tool name: {name}")
         tools_seen.add(name)
+        declared_tool_order.append(name)
         if name not in report_tools:
             raise DiffError(f"declared controls reference unknown report tool: {name}")
         report_tool = report_tools[name]
@@ -558,6 +592,7 @@ def _validate_declared_controls(
             )
 
         argument_names: set[str] = set()
+        declared_argument_order: list[str] = []
         for raw_argument in _require_array(
             tool.get("arguments"), field=f"declared tool '{name}' arguments"
         ):
@@ -587,6 +622,7 @@ def _validate_declared_controls(
                     f"{name}.{argument_name}"
                 )
             argument_names.add(argument_name)
+            declared_argument_order.append(argument_name)
             if argument_name not in report_arguments[name]:
                 raise DiffError(
                     f"declared controls reference unknown argument: "
@@ -645,15 +681,26 @@ def _validate_declared_controls(
                     field=f"declared bound {index} for {name}.{argument_name}",
                 )
             if "note" in argument:
-                _require_text(
+                _require_scanner_normalized_text(
                     argument["note"],
                     field=f"declared argument note for {name}.{argument_name}",
                 )
+
+        expected_argument_order = [
+            argument_name
+            for argument_name in report_arguments[name]
+            if argument_name in argument_names
+        ]
+        if declared_argument_order != expected_argument_order:
+            raise DiffError(
+                f"declared argument order does not match report order for '{name}'"
+            )
 
         unexposed_arguments = _require_array(
             tool.get("unexposed_arguments"),
             field=f"declared tool '{name}' unexposed arguments",
         )
+        unexposed_argument_order: list[str] = []
         for raw_argument in unexposed_arguments:
             argument = _require_object(
                 raw_argument, field=f"unexposed control for '{name}'"
@@ -679,6 +726,7 @@ def _validate_declared_controls(
                     f"{name}.{argument_name}"
                 )
             argument_names.add(argument_name)
+            unexposed_argument_order.append(argument_name)
             if argument_name in report_arguments[name]:
                 raise DiffError(
                     f"argument is both exposed and unexposed: {name}.{argument_name}"
@@ -692,15 +740,29 @@ def _validate_declared_controls(
                 raise DiffError(f"unexposed control is invalid: {name}.{argument_name}")
             if argument.get("evidence") not in _EVIDENCE:
                 raise DiffError(f"unexposed evidence is invalid: {name}.{argument_name}")
-            _require_text(
+            _require_scanner_normalized_text(
                 argument.get("enforced_by"),
                 field=f"unexposed control enforcement for {name}.{argument_name}",
             )
             if "note" in argument:
-                _require_text(
+                _require_scanner_normalized_text(
                     argument["note"],
                     field=f"unexposed control note for {name}.{argument_name}",
                 )
+        if names_redacted:
+            expected_unexposed_order = [
+                f"param_{index:03d}"
+                for index in range(
+                    len(report_arguments[name]) + 1,
+                    len(report_arguments[name]) + len(unexposed_argument_order) + 1,
+                )
+            ]
+        else:
+            expected_unexposed_order = sorted(unexposed_argument_order)
+        if unexposed_argument_order != expected_unexposed_order:
+            raise DiffError(
+                f"unexposed control order is not canonical for '{name}'"
+            )
         if (
             unexposed_arguments
             and report_tool["schema_closes_unknown_arguments"] is False
@@ -711,11 +773,62 @@ def _validate_declared_controls(
                 "does not require schema review"
             )
 
+    expected_tool_order = [name for name in report_tools if name in tools_seen]
+    if declared_tool_order != expected_tool_order:
+        raise DiffError("declared control tool order does not match report order")
+
     for name, report_tool in report_tools.items():
         if report_tool.get("declared_risk") is not None and name not in tools_seen:
             raise DiffError(
                 f"report tool '{name}' exposes declared risk without the matching "
                 "declared control tool"
+            )
+
+
+def _validate_report_cardinalities(
+    tools: list[dict[str, Any]],
+    declared_controls: dict[str, Any] | None,
+    *,
+    label: str,
+) -> None:
+    """Require imported reports to stay within scanner-emittable ceilings."""
+
+    arguments = sum(len(tool["arguments"]) for tool in tools)
+    enum_members = 0
+    for tool in tools:
+        for argument in tool["arguments"]:
+            constraints = argument.get("constraints")
+            if type(constraints) is not dict:
+                continue
+            enum = constraints.get("enum")
+            if type(enum) is dict and type(enum.get("count")) is int:
+                enum_members += enum["count"]
+
+    control_collection_members = 0
+    if declared_controls is not None:
+        for tool in declared_controls["tools"]:
+            arguments += len(tool["unexposed_arguments"])
+            risk = tool.get("risk")
+            if risk is not None:
+                control_collection_members += len(risk["effects"])
+            for argument in tool["arguments"]:
+                control_collection_members += len(argument.get("bounds", []))
+
+    counts = (
+        ("tool-definition", len(tools), MAX_SCAN_TOOL_DEFINITIONS),
+        ("argument", arguments, MAX_SCAN_ARGUMENTS),
+        ("enum-member", enum_members, MAX_SCAN_ENUM_MEMBERS),
+        (
+            "control collection-member",
+            control_collection_members,
+            MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
+        ),
+    )
+    for kind, count, limit in counts:
+        if count > limit:
+            raise DiffError(
+                f"{label} exceeds the scanner {kind} limit of {limit}; rescan "
+                "the original schema with the current scanner"
             )
 
 
@@ -850,19 +963,29 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         "risk_review_required_tools",
         "risk_conflicts",
         "annotation_conflicts",
+        "schema_review_required_tools",
     }
-    optional_summary_fields = {"schema_review_required_tools"}
     _reject_unknown_fields(
         summary,
-        allowed=required_summary_fields | optional_summary_fields,
+        allowed=required_summary_fields,
         field=f"{label} summary",
     )
+    if "schema_review_required_tools" not in summary:
+        raise DiffError(
+            f"{label} is missing summary.schema_review_required_tools; rescan "
+            "the original schema with the current scanner"
+        )
     if not required_summary_fields.issubset(summary) or any(
         type(value) is not int or value < 0 for value in summary.values()
     ):
         raise DiffError(f"{label} has invalid report summary")
 
     tools = _require_array(report.get("tools"), field=f"{label} tools")
+    if not tools:
+        raise DiffError(
+            f"{label} contains no tool definitions; rescan the original schema "
+            "with the current scanner"
+        )
     tool_names: set[str] = set()
     report_tools: dict[str, dict[str, Any]] = {}
     report_arguments: dict[str, dict[str, dict[str, Any]]] = {}
@@ -912,13 +1035,7 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         if summary[field] != expected_value:
             raise DiffError(f"{label} summary.{field} does not match its tools")
 
-    schema_flags = ["schema_review_required" in tool for tool in tools]
-    schema_summary_present = "schema_review_required_tools" in summary
-    if any(schema_flags) and not all(schema_flags):
-        raise DiffError(f"{label} mixes legacy and current schema review fields")
-    if schema_flags and schema_summary_present != all(schema_flags):
-        raise DiffError(f"{label} has inconsistent schema review summary metadata")
-    if schema_summary_present and summary["schema_review_required_tools"] != sum(
+    if summary["schema_review_required_tools"] != sum(
         tool["schema_review_required"] is True for tool in tools
     ):
         raise DiffError(
@@ -926,6 +1043,7 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         )
 
     controls_included = privacy["control_declarations_included"]
+    validated_declared_controls: dict[str, Any] | None = None
     if controls_included:
         if "declared_controls" not in report:
             raise DiffError(f"{label} is missing declared_controls")
@@ -937,7 +1055,9 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
             report["declared_controls"],
             report_tools=report_tools,
             report_arguments=report_arguments,
+            names_redacted=names_redacted,
         )
+        validated_declared_controls = report["declared_controls"]
         if declared_fingerprint != _control_declaration_fingerprint(
             report["declared_controls"]
         ):
@@ -950,6 +1070,12 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         raise DiffError(
             f"{label} exposes declared risk without declared control metadata"
         )
+
+    _validate_report_cardinalities(
+        tools,
+        validated_declared_controls,
+        label=label,
+    )
 
     if names_redacted is True:
         raise DiffError(
@@ -1097,9 +1223,7 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "schema_closes_unknown_arguments": raw_tool.get(
                 "schema_closes_unknown_arguments"
             ),
-            "schema_review_required": raw_tool.get(
-                "schema_review_required", False
-            ),
+            "schema_review_required": raw_tool["schema_review_required"],
             "schema_material_fingerprint_sha256": raw_tool[
                 "schema_material_fingerprint_sha256"
             ],
@@ -1959,16 +2083,16 @@ def diff_reports(
         before_schema_review = before_tool["schema_review_required"]
         after_schema_review = after_tool["schema_review_required"]
         if before_schema_review is not after_schema_review:
+            classification = "review"
             if after_schema_review is True:
-                classification = "review"
                 message = (
                     "The schema now uses unresolved composition or references and "
                     "requires manual authority review."
                 )
             else:
-                classification = "protection_increase"
                 message = (
-                    "The unresolved schema-composition review requirement was removed."
+                    "The unresolved schema-composition review requirement was "
+                    "cleared and that resolution requires manual review."
                 )
             changes.append(
                 _change(

@@ -29,7 +29,6 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Security",
-  "Typing :: Typed",
 ]
 dependencies = []
 

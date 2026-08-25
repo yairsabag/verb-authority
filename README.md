@@ -154,6 +154,9 @@ Before confirmation, the runner isolates the tool call and trusted arguments
 and snapshots registration/policy metadata. The callback receives an
 immutable `ConfirmationRequest` whose ASCII-escaped, insertion-order-preserving
 `arguments_json` encodes the exact private argument snapshot that can run.
+Its compatibility `decision` object is also a detached snapshot, so even a
+trusted callback that forcibly mutates its display object cannot rewrite the
+decision metadata returned by the runner on denial.
 Signed `0.0`/`-0.0` and nested object member order remain distinct in both the
 snapshot and `action_id`, because Python tool implementations can observe
 those differences. Runtime `Decision.reason` text ASCII-escapes control,
@@ -420,6 +423,14 @@ aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
 
+Both schema-review fields are mandatory in imported v3 reports. A report that
+omits either field must be regenerated from the original schema with the
+current scanner; omission is not interpreted as `false`. When Authority Diff
+sees an explicit schema-review obligation change in either direction, it keeps
+the change in the review queue. In particular, clearing `true` to `false` is
+not treated as proof that protection increased when only report evidence is
+available.
+
 ### Add implementation-level control evidence
 
 A JSON Schema cannot show that a caller-selected value is constrained by a
@@ -476,7 +487,8 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
 
 Risk declarations require a `tier` (`read_only`, `write`, `financial`,
 `destructive`, or `code_exec`), an evidence label, and a non-empty list of
-concrete effects. Effects are preserved as author-written evidence and are not
+unique, non-blank concrete effects. Surrounding whitespace is stripped during
+normalization. Effects are preserved as author-written evidence and are not
 parsed into a verdict. A non-conflicting declaration resolves the `unknown`
 fail-safe. If it disagrees with a matched name heuristic, the report preserves
 both claims, keeps the effective tier `unknown`, marks the source as
@@ -543,6 +555,15 @@ controls are part of the comparison, pass the sidecars with
 author-supplied; a diff does not turn a declaration into verified enforcement.
 Malformed or legacy report-shaped input is rejected as a report and is never
 reinterpreted as a raw tool schema.
+Intermediate, unpublished v3 reports that predate the mandatory
+`schema_review_required` and `summary.schema_review_required_tools` fields must
+also be rescanned rather than compared under an optimistic default.
+Imported v3 reports must contain at least one tool, matching the scanner's own
+output boundary; a fabricated empty report is rejected with rescan guidance.
+They must also preserve scanner-normalized declaration text and canonical
+declaration order, and remain within the scanner's aggregate limits for tools,
+arguments, enum members, effects, and bounds. A report outside those emitter
+boundaries is rejected instead of being treated as a scanner-produced report.
 
 The two CLI thresholds are independent. `--fail-on-increase` returns status 2
 only for authority increases; review-only and protection increases remain

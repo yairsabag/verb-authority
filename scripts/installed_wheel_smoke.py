@@ -85,6 +85,11 @@ def _installed_identity(
         installed_version == expected_version,
         f"installed version {installed_version!r} != {expected_version!r}",
     )
+    classifiers = distribution.metadata.get_all("Classifier") or []
+    _check(
+        "Typing :: Typed" not in classifiers,
+        "module-only distribution still makes an unsupported PEP 561 claim",
+    )
     distribution_root = Path(distribution.locate_file("")).resolve()
     for module in (verb_authority, verb_authority_scan, verb_authority_diff):
         location = Path(module.__file__).resolve()
@@ -3826,6 +3831,322 @@ def _daybreak_release_candidate_regressions() -> None:
         verb_authority.unicodedata = original_unicode
 
 
+def _schema_review_diff_fail_closed() -> None:
+    """Pin schema-review removal and legacy omission in the installed CLI."""
+
+    document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "$ref": "#/$defs/missing",
+                },
+            }
+        ]
+    }
+    before = scan_documents([document])
+    explicit_false = copy.deepcopy(before)
+    explicit_false["tools"][0]["schema_review_required"] = False
+    explicit_false["summary"]["schema_review_required_tools"] = 0
+    explicit_diff = diff_reports(before, explicit_false)
+    explicit_change = next(
+        change
+        for change in explicit_diff["changes"]
+        if change["kind"] == "schema_review_requirement_changed"
+    )
+    _check(
+        explicit_change["classification"] == "review"
+        and explicit_diff["summary"]["reviews"] == 1
+        and explicit_diff["summary"]["protection_increases"] == 0,
+        "installed diff treated cleared schema review as protection",
+    )
+
+    omitted = copy.deepcopy(before)
+    omitted["tools"][0].pop("schema_review_required")
+    omitted["summary"].pop("schema_review_required_tools")
+
+    with TemporaryDirectory(prefix="verb-authority-schema-review-") as directory:
+        root = Path(directory)
+        before_path = root / "before.json"
+        false_path = root / "false.json"
+        omitted_path = root / "omitted.json"
+        before_path.write_text(json.dumps(before), encoding="utf-8")
+        false_path.write_text(json.dumps(explicit_false), encoding="utf-8")
+        omitted_path.write_text(json.dumps(omitted), encoding="utf-8")
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONHOME", None)
+
+        false_result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "verb_authority",
+                "diff",
+                str(before_path),
+                str(false_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        _check(
+            false_result.returncode == 2
+            and "[REVIEW]" in false_result.stdout
+            and "Traceback" not in false_result.stderr,
+            "installed CLI did not fail closed on cleared schema review",
+        )
+
+        omitted_result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "verb_authority",
+                "diff",
+                str(before_path),
+                str(omitted_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        _check(
+            omitted_result.returncode == 2
+            and "schema_review_required" in omitted_result.stderr
+            and "rescan" in omitted_result.stderr
+            and "Traceback" not in omitted_result.stderr,
+            "installed CLI accepted omitted schema-review evidence",
+        )
+
+
+def _daybreak_final_p3_regressions() -> None:
+    """Pin the remaining final-audit report and callback boundaries."""
+
+    empty_report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    empty_report["tools"] = []
+    empty_report["summary"] = {
+        field: 0 for field in empty_report["summary"]
+    }
+    try:
+        diff_reports(empty_report, copy.deepcopy(empty_report))
+    except DiffError as exc:
+        _check(
+            "no tool definitions" in str(exc) and "rescan" in str(exc),
+            "installed empty-report rejection omitted rescan guidance",
+        )
+    else:
+        raise AssertionError("installed diff accepted a zero-tool v3 report")
+
+    schema = {
+        "tools": [
+            {
+                "name": "write_record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "write_record": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["writes_record"],
+                }
+            }
+        },
+    }
+    invalid_effect = scan_documents(
+        [schema],
+        control_declarations=controls,
+    )
+    invalid_effect["tools"][0]["declared_risk"]["effects"] = [""]
+    invalid_effect["declared_controls"]["tools"][0]["risk"]["effects"] = [""]
+    invalid_effect["control_declaration_fingerprint_sha256"] = (
+        verb_authority_scan._control_declaration_fingerprint(
+            invalid_effect["declared_controls"]
+        )
+    )
+    try:
+        diff_reports(invalid_effect, copy.deepcopy(invalid_effect))
+    except DiffError as exc:
+        _check(
+            "trimmed, non-empty, unique" in str(exc),
+            "installed empty-effect rejection reported the wrong boundary",
+        )
+    else:
+        raise AssertionError("installed diff accepted an empty declared effect")
+
+    parity_schema = {
+        "tools": [
+            {
+                "name": "write_alpha",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                },
+            },
+            {
+                "name": "write_beta",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+        ]
+    }
+    parity_controls = {
+        "version": 1,
+        "tools": {
+            "write_alpha": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["writes_record"],
+                    "note": "documented effect",
+                },
+                "arguments": {
+                    "target": {
+                        "authority": "constrained",
+                        "evidence": "declared",
+                        "bounds": [
+                            {
+                                "source": "allowlist",
+                                "bounds_mutability": "trusted_party",
+                                "operational_status": "enforced",
+                            }
+                        ],
+                    }
+                },
+            },
+            "write_beta": {},
+        },
+    }
+    parity_report = scan_documents(
+        [parity_schema],
+        control_declarations=parity_controls,
+    )
+
+    padded_note = copy.deepcopy(parity_report)
+    padded_note["tools"][0]["declared_risk"]["note"] = " padded "
+    padded_note["declared_controls"]["tools"][0]["risk"]["note"] = " padded "
+    padded_note["control_declaration_fingerprint_sha256"] = (
+        verb_authority_scan._control_declaration_fingerprint(
+            padded_note["declared_controls"]
+        )
+    )
+    try:
+        diff_reports(padded_note, copy.deepcopy(padded_note))
+    except DiffError as exc:
+        _check(
+            "trimmed, non-empty text" in str(exc),
+            "installed diff accepted non-normalized declaration text",
+        )
+    else:
+        raise AssertionError(
+            "installed diff accepted non-normalized declaration text"
+        )
+
+    reversed_controls = copy.deepcopy(parity_report)
+    reversed_controls["declared_controls"]["tools"].reverse()
+    reversed_controls["control_declaration_fingerprint_sha256"] = (
+        verb_authority_scan._control_declaration_fingerprint(
+            reversed_controls["declared_controls"]
+        )
+    )
+    try:
+        diff_reports(reversed_controls, copy.deepcopy(reversed_controls))
+    except DiffError as exc:
+        _check(
+            "tool order" in str(exc),
+            "installed declaration-order rejection reported the wrong boundary",
+        )
+    else:
+        raise AssertionError("installed diff accepted non-canonical tool order")
+
+    original_tool_limit = verb_authority_diff.MAX_SCAN_TOOL_DEFINITIONS
+    verb_authority_diff.MAX_SCAN_TOOL_DEFINITIONS = 1
+    try:
+        try:
+            diff_reports(parity_report, copy.deepcopy(parity_report))
+        except DiffError as exc:
+            _check(
+                "tool-definition limit of 1" in str(exc)
+                and "rescan" in str(exc),
+                "installed cardinality rejection reported the wrong boundary",
+            )
+        else:
+            raise AssertionError("installed diff ignored scanner cardinality")
+    finally:
+        verb_authority_diff.MAX_SCAN_TOOL_DEFINITIONS = original_tool_limit
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "evaluate",
+            [],
+            fn=lambda: {"ok": True},
+            risk=Risk.UNKNOWN,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    captured_decisions = []
+
+    def forge_display_decision_then_deny(request):
+        captured_decisions.append(request.decision)
+        object.__setattr__(request.decision, "allow", False)
+        object.__setattr__(request.decision, "reason", "forged callback reason")
+        object.__setattr__(request.decision, "needs_confirm", False)
+        object.__setattr__(
+            request,
+            "decision",
+            verb_authority.Decision(False, "forged replacement", False),
+        )
+        return False
+
+    result = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=forge_display_decision_then_deny,
+    )
+    _check(
+        not result.executed
+        and not result.invoked
+        and result.decision.allow is True
+        and result.decision.needs_confirm is True
+        and "risk policy" in result.decision.reason
+        and "forged" not in result.decision.reason
+        and captured_decisions[0] is not result.decision,
+        "installed confirmation display decision aliases returned metadata",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the installed Verb Authority wheel outside its checkout."
@@ -3869,6 +4190,8 @@ def main() -> int:
         _daybreak_followup_regressions,
         _daybreak_external_audit_regressions,
         _daybreak_release_candidate_regressions,
+        _schema_review_diff_fail_closed,
+        _daybreak_final_p3_regressions,
     )
     for check in checks:
         check()

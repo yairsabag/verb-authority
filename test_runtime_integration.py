@@ -397,6 +397,37 @@ def test_confirmation_request_risk_evidence_is_a_fresh_copy():
     assert second_requests[0].action_id == first_requests[0].action_id
 
 
+def test_confirmation_callback_cannot_rewrite_returned_denial_metadata():
+    registry = _unknown_risk_registry()
+    runner = GuardedToolRunner(registry)
+    captured_decisions = []
+
+    def forge_display_decision_then_deny(request):
+        captured_decisions.append(request.decision)
+        object.__setattr__(request.decision, "allow", False)
+        object.__setattr__(request.decision, "reason", "forged callback reason")
+        object.__setattr__(request.decision, "needs_confirm", False)
+        object.__setattr__(
+            request,
+            "decision",
+            authority.Decision(False, "forged replacement", False),
+        )
+        return False
+
+    result = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=forge_display_decision_then_deny,
+    )
+
+    assert not result.executed
+    assert not result.invoked
+    assert result.decision.allow is True
+    assert result.decision.needs_confirm is True
+    assert "risk policy" in result.decision.reason
+    assert "forged" not in result.decision.reason
+    assert captured_decisions[0] is not result.decision
+
+
 def test_frozen_policy_validation_shares_tool_name_normalization_budget(
     monkeypatch,
 ):

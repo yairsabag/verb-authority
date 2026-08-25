@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import verb_authority
+import verb_authority_diff as differ
 import verb_authority_scan as scanner
 from verb_authority_diff import (
     DIFF_VERSION,
@@ -690,6 +691,233 @@ def test_duplicated_declared_risk_must_match_the_report_tool():
         diff_reports(report, copy.deepcopy(report))
 
 
+@pytest.mark.parametrize("effect", ("", "   ", " padded "))
+def test_imported_declared_risk_effects_must_match_scanner_output(effect):
+    report = _avp9_report()
+    report["tools"][0]["declared_risk"]["effects"] = [effect]
+    report["declared_controls"]["tools"][0]["risk"]["effects"] = [effect]
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="trimmed, non-empty, unique"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_v3_report_must_contain_at_least_one_tool():
+    report = _single_argument_report({"type": "string"})
+    report["tools"] = []
+    report["summary"] = {field: 0 for field in report["summary"]}
+
+    with pytest.raises(DiffError, match="no tool definitions.*rescan"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "risk_note",
+        "attribution_name",
+        "bound_source",
+        "bound_enforcement",
+        "argument_note",
+        "unexposed_enforced_by",
+        "unexposed_note",
+    ),
+)
+def test_imported_control_text_must_match_scanner_normalization(field):
+    report = _avp9_report()
+    controls = report["declared_controls"]
+    tool = controls["tools"][0]
+    if field == "risk_note":
+        tool["risk"]["note"] = " padded "
+        report["tools"][0]["declared_risk"]["note"] = " padded "
+    elif field == "attribution_name":
+        controls["attribution"]["name"] = " padded "
+    elif field == "bound_source":
+        tool["arguments"][1]["bounds"][0]["source"] = " padded "
+    elif field == "bound_enforcement":
+        tool["arguments"][1]["bounds"][0]["enforcement"] = " padded "
+    elif field == "argument_note":
+        tool["arguments"][0]["note"] = " padded "
+    elif field == "unexposed_enforced_by":
+        tool["unexposed_arguments"][0]["enforced_by"] = " padded "
+    else:
+        tool["unexposed_arguments"][0]["note"] = " padded "
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="trimmed, non-empty text"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_declared_control_order_must_match_scanner_output():
+    schema = {
+        "tools": [
+            {
+                "name": name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "first": {"type": "string"},
+                        "second": {"type": "string"},
+                    },
+                },
+            }
+            for name in ("write_alpha", "write_beta")
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            name: {
+                "arguments": {
+                    "first": {"authority": "free", "evidence": "declared"},
+                    "second": {"authority": "free", "evidence": "declared"},
+                }
+            }
+            for name in ("write_alpha", "write_beta")
+        },
+    }
+    report = scan_documents([schema], control_declarations=controls)
+
+    reversed_tools = copy.deepcopy(report)
+    reversed_tools["declared_controls"]["tools"].reverse()
+    _refresh_control_fingerprint(reversed_tools)
+    with pytest.raises(DiffError, match="tool order"):
+        diff_reports(reversed_tools, copy.deepcopy(reversed_tools))
+
+    reversed_arguments = copy.deepcopy(report)
+    reversed_arguments["declared_controls"]["tools"][0]["arguments"].reverse()
+    _refresh_control_fingerprint(reversed_arguments)
+    with pytest.raises(DiffError, match="argument order"):
+        diff_reports(reversed_arguments, copy.deepcopy(reversed_arguments))
+
+
+def test_imported_unexposed_control_order_must_be_canonical():
+    schema = {
+        "tools": [
+            {
+                "name": "write_record",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "write_record": {
+                "unexposed_arguments": {
+                    name: {
+                        "exposure": "server_fixed",
+                        "enforced_by": "server",
+                        "evidence": "declared",
+                    }
+                    for name in ("zeta", "alpha")
+                }
+            }
+        },
+    }
+    report = scan_documents([schema], control_declarations=controls)
+    report["declared_controls"]["tools"][0]["unexposed_arguments"].reverse()
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="order is not canonical"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_redacted_unexposed_control_order_uses_scanner_numeric_sequence():
+    schema = {
+        "tools": [
+            {
+                "name": "write_record",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "write_record": {
+                "unexposed_arguments": {
+                    f"hidden_{index:04d}": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "server",
+                        "evidence": "declared",
+                    }
+                    for index in range(1_000)
+                }
+            }
+        },
+    }
+    report = scan_documents(
+        [schema],
+        redact_names=True,
+        control_declarations=controls,
+    )
+
+    with pytest.raises(DiffError, match="redacted names"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_report_enforces_tool_cardinality(monkeypatch):
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "read_alpha",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "read_beta",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                ]
+            }
+        ]
+    )
+    monkeypatch.setattr(differ, "MAX_SCAN_TOOL_DEFINITIONS", 1)
+
+    with pytest.raises(DiffError, match="tool-definition limit of 1.*rescan"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_report_enforces_argument_cardinality_including_unexposed(
+    monkeypatch,
+):
+    report = _avp9_report()
+    exposed = sum(len(tool["arguments"]) for tool in report["tools"])
+    monkeypatch.setattr(differ, "MAX_SCAN_ARGUMENTS", exposed)
+
+    with pytest.raises(DiffError, match="argument limit.*rescan"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_report_enforces_enum_member_cardinality(monkeypatch):
+    report = _single_argument_report({"type": "string", "enum": ["safe"]})
+    enum = report["tools"][0]["arguments"][0]["constraints"]["enum"]
+    enum["count"] = 2
+    enum["value_fingerprints_sha256"] = ["0" * 64, "1" * 64]
+    monkeypatch.setattr(differ, "MAX_SCAN_ENUM_MEMBERS", 1)
+
+    with pytest.raises(DiffError, match="enum-member limit of 1.*rescan"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_imported_report_enforces_control_collection_cardinality(monkeypatch):
+    report = _avp9_report()
+    controls = report["declared_controls"]["tools"][0]
+    members = len(controls["risk"]["effects"]) + sum(
+        len(argument.get("bounds", [])) for argument in controls["arguments"]
+    )
+    monkeypatch.setattr(
+        differ,
+        "MAX_SCAN_CONTROL_COLLECTION_MEMBERS",
+        members - 1,
+    )
+
+    with pytest.raises(DiffError, match="control collection-member limit.*rescan"):
+        diff_reports(report, copy.deepcopy(report))
+
+
 def test_declared_risk_cannot_outlive_its_declared_control_tool():
     report = _avp9_report()
     report["declared_controls"]["tools"] = []
@@ -774,7 +1002,10 @@ def test_open_schema_with_unexposed_controls_cannot_hide_schema_review(
         forged["tools"][0]["schema_review_required"] = False
         forged["summary"]["schema_review_required_tools"] = 0
 
-    with pytest.raises(DiffError, match="unexposed controls on an open schema"):
+    expected = (
+        "rescan" if omit_fields else "unexposed controls on an open schema"
+    )
+    with pytest.raises(DiffError, match=expected):
         diff_reports(report, forged)
 
 
@@ -2329,6 +2560,57 @@ def test_new_unresolved_schema_composition_requires_diff_review():
     assert change["after"] is True
 
 
+def test_clearing_schema_review_requirement_still_requires_review(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "$ref": "#/$defs/missing",
+                },
+            }
+        ]
+    }
+    before = scan_documents([document])
+    after = copy.deepcopy(before)
+    assert before["tools"][0]["schema_review_required"] is True
+    after["tools"][0]["schema_review_required"] = False
+    after["summary"]["schema_review_required_tools"] = 0
+
+    diff = diff_reports(before, after)
+    change = next(
+        item
+        for item in diff["changes"]
+        if item["kind"] == "schema_review_requirement_changed"
+    )
+    assert change["classification"] == "review"
+    assert diff["summary"]["reviews"] == 1
+    assert diff["summary"]["protection_increases"] == 0
+
+    before_path = tmp_path / "before-report.json"
+    after_path = tmp_path / "after-report.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+    assert (
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
 def test_pattern_property_replacement_cannot_look_like_argument_protection(
     tmp_path,
 ):
@@ -2406,14 +2688,54 @@ def test_open_schema_argument_removed_into_pattern_is_authority_increase():
     assert removed["classification"] == "authority_increase"
 
 
-def test_optional_schema_review_fields_preserve_legacy_v3_compatibility():
-    report = _single_argument_report({"type": "string"})
-    report["summary"].pop("schema_review_required_tools")
-    report["tools"][0].pop("schema_review_required")
+@pytest.mark.parametrize("tool_count", (1, 2))
+def test_v3_schema_review_fields_are_mandatory_and_require_rescan(
+    tmp_path, capsys, tool_count
+):
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": f"set_value_{index}",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "$ref": "#/$defs/missing",
+                        },
+                    }
+                    for index in range(tool_count)
+                ]
+            }
+        ]
+    )
+    forged = copy.deepcopy(report)
+    forged["summary"].pop("schema_review_required_tools")
+    for tool in forged["tools"]:
+        tool.pop("schema_review_required")
 
-    diff = diff_reports(report, copy.deepcopy(report))
+    with pytest.raises(DiffError, match="missing .*schema_review_required.*rescan"):
+        diff_reports(report, forged)
 
-    assert diff["summary"]["changes"] == 0
+    before_path = tmp_path / "before-report.json"
+    after_path = tmp_path / "after-report.json"
+    before_path.write_text(json.dumps(report), encoding="utf-8")
+    after_path.write_text(json.dumps(forged), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                str(before_path),
+                str(after_path),
+                "--fail-on-increase",
+                "--fail-on-review",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "schema_review_required" in error
+    assert "rescan" in error
+    assert "Traceback" not in error
 
 
 def test_schema_review_summary_must_match_tool_flags():
