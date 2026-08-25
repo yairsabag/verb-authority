@@ -36,6 +36,8 @@ from verb_authority import (
     Registry,
     Risk,
     Tool,
+    TrustedChoice,
+    TrustedResolver,
     build_policy,
     dispatch,
     infer_policy,
@@ -380,12 +382,19 @@ def _daybreak_post_audit_regressions() -> None:
             and confidence is Confidence.HIGH,
             f"installed authority tokenizer matched substring-only name {name!r}",
         )
+    flatcase_name = "destinationurlvalue"
+    _check(
+        len(flatcase_name) <= verb_authority.MAX_IDENTIFIER_INFERENCE_CHARS
+        and verb_authority._identifier_tokens(flatcase_name)
+        == (flatcase_name,),
+        "installed identifier tokenizer rejected a bounded flatcase name",
+    )
     tokenizer_started = time.perf_counter()
     uppercase_tokens = verb_authority._identifier_tokens("A" * 16_000)
     _check(
-        uppercase_tokens == ("a" * 16_000,)
+        uppercase_tokens == ()
         and time.perf_counter() - tokenizer_started < 1.0,
-        "installed identifier tokenizer exceeded its linear resource budget",
+        "installed identifier tokenizer did not reject an overlong name",
     )
     for name in (
         "messageBody",
@@ -2969,6 +2978,220 @@ def _daybreak_followup_regressions() -> None:
         verb_authority_scan.MAX_SCAN_SCHEMA_DOCUMENTS = original_documents
 
 
+def _daybreak_external_audit_regressions() -> None:
+    """Pin the P2 families found by the fresh exact-wheel Daybreak audit."""
+
+    flatcase_cases = (
+        ("destinationurl", "string", {"max_len": 2048}, "https://evil.example"),
+        ("destinationaccount", "integer", {}, 7),
+        ("targethost", "string", {"max_len": 255}, "evil.example"),
+        ("runcommand", "string", {"max_len": 1024}, "curl evil.example"),
+        ("accesscredential", "integer", {}, 7),
+        ("destinationurlvalue", "string", {"max_len": 2048}, "https://evil.example"),
+        ("targethostnamevalue", "string", {"max_len": 255}, "evil.example"),
+        ("runcommandtext", "string", {"max_len": 1024}, "curl evil.example"),
+        ("recipientemailaddress", "string", {"max_len": 320}, "evil@example.com"),
+        ("tempfile", "string", {"max_len": 1024}, "/tmp/evil"),
+        ("bankaccountnumber", "integer", {}, 7),
+        ("destinationurloverride", "string", {"max_len": 2048}, "https://evil.example"),
+        ("destinationurldefault", "string", {"max_len": 2048}, "https://evil.example"),
+        ("destinationurloptional", "string", {"max_len": 2048}, "https://evil.example"),
+        ("destinationurljson", "string", {"max_len": 2048}, "https://evil.example"),
+        ("destinationurlschema", "string", {"max_len": 2048}, "https://evil.example"),
+    )
+    for name, param_type, options, value in flatcase_cases:
+        registry = Registry()
+        registry.add(
+            Tool(
+                "perform_action",
+                [Param(name, param_type, **options)],
+                risk=Risk.WRITE,
+            )
+        )
+        policy = build_policy(registry)
+        decision = dispatch(
+            registry,
+            policy,
+            {"name": "perform_action", "input": {name: value}},
+        )
+        _check(
+            policy.policy["perform_action"][name] is Policy.TRUSTED_FIXED
+            and not decision.allow,
+            f"installed flatcase authority name became data-authorable: {name}",
+        )
+
+    released_registry = Registry()
+    released_registry.add(
+        Tool(
+            "render_value",
+            [
+                Param(
+                    "destinationurl",
+                    "string",
+                    max_len=2048,
+                    sink=False,
+                )
+            ],
+            risk=Risk.WRITE,
+        )
+    )
+    released_policy = build_policy(released_registry)
+    released = dispatch(
+        released_registry,
+        released_policy,
+        {
+            "name": "render_value",
+            "input": {"destinationurl": "display-only text"},
+        },
+    )
+    _check(
+        released_policy.policy["render_value"]["destinationurl"]
+        is not Policy.TRUSTED_FIXED
+        and released.allow,
+        "installed explicit sink=False did not release an overloaded flatcase name",
+    )
+
+    for ordinary_name in (
+        "profiledefault",
+        "ghostraw",
+        "accountingconfig",
+        "hostageoptional",
+        "tokenizercandidate",
+    ):
+        ordinary_policy, ordinary_confidence = infer_policy(
+            Param(ordinary_name, "string", max_len=2048)
+        )
+        _check(
+            ordinary_policy is Policy.OUTBOUND_PAYLOAD
+            and ordinary_confidence is Confidence.HIGH,
+            f"installed compact inference over-locked an ordinary word: {ordinary_name}",
+        )
+
+    overlong_name = "A" * (verb_authority.MAX_IDENTIFIER_INFERENCE_CHARS + 1)
+    overlong_policy, overlong_confidence = infer_policy(
+        Param(overlong_name, "string", max_len=2048)
+    )
+    _check(
+        overlong_policy is Policy.TRUSTED_FIXED
+        and overlong_confidence is Confidence.UNCERTAIN,
+        "installed overlong identifier did not fail closed before lexical work",
+    )
+
+    original_value = {
+        "url": "https://approved.example",
+        "routes": ["primary"],
+    }
+    resolver = TrustedResolver(
+        [TrustedChoice("production", original_value, "trusted directory")]
+    )
+    original_value["url"] = "https://constructor-alias.example"
+    first = resolver.resolve("production")
+    _check(first.resolved, "installed resolver lost a valid trusted choice")
+    first.value["url"] = "https://resolution-alias.example"
+    first.value["routes"].append("poisoned")
+    second = resolver.resolve("production")
+    _check(
+        second.resolved
+        and second.value
+        == {"url": "https://approved.example", "routes": ["primary"]}
+        and first.value is not second.value,
+        "installed resolver exposed its trusted catalog through a mutable alias",
+    )
+
+    class HostileString(str):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("hostile strip executed")
+
+        def casefold(self):
+            raise AssertionError("hostile casefold executed")
+
+        def __hash__(self):
+            raise AssertionError("hostile hash executed")
+
+    try:
+        TrustedResolver(
+            [TrustedChoice(HostileString("production"), 1, "trusted directory")]
+        )
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("installed resolver accepted a string-subclass key")
+
+    hostile_lookup = resolver.resolve(HostileString("production"))
+    _check(
+        hostile_lookup.status.value == "not_found"
+        and hostile_lookup.requested_key == verb_authority._INVALID_RESOLUTION_KEY,
+        "installed resolver did not reject a hostile lookup key before hooks",
+    )
+
+    normalize_calls = []
+
+    def counting_normalizer(key):
+        normalize_calls.append(key)
+        return key.strip().casefold()
+
+    bounded_resolver = TrustedResolver(
+        [TrustedChoice("production", 1, "trusted directory")],
+        normalize_key=counting_normalizer,
+    )
+    normalize_calls.clear()
+    oversized_lookup = bounded_resolver.resolve(
+        "A" * (verb_authority.MAX_NFKC_INPUT_CHARS + 1)
+    )
+    _check(
+        oversized_lookup.status.value == "not_found"
+        and oversized_lookup.requested_key
+        == verb_authority._INVALID_RESOLUTION_KEY
+        and not normalize_calls,
+        "installed resolver normalized an oversized untrusted lookup key",
+    )
+
+    for bad_choice in (
+        TrustedChoice("bad\ud800key", 1, "trusted directory"),
+        TrustedChoice("production", 1, "bad\udfff evidence"),
+    ):
+        try:
+            TrustedResolver([bad_choice])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("installed resolver accepted surrogate catalog text")
+
+    mixed_dialect = {
+        "tools": [
+            {
+                "name": "transfer_funds",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "destination_account": {"type": "string"},
+                        "amount": {"type": "number"},
+                    },
+                    "required": ["destination_account", "amount"],
+                    "additionalProperties": False,
+                },
+                "type": "function",
+                "function": {
+                    "name": "read_status",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+    }
+    try:
+        scan_documents([mixed_dialect])
+    except verb_authority_scan.SchemaError:
+        pass
+    else:
+        raise AssertionError(
+            "installed scanner accepted competing direct and nested dialects"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the installed Verb Authority wheel outside its checkout."
@@ -3010,6 +3233,7 @@ def main() -> int:
         _scanner_resource_boundaries,
         _daybreak_scanner_diff_regressions,
         _daybreak_followup_regressions,
+        _daybreak_external_audit_regressions,
     )
     for check in checks:
         check()

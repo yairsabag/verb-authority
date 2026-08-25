@@ -201,6 +201,282 @@ def test_scanner_rejects_non_plain_or_malformed_json_shapes(document):
         scan_documents([document])
 
 
+def _collision_mcp_tool(name="send_message"):
+    return {
+        "name": name,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"recipient": {"type": "string"}},
+        },
+    }
+
+
+def _collision_openai_function(name="send_message"):
+    return {
+        "name": name,
+        "parameters": {
+            "type": "object",
+            "properties": {"recipient": {"type": "string"}},
+        },
+    }
+
+
+def _collision_envelope(name):
+    if name == "sources":
+        return [{"id": "source", "tools": [_collision_mcp_tool()]}]
+    if name == "result":
+        return {"tools": [_collision_mcp_tool()]}
+    if name == "tools":
+        return [_collision_mcp_tool()]
+    if name == "functions":
+        return [_collision_openai_function()]
+    raise AssertionError(f"unknown test envelope: {name}")
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    (
+        ("sources", "tools"),
+        ("tools", "sources"),
+        ("result", "tools"),
+        ("tools", "result"),
+        ("tools", "functions"),
+        ("functions", "tools"),
+    ),
+)
+def test_competing_schema_envelopes_are_rejected_in_both_key_orders(
+    first, second
+):
+    document = {
+        first: _collision_envelope(first),
+        second: _collision_envelope(second),
+    }
+
+    with pytest.raises(SchemaError, match="competing tool-definition envelopes"):
+        parse_tool_definitions(document)
+    with pytest.raises(SchemaError, match="competing tool-definition envelopes"):
+        scan_documents([document])
+
+
+@pytest.mark.parametrize("reverse", (False, True), ids=("direct-first", "nested-first"))
+def test_direct_and_nested_tool_dialects_are_rejected_in_both_key_orders(reverse):
+    direct = [("name", "direct"), ("inputSchema", {"type": "object"})]
+    nested = [
+        ("type", "function"),
+        ("function", _collision_openai_function("nested")),
+    ]
+    raw = dict((nested + direct) if reverse else (direct + nested))
+
+    with pytest.raises(SchemaError, match="direct and nested OpenAI/MCP dialects"):
+        parse_tool_definitions({"tools": [raw]})
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    tuple(
+        direction
+        for pair in (
+            ("inputSchema", "input_schema"),
+            ("inputSchema", "parameters"),
+            ("input_schema", "parameters"),
+        )
+        for direction in (pair, pair[::-1])
+    ),
+)
+def test_competing_schema_aliases_are_rejected_in_both_key_orders(first, second):
+    raw = dict(
+        [
+            ("name", "send_message"),
+            (first, {"type": "object"}),
+            (second, {"type": "object"}),
+        ]
+    )
+
+    with pytest.raises(SchemaError, match="competing input schema aliases"):
+        parse_tool_definitions({"tools": [raw]})
+
+
+def test_tool_definition_requires_one_explicit_schema_alias():
+    with pytest.raises(SchemaError, match="exactly one input schema alias"):
+        parse_tool_definitions({"tools": [{"name": "schema_less"}]})
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "responses_ping",
+                }
+            ]
+        },
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "chat_ping"},
+                }
+            ]
+        },
+        {"functions": [{"name": "legacy_chat_ping"}]},
+    ),
+    ids=("responses-direct", "chat-wrapper", "functions-envelope"),
+)
+def test_unambiguous_openai_zero_argument_functions_allow_missing_parameters(
+    document,
+):
+    definitions = parse_tool_definitions(document)
+
+    assert len(definitions) == 1
+    assert definitions[0].input_schema == {}
+
+
+def test_openai_responses_direct_function_uses_parameters_schema():
+    definitions = parse_tool_definitions(
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "send_message",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"recipient": {"type": "string"}},
+                    },
+                }
+            ]
+        }
+    )
+
+    assert definitions[0].name == "send_message"
+    assert definitions[0].input_schema["properties"] == {
+        "recipient": {"type": "string"}
+    }
+
+
+def test_top_level_name_metadata_does_not_compete_with_tools_envelope():
+    definitions = parse_tool_definitions(
+        {
+            "name": "example MCP server",
+            "tools": [_collision_mcp_tool("read_status")],
+        }
+    )
+
+    assert [definition.name for definition in definitions] == ["read_status"]
+
+
+def test_complete_direct_tool_still_competes_with_tools_envelope():
+    document = {
+        "name": "direct_tool",
+        "inputSchema": {"type": "object", "properties": {}},
+        "tools": [_collision_mcp_tool("enveloped_tool")],
+    }
+
+    with pytest.raises(SchemaError, match="competing tool-definition envelopes"):
+        parse_tool_definitions(document)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        {
+            "type": "function",
+            "name": "responses_direct",
+            "inputSchema": {"type": "object"},
+        },
+        {
+            "type": "function",
+            "name": "responses_direct",
+            "parameters": {"type": "object"},
+            "function": {
+                "name": "chat_nested",
+                "parameters": {"type": "object"},
+            },
+        },
+    ),
+    ids=("responses-with-mcp-alias", "responses-and-chat-wrapper"),
+)
+def test_openai_responses_mixed_dialects_remain_ambiguous(raw):
+    with pytest.raises(SchemaError, match="competing|direct and nested"):
+        parse_tool_definitions({"tools": [raw]})
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        {"tools": [_collision_mcp_tool("mcp")]},
+        {"result": {"tools": [_collision_mcp_tool("mcp_result")]}},
+        {
+            "sources": [
+                {"id": "source", "tools": [_collision_mcp_tool("atlas")]}
+            ]
+        },
+        {"functions": [_collision_openai_function("functions")]},
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": _collision_openai_function("openai"),
+                }
+            ]
+        },
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    **_collision_openai_function("responses"),
+                }
+            ]
+        },
+        {
+            "name": "anthropic",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+)
+def test_each_supported_single_schema_dialect_remains_valid(document):
+    definitions = parse_tool_definitions(document)
+
+    assert len(definitions) == 1
+    assert definitions[0].input_schema["type"] == "object"
+
+
+@pytest.mark.parametrize("failure_flag", (None, "--fail-on-review"))
+def test_scanner_cli_rejects_envelope_collision_before_thresholds(
+    tmp_path, capsys, failure_flag
+):
+    document = {
+        "tools": [_collision_mcp_tool()],
+        "functions": [_collision_openai_function()],
+    }
+    path = tmp_path / "mixed-dialects.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    argv = [str(path), "--format", "json"]
+    if failure_flag is not None:
+        argv.append(failure_flag)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(argv)
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "competing tool-definition envelopes" in error
+    assert "Traceback" not in error
+
+
+def test_malformed_report_container_cannot_fall_through_to_direct_tool_scan():
+    report = scan_documents([{"tools": [_collision_mcp_tool("reported")]}])
+    malformed = {
+        "name": "fallback",
+        "inputSchema": {"type": "object", "properties": {}},
+        "tools": {"reported": report["tools"][0]},
+    }
+
+    with pytest.raises(SchemaError, match="report-shaped"):
+        parse_tool_definitions(malformed)
+
+
 def test_scanner_shares_and_caches_identifier_nfkc_work(monkeypatch):
     original_normalize = verb_authority.unicodedata.normalize
     normalization_calls = []

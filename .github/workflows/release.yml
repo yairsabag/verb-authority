@@ -5,31 +5,169 @@ on:
     types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-and-attach:
-    name: Test, build, verify, and attach distributions
+  build:
+    name: Test, build, and produce candidate distributions
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      candidate_artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+      candidate_artifact_digest: ${{ steps.upload_candidate.outputs.artifact-digest }}
 
     steps:
       - name: Check out the released tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Bind verifier and source contract to the released commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          while IFS= read -r variable; do
+            case "$variable" in
+              GIT_CONFIG_*|GIT_TRACE*|LD_*|DYLD_*|GCONV_PATH|LOCPATH|PYTHONPATH|PYTHONHOME)
+                unset "$variable" ;;
+            esac
+          done < <(compgen -e)
+          unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+          unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+          unset GIT_REPLACE_REF_BASE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_EXEC_PATH
+          unset GIT_PREFIX GIT_QUARANTINE_PATH GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER
+          export PATH=/usr/bin:/bin
+          export LC_ALL=C
+          export LANG=C
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_NO_REPLACE_OBJECTS=1
+          export GIT_NO_LAZY_FETCH=1
+          export GIT_LITERAL_PATHSPECS=1
+          export GIT_TERMINAL_PROMPT=0
+          test -x /usr/bin/git && test ! -L /usr/bin/git
+          test "$(stat -c %u /usr/bin/git)" -eq 0
+          git_mode=$(stat -c %a -- /usr/bin/git)
+          [[ "$git_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$git_mode & 8#022))" -eq 0
+          python_safe=$(readlink -f /usr/bin/python3)
+          case "$python_safe" in /usr/bin/python3|/usr/bin/python3.*) ;; *) exit 1 ;; esac
+          test -x "$python_safe" && test ! -L "$python_safe"
+          test "$(stat -c %u "$python_safe")" -eq 0
+          python_mode=$(stat -c %a -- "$python_safe")
+          [[ "$python_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$python_mode & 8#022))" -eq 0
+          git_safe=(/usr/bin/git --no-pager --no-replace-objects \
+            -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= \
+            -c protocol.allow=never -c protocol.ext.allow=never \
+            -c protocol.file.allow=never)
+          source_commit=$("${git_safe[@]}" rev-parse --verify 'HEAD^{commit}')
+          test "$source_commit" = "$EXPECTED_SOURCE_COMMIT"
+          verifier="${{ runner.temp }}/verify_release_artifacts.py"
+          verifier_blob=$("$python_safe" -I - \
+            "$source_commit" "$verifier" "${{ github.workspace }}" <<'PY'
+          import hashlib
+          import re
+          import subprocess
+          import sys
+
+          source_commit, output_path, repository = sys.argv[1:]
+          if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_commit) is None:
+              raise SystemExit("invalid exact source commit")
+          hexadecimal_size = len(source_commit)
+          git = [
+              "/usr/bin/git", "--no-pager", "--no-replace-objects",
+              "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "protocol.allow=never",
+              "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+              "-C", repository,
+          ]
+
+          def read_object(kind, object_id, limit):
+              process = subprocess.Popen(
+                  [*git, "cat-file", kind, object_id],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+              )
+              assert process.stdout is not None
+              payload = process.stdout.read(limit + 1)
+              if len(payload) > limit:
+                  process.kill()
+                  process.wait()
+                  raise SystemExit(f"oversized git {kind} object")
+              if process.wait() != 0:
+                  raise SystemExit(f"cannot read git {kind} object")
+              framed = f"{kind} {len(payload)}\0".encode("ascii") + payload
+              digest = (
+                  hashlib.sha1(framed).hexdigest()
+                  if hexadecimal_size == 40
+                  else hashlib.sha256(framed).hexdigest()
+              )
+              if digest != object_id:
+                  raise SystemExit(f"git {kind} object hash mismatch")
+              return payload
+
+          def tree_entries(tree_id):
+              payload = read_object("tree", tree_id, 16 * 1024 * 1024)
+              width = hexadecimal_size // 2
+              position = 0
+              while position < len(payload):
+                  space = payload.find(b" ", position)
+                  nul = payload.find(b"\0", space + 1)
+                  end = nul + 1 + width
+                  if space <= position or nul <= space + 1 or end > len(payload):
+                      raise SystemExit("malformed git tree")
+                  yield (
+                      payload[position:space],
+                      payload[space + 1:nul],
+                      payload[nul + 1:end].hex(),
+                  )
+                  position = end
+
+          commit = read_object("commit", source_commit, 16 * 1024 * 1024)
+          trees = [
+              line[5:].decode("ascii")
+              for line in commit.split(b"\n\n", 1)[0].splitlines()
+              if line.startswith(b"tree ")
+          ]
+          if len(trees) != 1:
+              raise SystemExit("commit has no unique tree")
+          current = trees[0]
+          for component, expected_mode in (
+              (b"scripts", b"40000"),
+              (b"verify_release_artifacts.py", b"100644"),
+          ):
+              matches = [entry for entry in tree_entries(current) if entry[1] == component]
+              if len(matches) != 1 or matches[0][0].lstrip(b"0") != expected_mode:
+                  raise SystemExit("verifier path is absent or has an unsafe mode")
+              current = matches[0][2]
+          verifier_payload = read_object("blob", current, 16 * 1024 * 1024)
+          with open(output_path, "xb") as output:
+              output.write(verifier_payload)
+          print(current)
+          PY
+          )
+          test "$("${git_safe[@]}" hash-object --no-filters "$verifier")" = "$verifier_blob"
+          printf 'SOURCE_COMMIT=%s\n' "$source_commit" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERIFIER=%s\n' "$verifier" >> "$GITHUB_ENV"
 
       - name: Verify release tag matches project version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -I scripts/verify_release_artifacts.py tag \
+          python -I "$RELEASE_VERIFIER" tag \
             --project pyproject.toml \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
 
       - name: Install build frontend
         run: python -m pip install "build>=1.2,<2"
@@ -41,20 +179,24 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -I scripts/verify_release_artifacts.py sdist \
+          python -I "$RELEASE_VERIFIER" sdist \
             --project pyproject.toml \
             --dist dist \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
 
       - name: Extract and inspect source distribution
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -I scripts/verify_release_artifacts.py extract-sdist \
+          python -I "$RELEASE_VERIFIER" extract-sdist \
             --project pyproject.toml \
             --dist dist \
             --output "${{ runner.temp }}/verb-authority-sdist" \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
           sdist_root=$(find "${{ runner.temp }}/verb-authority-sdist" \
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
@@ -77,10 +219,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -I scripts/verify_release_artifacts.py artifacts \
+          python -I "$RELEASE_VERIFIER" artifacts \
             --project pyproject.toml \
             --dist "${{ github.workspace }}/dist" \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
 
       - name: Generate and verify SHA-256 checksums
         working-directory: dist
@@ -130,30 +274,422 @@ jobs:
             python -I -m pip check
           test ! -e installed-smoke-shadow.marker
 
-      - name: Preserve release distributions
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-distributions-${{ github.event.release.tag_name }}
-          path: dist/
-          if-no-files-found: error
+      - name: Confirm the candidate file set is exact
+        run: |
+          shopt -s nullglob dotglob
+          entries=(dist/*)
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          test "${#entries[@]}" -eq 3
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          for candidate in "${wheels[0]}" "${sdists[0]}" dist/SHA256SUMS; do
+            test -f "$candidate"
+            test ! -L "$candidate"
+          done
+          expected=$(mktemp)
+          (
+            cd dist
+            LC_ALL=C sha256sum -- "$(basename "${wheels[0]}")" "$(basename "${sdists[0]}")"
+          ) > "$expected"
+          cmp -s "$expected" dist/SHA256SUMS
 
-      - name: Attach verified assets to the GitHub release
+      - name: Preserve candidate distributions for fresh verification
+        id: upload_candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  verify_and_stage:
+    name: Verify candidate on a fresh runner and stage immutable assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      verified_artifact_id: ${{ steps.upload_verified.outputs.artifact-id }}
+      verified_artifact_digest: ${{ steps.upload_verified.outputs.artifact-digest }}
+
+    steps:
+      - name: Check out the released tag without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Bind verifier and source contract to the released commit
         env:
-          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          while IFS= read -r variable; do
+            case "$variable" in
+              GIT_CONFIG_*|GIT_TRACE*|LD_*|DYLD_*|GCONV_PATH|LOCPATH|PYTHONPATH|PYTHONHOME)
+                unset "$variable" ;;
+            esac
+          done < <(compgen -e)
+          unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+          unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+          unset GIT_REPLACE_REF_BASE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_EXEC_PATH
+          unset GIT_PREFIX GIT_QUARANTINE_PATH GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER
+          export PATH=/usr/bin:/bin
+          export LC_ALL=C
+          export LANG=C
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_NO_REPLACE_OBJECTS=1
+          export GIT_NO_LAZY_FETCH=1
+          export GIT_LITERAL_PATHSPECS=1
+          export GIT_TERMINAL_PROMPT=0
+          test -x /usr/bin/git && test ! -L /usr/bin/git
+          test "$(stat -c %u /usr/bin/git)" -eq 0
+          git_mode=$(stat -c %a -- /usr/bin/git)
+          [[ "$git_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$git_mode & 8#022))" -eq 0
+          python_safe=$(readlink -f /usr/bin/python3)
+          case "$python_safe" in /usr/bin/python3|/usr/bin/python3.*) ;; *) exit 1 ;; esac
+          test -x "$python_safe" && test ! -L "$python_safe"
+          test "$(stat -c %u "$python_safe")" -eq 0
+          python_mode=$(stat -c %a -- "$python_safe")
+          [[ "$python_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$python_mode & 8#022))" -eq 0
+          git_safe=(/usr/bin/git --no-pager --no-replace-objects \
+            -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= \
+            -c protocol.allow=never -c protocol.ext.allow=never \
+            -c protocol.file.allow=never)
+          source_commit=$("${git_safe[@]}" rev-parse --verify 'HEAD^{commit}')
+          test "$source_commit" = "$EXPECTED_SOURCE_COMMIT"
+          verifier="${{ runner.temp }}/verify_release_artifacts.py"
+          verifier_blob=$("$python_safe" -I - \
+            "$source_commit" "$verifier" "${{ github.workspace }}" <<'PY'
+          import hashlib
+          import re
+          import subprocess
+          import sys
+
+          source_commit, output_path, repository = sys.argv[1:]
+          if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_commit) is None:
+              raise SystemExit("invalid exact source commit")
+          hexadecimal_size = len(source_commit)
+          git = [
+              "/usr/bin/git", "--no-pager", "--no-replace-objects",
+              "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "protocol.allow=never",
+              "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+              "-C", repository,
+          ]
+
+          def read_object(kind, object_id, limit):
+              process = subprocess.Popen(
+                  [*git, "cat-file", kind, object_id],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+              )
+              assert process.stdout is not None
+              payload = process.stdout.read(limit + 1)
+              if len(payload) > limit:
+                  process.kill()
+                  process.wait()
+                  raise SystemExit(f"oversized git {kind} object")
+              if process.wait() != 0:
+                  raise SystemExit(f"cannot read git {kind} object")
+              framed = f"{kind} {len(payload)}\0".encode("ascii") + payload
+              digest = (
+                  hashlib.sha1(framed).hexdigest()
+                  if hexadecimal_size == 40
+                  else hashlib.sha256(framed).hexdigest()
+              )
+              if digest != object_id:
+                  raise SystemExit(f"git {kind} object hash mismatch")
+              return payload
+
+          def tree_entries(tree_id):
+              payload = read_object("tree", tree_id, 16 * 1024 * 1024)
+              width = hexadecimal_size // 2
+              position = 0
+              while position < len(payload):
+                  space = payload.find(b" ", position)
+                  nul = payload.find(b"\0", space + 1)
+                  end = nul + 1 + width
+                  if space <= position or nul <= space + 1 or end > len(payload):
+                      raise SystemExit("malformed git tree")
+                  yield (
+                      payload[position:space],
+                      payload[space + 1:nul],
+                      payload[nul + 1:end].hex(),
+                  )
+                  position = end
+
+          commit = read_object("commit", source_commit, 16 * 1024 * 1024)
+          trees = [
+              line[5:].decode("ascii")
+              for line in commit.split(b"\n\n", 1)[0].splitlines()
+              if line.startswith(b"tree ")
+          ]
+          if len(trees) != 1:
+              raise SystemExit("commit has no unique tree")
+          current = trees[0]
+          for component, expected_mode in (
+              (b"scripts", b"40000"),
+              (b"verify_release_artifacts.py", b"100644"),
+          ):
+              matches = [entry for entry in tree_entries(current) if entry[1] == component]
+              if len(matches) != 1 or matches[0][0].lstrip(b"0") != expected_mode:
+                  raise SystemExit("verifier path is absent or has an unsafe mode")
+              current = matches[0][2]
+          verifier_payload = read_object("blob", current, 16 * 1024 * 1024)
+          with open(output_path, "xb") as output:
+              output.write(verifier_payload)
+          print(current)
+          PY
+          )
+          test "$("${git_safe[@]}" hash-object --no-filters "$verifier")" = "$verifier_blob"
+          printf 'SOURCE_COMMIT=%s\n' "$source_commit" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERIFIER=%s\n' "$verifier" >> "$GITHUB_ENV"
+          printf 'RELEASE_PYTHON=%s\n' "$python_safe" >> "$GITHUB_ENV"
+
+      - name: Verify release tag matches the immutable project version
+        env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          wheel_name=$(basename dist/*.whl)
-          sdist_name=$(basename dist/*.tar.gz)
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' |
-            while IFS= read -r asset_name; do
-              case "$asset_name" in
-                "$wheel_name"|"$sdist_name"|SHA256SUMS) ;;
-                *)
-                  echo "unexpected pre-existing release asset: $asset_name" >&2
-                  exit 2
-                  ;;
-              esac
-            done
-          gh release upload "$RELEASE_TAG" \
-            dist/*.whl dist/*.tar.gz dist/SHA256SUMS \
-            --clobber
+          "$RELEASE_PYTHON" -I "$RELEASE_VERIFIER" tag \
+            --project pyproject.toml \
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
+
+      - name: Validate candidate artifact identity
+        env:
+          CANDIDATE_ARTIFACT_ID: ${{ needs.build.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.build.outputs.candidate_artifact_digest }}
+        run: |
+          [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$CANDIDATE_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: Download candidate distributions by immutable artifact ID
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.candidate_artifact_id }}
+          path: incoming
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Verify, checksum, and stage the exact release file set
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          shopt -s nullglob dotglob
+          entries=(incoming/*)
+          wheels=(incoming/*.whl)
+          sdists=(incoming/*.tar.gz)
+          test "${#entries[@]}" -eq 3
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          for candidate in "${wheels[0]}" "${sdists[0]}" incoming/SHA256SUMS; do
+            test -f "$candidate"
+            test ! -L "$candidate"
+          done
+          wheel_name=$(basename "${wheels[0]}")
+          sdist_name=$(basename "${sdists[0]}")
+          expected=$(mktemp)
+          (
+            cd incoming
+            LC_ALL=C sha256sum -- "$wheel_name" "$sdist_name"
+          ) > "$expected"
+          cmp -s "$expected" incoming/SHA256SUMS
+
+          mkdir verify-dist
+          install -m 0644 -- "${wheels[0]}" "verify-dist/$wheel_name"
+          install -m 0644 -- "${sdists[0]}" "verify-dist/$sdist_name"
+          "$RELEASE_PYTHON" -I "$RELEASE_VERIFIER" artifacts \
+            --project pyproject.toml \
+            --dist verify-dist \
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
+
+          mkdir staged
+          install -m 0644 -- "verify-dist/$wheel_name" "staged/$wheel_name"
+          install -m 0644 -- "verify-dist/$sdist_name" "staged/$sdist_name"
+          (
+            cd staged
+            LC_ALL=C sha256sum -- "$wheel_name" "$sdist_name"
+          ) > staged/SHA256SUMS
+          cmp -s incoming/SHA256SUMS staged/SHA256SUMS
+
+      - name: Preserve only freshly verified release assets
+        id: upload_verified
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            staged/*.whl
+            staged/*.tar.gz
+            staged/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  publish:
+    name: Publish only independently verified release assets
+    needs: verify_and_stage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate immutable verified-artifact identity
+        env:
+          VERIFIED_ARTIFACT_ID: ${{ needs.verify_and_stage.outputs.verified_artifact_id }}
+          VERIFIED_ARTIFACT_DIGEST: ${{ needs.verify_and_stage.outputs.verified_artifact_digest }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          [[ "$VERIFIED_ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$VERIFIED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+
+      - name: Download independently verified assets by immutable artifact ID
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.verify_and_stage.outputs.verified_artifact_id }}
+          path: release-assets
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Confirm the publish file set and checksums are exact
+        run: |
+          shopt -s nullglob dotglob
+          entries=(release-assets/*)
+          wheels=(release-assets/*.whl)
+          sdists=(release-assets/*.tar.gz)
+          test "${#entries[@]}" -eq 3
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            test -f "$candidate"
+            test ! -L "$candidate"
+          done
+          expected=$(mktemp)
+          (
+            cd release-assets
+            LC_ALL=C sha256sum -- \
+              "$(basename "${wheels[0]}")" \
+              "$(basename "${sdists[0]}")"
+          ) > "$expected"
+          cmp -s "$expected" release-assets/SHA256SUMS
+
+      - name: Upload to the exact event release and verify remote bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          shopt -s nullglob dotglob
+          entries=(release-assets/*)
+          wheels=(release-assets/*.whl)
+          sdists=(release-assets/*.tar.gz)
+          test "${#entries[@]}" -eq 3
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            test -f "$candidate"
+            test ! -L "$candidate"
+          done
+
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          api_headers=(
+            -H "Accept: application/vnd.github+json"
+            -H "X-GitHub-Api-Version: 2026-03-10"
+          )
+          release_record=$(gh api "${api_headers[@]}" \
+            "repos/$GH_REPO/releases/$RELEASE_ID" \
+            --jq '[(.id | tostring), .tag_name, (.draft | tostring)] | @tsv')
+          printf -v expected_release '%s\t%s\tfalse' "$RELEASE_ID" "$RELEASE_TAG"
+          test "$release_record" = "$expected_release"
+
+          expected_checksum=$(mktemp)
+          (
+            cd release-assets
+            LC_ALL=C sha256sum -- \
+              "$(basename "${wheels[0]}")" \
+              "$(basename "${sdists[0]}")"
+          ) > "$expected_checksum"
+          cmp -s "$expected_checksum" release-assets/SHA256SUMS
+
+          expected_assets=$(mktemp)
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            name=$(basename "$candidate")
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+            size=$(stat -c %s -- "$candidate")
+            digest=$(sha256sum -- "$candidate")
+            digest=${digest%% *}
+            printf '%s\t%s\tsha256:%s\tuploaded\n' \
+              "$name" "$size" "$digest"
+          done | LC_ALL=C sort > "$expected_assets"
+
+          existing_assets=$(mktemp)
+          gh api "${api_headers[@]}" --paginate \
+            "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            --jq '.[] | [.name, (.size | tostring), .digest, .state] | @tsv' \
+            | LC_ALL=C sort > "$existing_assets"
+          unexpected_assets=$(mktemp)
+          LC_ALL=C comm -23 "$existing_assets" "$expected_assets" \
+            > "$unexpected_assets"
+          test ! -s "$unexpected_assets"
+
+          current_tag_commit=$(gh api "${api_headers[@]}" \
+            "repos/$GH_REPO/commits/tags/$RELEASE_TAG" --jq '.sha')
+          test "$current_tag_commit" = "$SOURCE_COMMIT"
+
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            name=$(basename "$candidate")
+            size=$(stat -c %s -- "$candidate")
+            digest=$(sha256sum -- "$candidate")
+            digest=${digest%% *}
+            printf -v expected_asset '%s\t%s\tsha256:%s\tuploaded' \
+              "$name" "$size" "$digest"
+            if grep -Fqx -- "$expected_asset" "$existing_assets"; then
+              continue
+            fi
+            if uploaded_asset=$(gh api "${api_headers[@]}" \
+                -H "Content-Type: application/octet-stream" \
+                --method POST \
+                "https://uploads.github.com/repos/$GH_REPO/releases/$RELEASE_ID/assets?name=$name" \
+                --input "$candidate" \
+                --jq '[.name, (.size | tostring), .digest, .state] | @tsv'); then
+              test "$uploaded_asset" = "$expected_asset"
+            else
+              recovered_assets=$(mktemp)
+              gh api "${api_headers[@]}" --paginate \
+                "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" \
+                --jq '.[] | [.name, (.size | tostring), .digest, .state] | @tsv' \
+                | LC_ALL=C sort > "$recovered_assets"
+              grep -Fqx -- "$expected_asset" "$recovered_assets"
+            fi
+          done
+
+          actual_assets=$(mktemp)
+          gh api "${api_headers[@]}" --paginate \
+            "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            --jq '.[] | [.name, (.size | tostring), .digest, .state] | @tsv' \
+            | LC_ALL=C sort > "$actual_assets"
+          cmp -s "$expected_assets" "$actual_assets"
+          current_tag_commit=$(gh api "${api_headers[@]}" \
+            "repos/$GH_REPO/commits/tags/$RELEASE_TAG" --jq '.sha')
+          test "$current_tag_commit" = "$SOURCE_COMMIT"

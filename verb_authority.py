@@ -51,6 +51,9 @@ their own fail-closed outcome when the ceiling is exceeded.
 MAX_NFKC_OPERATION_CHARS = 8 * MAX_NFKC_INPUT_CHARS
 """Maximum cumulative Unicode-normalization input in one runtime operation."""
 
+MAX_IDENTIFIER_INFERENCE_CHARS = 512
+"""Maximum schema-identifier length inspected by lexical policy inference."""
+
 
 class _NFKCWorkLimitExceeded(ValueError):
     """Internal signal that Unicode normalization was refused before work."""
@@ -153,6 +156,9 @@ def _normalize_choice_key(key: str) -> str:
     return key.strip().casefold()
 
 
+_INVALID_RESOLUTION_KEY = "<invalid-key>"
+
+
 class TrustedResolver:
     """Resolve a key to a canonical value from a closed trusted catalog.
 
@@ -173,29 +179,76 @@ class TrustedResolver:
     ) -> None:
         self._normalize_key = normalize_key or _normalize_choice_key
         self._choices: dict[str, list[TrustedChoice]] = {}
+        # A catalog is one application-owned trust snapshot.  Share the
+        # resource budget across all of its values so a large number of small
+        # entries cannot bypass the same limits that protect one nested value.
+        snapshot_budget = _JSONSnapshotBudget()
         for choice in choices:
-            if not isinstance(choice, TrustedChoice):
+            if type(choice) is not TrustedChoice:
                 raise TypeError("choices must contain TrustedChoice instances")
-            if not isinstance(choice.key, str) or not choice.key.strip():
+            if type(choice.key) is not str:
+                raise TypeError("trusted choice keys must be plain strings")
+            if len(choice.key) > MAX_NFKC_INPUT_CHARS:
+                raise ValueError("trusted choice keys exceed the lookup length limit")
+            snapshot_budget.consume_text(choice.key)
+            if not choice.key.strip():
                 raise ValueError("trusted choice keys must be non-empty strings")
-            if not isinstance(choice.evidence, str) or not choice.evidence.strip():
+            if type(choice.evidence) is not str:
+                raise TypeError("trusted choice evidence must be plain text")
+            snapshot_budget.consume_text(choice.evidence)
+            if not choice.evidence.strip():
                 raise ValueError("trusted choice evidence must be non-empty text")
             if choice.value is None:
                 raise ValueError("trusted choice values must not be None")
+            # Keep only a plain-JSON tree that is independent of the caller's
+            # containers.  Besides blocking aliases and later mutation, this
+            # rejects custom Python objects whose methods could run while a
+            # supposedly trusted value is compared or dispatched.
+            value_snapshot = _snapshot_json_value(
+                choice.value,
+                _budget=snapshot_budget,
+            )
             normalized = self._normalize_key(choice.key)
-            if not isinstance(normalized, str) or not normalized:
+            if type(normalized) is not str:
+                raise TypeError("normalized trusted choice keys must be plain strings")
+            if len(normalized) > MAX_NFKC_INPUT_CHARS:
+                raise ValueError(
+                    "normalized trusted choice keys exceed the lookup length limit"
+                )
+            snapshot_budget.consume_text(normalized)
+            if not normalized:
                 raise ValueError(
                     "normalized trusted choice keys must be non-empty strings"
                 )
-            self._choices.setdefault(normalized, []).append(choice)
+            self._choices.setdefault(normalized, []).append(
+                TrustedChoice(choice.key, value_snapshot, choice.evidence)
+            )
 
     def resolve(self, key: str) -> TrustedResolution:
         """Return one trusted catalog value, or an explicit closed failure."""
 
-        if not isinstance(key, str) or not key.strip():
-            return TrustedResolution(str(key), ResolutionStatus.NOT_FOUND)
+        # Reject before coercion or any overridable string method.  In
+        # particular, a hostile object or ``str`` subclass must not get code
+        # execution merely by being offered as an untrusted lookup key.
+        if type(key) is not str:
+            return TrustedResolution(
+                _INVALID_RESOLUTION_KEY,
+                ResolutionStatus.NOT_FOUND,
+            )
+        if len(key) > MAX_NFKC_INPUT_CHARS or _has_lone_surrogate(key):
+            return TrustedResolution(
+                _INVALID_RESOLUTION_KEY,
+                ResolutionStatus.NOT_FOUND,
+            )
+        if not key.strip():
+            return TrustedResolution(key, ResolutionStatus.NOT_FOUND)
         normalized = self._normalize_key(key)
-        if not isinstance(normalized, str) or not normalized:
+        if (
+            type(normalized) is not str
+            or len(normalized) > MAX_NFKC_INPUT_CHARS
+            or not normalized
+            or _has_lone_surrogate(normalized)
+        ):
             return TrustedResolution(key, ResolutionStatus.NOT_FOUND)
         matches = self._choices.get(normalized, [])
         if not matches:
@@ -210,7 +263,10 @@ class TrustedResolver:
         return TrustedResolution(
             key,
             ResolutionStatus.RESOLVED,
-            value=choice.value,
+            # Never expose the catalog's retained snapshot.  A caller may
+            # freely mutate one resolution without changing later trusted
+            # resolutions or the value used as trusted_args.
+            value=_snapshot_json_value(choice.value),
             evidence=choice.evidence,
             matches=1,
         )
@@ -401,9 +457,128 @@ _AUTHORITY_SINK_TOKENS = frozenset(
         "credentials",
         "destination",
         "destinations",
+        "email",
+        "emails",
     }
 )
 _COMPACT_AUTHORITY_SINK_TOKENS = frozenset({"apikey", "apikeys"})
+_COMPACT_AUTHORITY_PREFIXES = frozenset(
+    {
+        "access",
+        "api",
+        "approved",
+        "backup",
+        "bank",
+        "callback",
+        "connection",
+        "config",
+        "database",
+        "directory",
+        "customer",
+        "destination",
+        "event",
+        "execute",
+        "external",
+        "folder",
+        "idempotency",
+        "incoming",
+        "input",
+        "local",
+        "log",
+        "message",
+        "outbound",
+        "output",
+        "payment",
+        "primary",
+        "proxy",
+        "recipient",
+        "remote",
+        "reply",
+        "request",
+        "root",
+        "run",
+        "server",
+        "service",
+        "settlement",
+        "source",
+        "sub",
+        "target",
+        "temp",
+        "temporary",
+        "transfer",
+        "user",
+        "wallet",
+        "working",
+    }
+)
+_COMPACT_AUTHORITY_SUFFIXES = frozenset(
+    {*_AUTHORITY_SINK_TOKENS, *_COMPACT_AUTHORITY_SINK_TOKENS, "to"}
+)
+_AMBIGUOUS_COMPACT_AUTHORITY_SUFFIXES = frozenset(
+    {
+        "file",
+        "files",
+        "host",
+        "hosts",
+        "path",
+        "paths",
+        "shell",
+        "shells",
+        "to",
+    }
+)
+_COMPACT_AUTHORITY_QUALIFIERS = frozenset(
+    {
+        "address",
+        "addresses",
+        "argument",
+        "arguments",
+        "candidate",
+        "candidates",
+        "config",
+        "configs",
+        "data",
+        "default",
+        "defaults",
+        "field",
+        "fields",
+        "input",
+        "json",
+        "name",
+        "names",
+        "number",
+        "numbers",
+        "object",
+        "objects",
+        "optional",
+        "override",
+        "overrides",
+        "parameter",
+        "parameters",
+        "raw",
+        "ref",
+        "reference",
+        "references",
+        "refs",
+        "schema",
+        "schemas",
+        "selector",
+        "selectors",
+        "setting",
+        "settings",
+        "string",
+        "strings",
+        "template",
+        "templates",
+        "text",
+        "value",
+        "values",
+    }
+)
+_ORDERED_COMPACT_AUTHORITY_QUALIFIERS = tuple(
+    sorted(_COMPACT_AUTHORITY_QUALIFIERS, key=len, reverse=True)
+)
+_MAX_COMPACT_QUALIFIER_LAYERS = 8
 _SELECTOR_TOKENS = frozenset(
     {
         "guid",
@@ -426,21 +601,32 @@ _PAYLOAD_TOKENS = frozenset(
 class _PolicyInferenceContext:
     """Cache identifier normalization under one aggregate work budget."""
 
-    __slots__ = ("normalization_budget", "normalized_identifiers")
+    __slots__ = (
+        "compact_identifier_segments",
+        "identifier_tokens",
+        "normalization_budget",
+        "normalized_identifiers",
+    )
 
     def __init__(self) -> None:
         self.normalization_budget = _NFKCWorkBudget()
         self.normalized_identifiers: dict[str, str | None] = {}
+        self.identifier_tokens: dict[str, tuple[str, ...]] = {}
+        self.compact_identifier_segments: dict[str, tuple[str, ...]] = {}
 
     def normalize_identifier(self, name: Any) -> str | None:
         if type(name) is not str:
             return None
+        # Refuse before hashing or retaining the identifier in the per-scan
+        # cache.  Otherwise many oversized ASCII names could still consume
+        # substantial CPU and keep all caller-owned text alive.
+        if len(name) > MAX_IDENTIFIER_INFERENCE_CHARS:
+            return None
         if name in self.normalized_identifiers:
             return self.normalized_identifiers[name]
+        normalized: str | None
         if name.isascii():
-            normalized: str | None = name
-        elif len(name) > MAX_NFKC_INPUT_CHARS:
-            normalized = None
+            normalized = name
         else:
             try:
                 normalized = _bounded_nfkc(name, self.normalization_budget)
@@ -465,6 +651,10 @@ def _identifier_tokens(
     """
 
     context = _context or _PolicyInferenceContext()
+    if type(name) is not str or len(name) > MAX_IDENTIFIER_INFERENCE_CHARS:
+        return ()
+    if name in context.identifier_tokens:
+        return context.identifier_tokens[name]
     normalized = context.normalize_identifier(name)
     if normalized is None:
         return ()
@@ -517,7 +707,9 @@ def _identifier_tokens(
                 flush()
         current.append(character)
     flush()
-    return tuple(tokens)
+    result = tuple(tokens)
+    context.identifier_tokens[name] = result
+    return result
 
 
 def _compact_identifier_segments(
@@ -536,6 +728,10 @@ def _compact_identifier_segments(
     """
 
     context = _context or _PolicyInferenceContext()
+    if type(name) is not str or len(name) > MAX_IDENTIFIER_INFERENCE_CHARS:
+        return ()
+    if name in context.compact_identifier_segments:
+        return context.compact_identifier_segments[name]
     normalized = context.normalize_identifier(name)
     if normalized is None:
         return ()
@@ -563,7 +759,9 @@ def _compact_identifier_segments(
         # Separators are provider-controlled too: messageI_D and walletK-eY
         # must not turn one selector suffix into harmless one-letter tokens.
         segments.append(flattened_segment)
-    return tuple(segments)
+    result = tuple(segments)
+    context.compact_identifier_segments[name] = result
+    return result
 
 
 def _is_sink_name(
@@ -613,6 +811,72 @@ def _is_selector_name(
         for segment in compact_segments
         for suffix in _SELECTOR_TOKENS
     )
+
+
+def _is_compact_sink_name(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> bool:
+    """Return ambiguous authority evidence from a flattened compound name.
+
+    Flatcase schemas can erase a meaningful boundary entirely: ``targetHost``
+    becomes ``targethost`` and ``run_command`` becomes ``runcommand``.  A raw
+    suffix match would also mistake ordinary words such as ``profile``,
+    ``ghost``, or ``eggshell`` for authority.  Strong suffixes such as
+    ``url``, ``account``, and ``credential`` stand on their own.  For the few
+    suffixes that are also common word endings, require the preceding part to
+    end in a compact role/action prefix (or another authority token).  Surface
+    every compact match as uncertain review rather than a high-confidence
+    declaration.  This remains a finite lexical heuristic: it recognizes only
+    the representation qualifiers listed above and cannot reconstruct every
+    boundary erased by arbitrary flatcase.  Applications must explicitly
+    declare unusual sink names; ``sink=False`` remains the deliberate escape.
+    """
+
+    prefixes = _COMPACT_AUTHORITY_PREFIXES | _AUTHORITY_SINK_TOKENS
+    authority_suffixes = _COMPACT_AUTHORITY_SUFFIXES | _SELECTOR_TOKENS
+    for segment in _compact_identifier_segments(name, _context):
+        end = len(segment)
+        qualifier_layers = 0
+        while end:
+            for suffix in authority_suffixes:
+                if end == len(suffix) and segment.endswith(suffix, 0, end):
+                    return True
+                if not segment.endswith(suffix, 0, end):
+                    continue
+                prefix_end = end - len(suffix)
+                if (
+                    suffix not in _AMBIGUOUS_COMPACT_AUTHORITY_SUFFIXES
+                    or any(
+                        segment.endswith(role, 0, prefix_end)
+                        for role in prefixes
+                    )
+                ):
+                    return True
+
+            # Qualifiers describe the representation of an authority value,
+            # not who may author it.  Peel only complete known suffixes and
+            # re-evaluate after each layer (for example
+            # destination + url + value + field).  Unknown endings such as
+            # account+ing, host+age, and token+izer are never discarded.
+            qualifier = next(
+                (
+                    ending
+                    for ending in _ORDERED_COMPACT_AUTHORITY_QUALIFIERS
+                    if end != len(ending)
+                    and segment.endswith(ending, 0, end)
+                ),
+                None,
+            )
+            if qualifier is None:
+                break
+            qualifier_layers += 1
+            if qualifier_layers > _MAX_COMPACT_QUALIFIER_LAYERS:
+                # An implausibly deep chain is itself unmodelled identifier
+                # structure.  Stop bounded work and fail closed to review.
+                return True
+            end -= len(qualifier)
+    return False
 
 
 def _is_payload_name(
@@ -675,7 +939,10 @@ def infer_policy(
     # but uncertain so consequential tools surface them in PolicySet.review.
     if p.type in ("email", "uri") or _is_sink_name(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.HIGH
-    if _is_selector_name(p.name, context):
+    if _is_selector_name(p.name, context) or _is_compact_sink_name(
+        p.name,
+        context,
+    ):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
     if _identifier_name_requires_review(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN

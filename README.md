@@ -242,7 +242,13 @@ When a model supplies a human label such as a contact name, resolve that label
 against an application-owned catalog first. `TrustedResolver` implements only
 an exact `key -> (value, evidence)` lookup after trimming and case-folding. It
 does not perform fuzzy matching, authorization, endpoint policy, or path/prefix
-checks. Unknown and ambiguous keys remain unresolved.
+checks. Unknown and ambiguous keys remain unresolved. Catalog values must be
+finite plain JSON. The resolver snapshots them at construction and returns a
+fresh snapshot for each successful lookup, so mutating the constructor input or
+one resolution cannot redefine a later trusted choice. Keys, evidence, and
+normalizer results must be bounded built-in strings; string subclasses,
+surrogates, oversized lookup keys, and non-string keys fail closed before
+caller-controlled conversion or normalization hooks can run.
 
 ```python
 from verb_authority import (
@@ -297,7 +303,12 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json --ou
 ```
 
 The scanner accepts MCP `tools/list` responses, OpenAI function tools, and
-Anthropic tool definitions. Its report separates effective risk, an advisory
+Anthropic tool definitions. An input must select exactly one recognized
+envelope and tool-definition dialect; competing schema aliases are rejected
+instead of applying a precedence rule that could hide a second interpretation.
+An unambiguous OpenAI function may omit `parameters` to declare no arguments;
+MCP and Anthropic definitions still require their explicit schema alias.
+Its report separates effective risk, an advisory
 tool-name heuristic, and author-supplied risk evidence. Tool names are mutable
 labels, so a name alone never establishes runtime behavior: without a risk
 declaration the effective tier is `unknown`, review is required, and the gate
@@ -593,6 +604,11 @@ The project is one importable module with five cooperating pieces:
   numeric or payload rules: an integer `account_id` and a string `reply_to`
   remain locked, while an ambiguous `message_id` remains locked for review.
   Payload names are token-bound rather than matched as arbitrary substrings.
+  Flattened names such as `destinationurlvalue` and
+  `destinationurloverride` conservatively retain the underlying URL boundary,
+  with bounded parsing and `sink=False` as the explicit release valve. This is
+  still a finite label heuristic, not semantic proof: unusual author-chosen
+  names must declare their sink role explicitly.
 - **Declared capabilities.** `Param(..., sink=True|False)` lets a tool schema
   resolve overloaded names such as `path` without relying on the heuristic.
 - **Declared verb-risk tiers.** Applications declare tools as read-only, write,

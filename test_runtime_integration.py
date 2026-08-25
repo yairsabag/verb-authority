@@ -89,6 +89,235 @@ def test_resolver_returns_canonical_value_and_evidence():
     assert resolution.matches == 1
 
 
+def test_resolver_snapshots_nested_catalog_values_in_both_directions():
+    source_value = {
+        "route": [
+            {"recipient": "dana@company.com", "metadata": ["approved"]}
+        ]
+    }
+    resolver = TrustedResolver(
+        [TrustedChoice("Dana route", source_value, "directory revision 17")]
+    )
+
+    # Mutation of the constructor input cannot rewrite retained authority.
+    source_value["route"][0]["recipient"] = "attacker@evil.example"
+    source_value["route"][0]["metadata"].append("poisoned")
+    first = resolver.resolve("Dana route")
+    assert first.value == {
+        "route": [
+            {"recipient": "dana@company.com", "metadata": ["approved"]}
+        ]
+    }
+
+    # Mutation of one returned resolution cannot poison a later resolution.
+    first.value["route"][0]["recipient"] = "other@evil.example"
+    first.value["route"][0]["metadata"].clear()
+    second = resolver.resolve("Dana route")
+    assert second.value == {
+        "route": [
+            {"recipient": "dana@company.com", "metadata": ["approved"]}
+        ]
+    }
+    assert second.value is not first.value
+    assert second.value["route"] is not first.value["route"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        object(),
+        b"not JSON text",
+        ("tuple",),
+        {1: "non-string key"},
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10 ** (authority.MAX_JSON_INTEGER_DIGITS + 1),
+        "\ud800",
+    ],
+)
+def test_resolver_rejects_non_plain_or_nonfinite_catalog_values(value):
+    with pytest.raises((TypeError, ValueError)):
+        TrustedResolver([TrustedChoice("choice", value, "trusted fixture")])
+
+
+def test_resolver_rejects_polymorphic_json_containers_without_calling_them():
+    class HostileDictionary(dict):
+        def items(self):
+            raise AssertionError("custom mapping methods must not execute")
+
+    class HostileList(list):
+        def __iter__(self):
+            raise AssertionError("custom sequence methods must not execute")
+
+    for value in (HostileDictionary(value=1), HostileList([1])):
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            TrustedResolver(
+                [TrustedChoice("choice", value, "trusted fixture")]
+            )
+
+
+def test_resolver_rejects_cycles_and_python_container_aliases():
+    cyclic = []
+    cyclic.append(cyclic)
+    shared = {"recipient": "dana@company.com"}
+
+    for value in (cyclic, [shared, shared]):
+        with pytest.raises(ValueError, match="cyclic or aliased"):
+            TrustedResolver(
+                [TrustedChoice("choice", value, "trusted fixture")]
+            )
+
+
+def test_resolver_shares_snapshot_resource_budget_across_catalog(monkeypatch):
+    monkeypatch.setattr(authority, "MAX_JSON_NODES", 2)
+
+    with pytest.raises(authority._JSONSnapshotBudgetExceeded, match="node"):
+        TrustedResolver(
+            [
+                TrustedChoice("one", 1, "trusted fixture"),
+                TrustedChoice("two", 2, "trusted fixture"),
+                TrustedChoice("three", 3, "trusted fixture"),
+            ]
+        )
+
+
+def test_resolver_requires_exact_builtin_strings_without_running_subclass_code():
+    class HostileString(str):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("hostile strip must not execute")
+
+        def casefold(self):
+            raise AssertionError("hostile casefold must not execute")
+
+        def __hash__(self):
+            raise AssertionError("hostile hash must not execute")
+
+    for choice in (
+        TrustedChoice(HostileString("key"), 1, "trusted fixture"),
+        TrustedChoice("key", 1, HostileString("trusted fixture")),
+    ):
+        with pytest.raises(TypeError, match="plain"):
+            TrustedResolver([choice])
+
+    with pytest.raises(TypeError, match="normalized.*plain"):
+        TrustedResolver(
+            [TrustedChoice("key", 1, "trusted fixture")],
+            normalize_key=lambda key: HostileString(key),
+        )
+
+    resolver = _contacts()
+    resolution = resolver.resolve(HostileString("Dana"))
+    assert resolution.status is ResolutionStatus.NOT_FOUND
+    assert resolution.requested_key == authority._INVALID_RESOLUTION_KEY
+
+
+def test_resolver_rejects_hostile_choice_subclass_before_attribute_access():
+    class HostileChoice(TrustedChoice):
+        def __getattribute__(self, name):
+            raise AssertionError("choice attributes must not be read")
+
+    hostile = object.__new__(HostileChoice)
+    with pytest.raises(TypeError, match="TrustedChoice"):
+        TrustedResolver([hostile])
+
+
+def test_resolver_does_not_coerce_a_non_string_lookup_key():
+    class HostileLookup:
+        def __str__(self):
+            raise AssertionError("lookup keys must not be coerced")
+
+    resolution = _contacts().resolve(HostileLookup())
+
+    assert resolution.status is ResolutionStatus.NOT_FOUND
+    assert resolution.requested_key == authority._INVALID_RESOLUTION_KEY
+
+
+@pytest.mark.parametrize(
+    ("key", "evidence"),
+    [("\ud800", "trusted fixture"), ("choice", "trusted \udfff fixture")],
+)
+def test_resolver_rejects_surrogates_in_catalog_text(key, evidence):
+    with pytest.raises(ValueError, match="surrogate"):
+        TrustedResolver([TrustedChoice(key, 1, evidence)])
+
+
+def test_resolver_rejects_surrogates_before_lookup_normalization():
+    calls = []
+
+    def normalize(key):
+        calls.append(key)
+        return key.strip().casefold()
+
+    resolver = TrustedResolver(
+        [TrustedChoice("Dana", 1, "trusted fixture")],
+        normalize_key=normalize,
+    )
+    calls.clear()
+
+    resolution = resolver.resolve("bad\ud800key")
+
+    assert resolution.status is ResolutionStatus.NOT_FOUND
+    assert resolution.requested_key == authority._INVALID_RESOLUTION_KEY
+    assert calls == []
+
+
+def test_resolver_rejects_surrogate_normalizer_output():
+    with pytest.raises(ValueError, match="surrogate"):
+        TrustedResolver(
+            [TrustedChoice("Dana", 1, "trusted fixture")],
+            normalize_key=lambda key: "bad\ud800key",
+        )
+
+
+def test_resolver_charges_key_evidence_and_normalized_material(monkeypatch):
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 20)
+
+    # Raw key + evidence + scalar value fit by themselves.  Charging the
+    # normalized key a second time is what crosses the catalog budget.
+    with pytest.raises(
+        authority._JSONSnapshotBudgetExceeded,
+        match="material",
+    ):
+        TrustedResolver(
+            [TrustedChoice("abcdefgh", 1, "e")],
+            normalize_key=lambda key: key,
+        )
+
+
+def test_resolver_charges_long_evidence_to_catalog_budget(monkeypatch):
+    monkeypatch.setattr(authority, "MAX_JSON_MATERIAL_BYTES", 32)
+
+    with pytest.raises(
+        authority._JSONSnapshotBudgetExceeded,
+        match="material",
+    ):
+        TrustedResolver(
+            [TrustedChoice("key", 1, "e" * 64)],
+        )
+
+
+def test_resolver_bounds_lookup_key_before_normalization(monkeypatch):
+    calls = []
+
+    def normalize(key):
+        calls.append(key)
+        return key.strip().casefold()
+
+    resolver = TrustedResolver(
+        [TrustedChoice("Dana", 1, "trusted fixture")],
+        normalize_key=normalize,
+    )
+    calls.clear()
+    overlong = "A" * (authority.MAX_NFKC_INPUT_CHARS + 1)
+
+    resolution = resolver.resolve(overlong)
+
+    assert resolution.status is ResolutionStatus.NOT_FOUND
+    assert resolution.requested_key == authority._INVALID_RESOLUTION_KEY
+    assert calls == []
+
+
 @pytest.mark.parametrize("key", ["Mallory", "", "   "])
 def test_resolver_fails_closed_for_unknown_or_empty_keys(key):
     resolution = _contacts().resolve(key)

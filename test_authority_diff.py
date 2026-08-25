@@ -731,6 +731,191 @@ def test_report_shaped_inputs_never_fall_through_to_raw_scanning(
         load_report_or_schema(str(path), label="candidate")
 
 
+def _diff_collision_mcp_tool(name="send_message"):
+    return {
+        "name": name,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"recipient": {"type": "string"}},
+        },
+    }
+
+
+def _diff_collision_openai_function(name="send_message"):
+    return {
+        "name": name,
+        "parameters": {
+            "type": "object",
+            "properties": {"recipient": {"type": "string"}},
+        },
+    }
+
+
+def _diff_collision_envelope(name):
+    if name == "sources":
+        return [{"id": "source", "tools": [_diff_collision_mcp_tool()]}]
+    if name == "result":
+        return {"tools": [_diff_collision_mcp_tool()]}
+    if name == "tools":
+        return [_diff_collision_mcp_tool()]
+    if name == "functions":
+        return [_diff_collision_openai_function()]
+    raise AssertionError(f"unknown test envelope: {name}")
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    (
+        ("sources", "tools"),
+        ("tools", "sources"),
+        ("result", "tools"),
+        ("tools", "result"),
+        ("tools", "functions"),
+        ("functions", "tools"),
+    ),
+)
+def test_diff_loader_rejects_raw_envelope_collisions_in_both_key_orders(
+    tmp_path, first, second
+):
+    document = {
+        first: _diff_collision_envelope(first),
+        second: _diff_collision_envelope(second),
+    }
+    path = tmp_path / f"{first}-{second}.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(
+        scanner.SchemaError, match="competing tool-definition envelopes"
+    ):
+        load_report_or_schema(str(path), label="candidate")
+
+
+def test_diff_loader_accepts_openai_responses_direct_schema(tmp_path):
+    document = {
+        "tools": [
+            {
+                "type": "function",
+                "name": "set_limit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number", "maximum": 10}
+                    },
+                    "required": ["amount"],
+                },
+            }
+        ]
+    }
+    path = tmp_path / "responses-tools.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    report = load_report_or_schema(str(path), label="candidate")
+
+    assert report["summary"]["tools"] == 1
+    assert report["tools"][0]["name"] == "set_limit"
+    assert report["tools"][0]["arguments"][0]["name"] == "amount"
+
+
+def test_diff_loader_accepts_openai_zero_argument_function(tmp_path):
+    document = {
+        "tools": [{"type": "function", "name": "read_status"}]
+    }
+    path = tmp_path / "responses-zero-argument.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    report = load_report_or_schema(str(path), label="candidate")
+
+    assert report["summary"]["tools"] == 1
+    assert report["summary"]["parameters"] == 0
+
+
+def test_diff_loader_rejects_mixed_responses_and_nested_openai_dialects(
+    tmp_path,
+):
+    document = {
+        "tools": [
+            {
+                "type": "function",
+                "name": "responses_direct",
+                "parameters": {"type": "object"},
+                "function": {
+                    "name": "chat_nested",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+    }
+    path = tmp_path / "mixed-openai-dialects.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(scanner.SchemaError, match="direct and nested"):
+        load_report_or_schema(str(path), label="candidate")
+
+
+@pytest.mark.parametrize("failure_flag", ("--fail-on-increase", "--fail-on-review"))
+def test_diff_cli_rejects_envelope_collision_before_failure_thresholds(
+    tmp_path, capsys, failure_flag
+):
+    before = {"tools": [_diff_collision_mcp_tool()]}
+    after = {
+        "tools": [_diff_collision_mcp_tool()],
+        "functions": [_diff_collision_openai_function()],
+    }
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path), failure_flag])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "competing tool-definition envelopes" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(
+    "malformed_envelope",
+    ("tools", "functions", "result.tools", "sources.tools"),
+)
+def test_malformed_report_containers_never_fall_through_to_raw_diff_scan(
+    tmp_path, malformed_envelope
+):
+    report_tool = copy.deepcopy(
+        _single_argument_report({"type": "number", "maximum": 100})["tools"][0]
+    )
+    valid_tool = _diff_collision_mcp_tool("fallback")
+    if malformed_envelope == "tools":
+        candidate = {
+            "name": valid_tool["name"],
+            "inputSchema": valid_tool["inputSchema"],
+            "tools": {"reported": report_tool},
+        }
+    elif malformed_envelope == "functions":
+        candidate = {
+            "tools": [valid_tool],
+            "functions": {"reported": report_tool},
+        }
+    elif malformed_envelope == "result.tools":
+        candidate = {
+            "tools": [valid_tool],
+            "result": {"tools": {"reported": report_tool}},
+        }
+    else:
+        candidate = {
+            "tools": [valid_tool],
+            "sources": {
+                "source": {"tools": {"reported": report_tool}}
+            },
+        }
+    path = tmp_path / "malformed-report-envelope.json"
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    with pytest.raises(DiffError, match="report-shaped"):
+        load_report_or_schema(str(path), label="candidate")
+
+
 def _wrap_report_tool(wrapper, tool):
     wrappers = {
         "direct-tool": tool,

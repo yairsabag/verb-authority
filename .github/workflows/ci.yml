@@ -19,10 +19,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -38,12 +40,144 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Bind verifier and source contract to the exact commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          while IFS= read -r variable; do
+            case "$variable" in
+              GIT_CONFIG_*|GIT_TRACE*|LD_*|DYLD_*|GCONV_PATH|LOCPATH|PYTHONPATH|PYTHONHOME)
+                unset "$variable" ;;
+            esac
+          done < <(compgen -e)
+          unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+          unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+          unset GIT_REPLACE_REF_BASE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_EXEC_PATH
+          unset GIT_PREFIX GIT_QUARANTINE_PATH GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER
+          export PATH=/usr/bin:/bin
+          export LC_ALL=C
+          export LANG=C
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_NO_REPLACE_OBJECTS=1
+          export GIT_NO_LAZY_FETCH=1
+          export GIT_LITERAL_PATHSPECS=1
+          export GIT_TERMINAL_PROMPT=0
+          test -x /usr/bin/git && test ! -L /usr/bin/git
+          test "$(stat -c %u /usr/bin/git)" -eq 0
+          git_mode=$(stat -c %a -- /usr/bin/git)
+          [[ "$git_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$git_mode & 8#022))" -eq 0
+          python_safe=$(readlink -f /usr/bin/python3)
+          case "$python_safe" in /usr/bin/python3|/usr/bin/python3.*) ;; *) exit 1 ;; esac
+          test -x "$python_safe" && test ! -L "$python_safe"
+          test "$(stat -c %u "$python_safe")" -eq 0
+          python_mode=$(stat -c %a -- "$python_safe")
+          [[ "$python_mode" =~ ^[0-7]{3,4}$ ]]
+          test "$((8#$python_mode & 8#022))" -eq 0
+          git_safe=(/usr/bin/git --no-pager --no-replace-objects \
+            -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= \
+            -c protocol.allow=never -c protocol.ext.allow=never \
+            -c protocol.file.allow=never)
+          source_commit=$("${git_safe[@]}" rev-parse --verify 'HEAD^{commit}')
+          test "$source_commit" = "$EXPECTED_SOURCE_COMMIT"
+          verifier="${{ runner.temp }}/verify_release_artifacts.py"
+          verifier_blob=$("$python_safe" -I - \
+            "$source_commit" "$verifier" "${{ github.workspace }}" <<'PY'
+          import hashlib
+          import re
+          import subprocess
+          import sys
+
+          source_commit, output_path, repository = sys.argv[1:]
+          if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_commit) is None:
+              raise SystemExit("invalid exact source commit")
+          hexadecimal_size = len(source_commit)
+          git = [
+              "/usr/bin/git", "--no-pager", "--no-replace-objects",
+              "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "protocol.allow=never",
+              "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+              "-C", repository,
+          ]
+
+          def read_object(kind, object_id, limit):
+              process = subprocess.Popen(
+                  [*git, "cat-file", kind, object_id],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+              )
+              assert process.stdout is not None
+              payload = process.stdout.read(limit + 1)
+              if len(payload) > limit:
+                  process.kill()
+                  process.wait()
+                  raise SystemExit(f"oversized git {kind} object")
+              if process.wait() != 0:
+                  raise SystemExit(f"cannot read git {kind} object")
+              framed = f"{kind} {len(payload)}\0".encode("ascii") + payload
+              digest = (
+                  hashlib.sha1(framed).hexdigest()
+                  if hexadecimal_size == 40
+                  else hashlib.sha256(framed).hexdigest()
+              )
+              if digest != object_id:
+                  raise SystemExit(f"git {kind} object hash mismatch")
+              return payload
+
+          def tree_entries(tree_id):
+              payload = read_object("tree", tree_id, 16 * 1024 * 1024)
+              width = hexadecimal_size // 2
+              position = 0
+              while position < len(payload):
+                  space = payload.find(b" ", position)
+                  nul = payload.find(b"\0", space + 1)
+                  end = nul + 1 + width
+                  if space <= position or nul <= space + 1 or end > len(payload):
+                      raise SystemExit("malformed git tree")
+                  yield (
+                      payload[position:space],
+                      payload[space + 1:nul],
+                      payload[nul + 1:end].hex(),
+                  )
+                  position = end
+
+          commit = read_object("commit", source_commit, 16 * 1024 * 1024)
+          trees = [
+              line[5:].decode("ascii")
+              for line in commit.split(b"\n\n", 1)[0].splitlines()
+              if line.startswith(b"tree ")
+          ]
+          if len(trees) != 1:
+              raise SystemExit("commit has no unique tree")
+          current = trees[0]
+          for component, expected_mode in (
+              (b"scripts", b"40000"),
+              (b"verify_release_artifacts.py", b"100644"),
+          ):
+              matches = [entry for entry in tree_entries(current) if entry[1] == component]
+              if len(matches) != 1 or matches[0][0].lstrip(b"0") != expected_mode:
+                  raise SystemExit("verifier path is absent or has an unsafe mode")
+              current = matches[0][2]
+          verifier_payload = read_object("blob", current, 16 * 1024 * 1024)
+          with open(output_path, "xb") as output:
+              output.write(verifier_payload)
+          print(current)
+          PY
+          )
+          test "$("${git_safe[@]}" hash-object --no-filters "$verifier")" = "$verifier_blob"
+          printf 'SOURCE_COMMIT=%s\n' "$source_commit" >> "$GITHUB_ENV"
+          printf 'RELEASE_VERIFIER=%s\n' "$verifier" >> "$GITHUB_ENV"
 
       - name: Install build frontend
         run: python -m pip install "build>=1.2,<2"
@@ -53,16 +187,20 @@ jobs:
 
       - name: Verify source distribution before extraction
         run: |
-          python -I scripts/verify_release_artifacts.py sdist \
+          python -I "$RELEASE_VERIFIER" sdist \
             --project pyproject.toml \
-            --dist dist
+            --dist dist \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
 
       - name: Extract and inspect source distribution
         run: |
-          python -I scripts/verify_release_artifacts.py extract-sdist \
+          python -I "$RELEASE_VERIFIER" extract-sdist \
             --project pyproject.toml \
             --dist dist \
-            --output "${{ runner.temp }}/verb-authority-sdist"
+            --output "${{ runner.temp }}/verb-authority-sdist" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
           sdist_root=$(find "${{ runner.temp }}/verb-authority-sdist" \
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
@@ -83,9 +221,11 @@ jobs:
 
       - name: Verify distribution identities
         run: |
-          python -I scripts/verify_release_artifacts.py artifacts \
+          python -I "$RELEASE_VERIFIER" artifacts \
             --project pyproject.toml \
-            --dist "${{ github.workspace }}/dist"
+            --dist "${{ github.workspace }}/dist" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
 
       - name: Generate and verify SHA-256 checksums
         working-directory: dist
@@ -143,7 +283,7 @@ jobs:
           fail_on_review: "true"
 
       - name: Preserve distributions
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-distributions
           path: dist/
@@ -157,12 +297,13 @@ jobs:
 
     steps:
       - name: Check out action below the consumer workspace
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: verb-authority-action
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 

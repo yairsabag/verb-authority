@@ -149,6 +149,34 @@ MAX_SCAN_ARGUMENTS = 2_000
 MAX_SCAN_ENUM_MEMBERS = 10_000
 MAX_SCAN_CONTROL_COLLECTION_MEMBERS = 2_000
 
+_TOOL_SCHEMA_ALIASES = ("inputSchema", "input_schema", "parameters")
+_REPORT_SENTINEL_KEYS = frozenset(
+    {
+        "report_version",
+        "privacy",
+        "schema_fingerprint_sha256",
+        "summary",
+        "declared_controls",
+        "control_declaration_fingerprint_sha256",
+    }
+)
+_REPORT_TOOL_SENTINEL_KEYS = frozenset(
+    {
+        "arguments",
+        "risk_source",
+        "risk_evidence",
+        "inferred_risk",
+        "risk_inference",
+        "risk_conflict",
+        "risk_review_required",
+        "needs_confirmation",
+        "schema_review_required",
+        "annotation_conflicts",
+        "schema_material_fingerprint_sha256",
+        "unmodeled_schema_fingerprint_sha256",
+    }
+)
+
 
 class SchemaError(ValueError):
     """Raised when an input does not contain recognizable tool definitions."""
@@ -520,6 +548,109 @@ class ToolDefinition:
     source_url: str | None = None
 
 
+def _entry_is_report_shaped(entry: Any) -> bool:
+    if type(entry) is not dict:
+        return False
+    if _REPORT_TOOL_SENTINEL_KEYS.intersection(entry):
+        return True
+    function = entry.get("function")
+    return (
+        entry.get("type") == "function"
+        and type(function) is dict
+        and bool(_REPORT_TOOL_SENTINEL_KEYS.intersection(function))
+    )
+
+
+def _container_has_report_tool(container: Any) -> bool:
+    if type(container) is list:
+        return any(_entry_is_report_shaped(entry) for entry in container)
+    if type(container) is dict:
+        if _entry_is_report_shaped(container):
+            return True
+        return any(_entry_is_report_shaped(entry) for entry in container.values())
+    return False
+
+
+def is_report_shaped_document(document: Any) -> bool:
+    """Recognize scanner reports, including malformed supported envelopes.
+
+    The diff accepts either raw schemas or existing reports.  A damaged report
+    must never become a seemingly valid raw-schema scan merely because its
+    envelope changed from an array to an object or was combined with a second
+    dialect.  Inspection is deliberately limited to supported envelope paths;
+    arbitrary JSON Schema subschemas are not searched for report vocabulary.
+    """
+
+    if type(document) is list:
+        return _container_has_report_tool(document)
+    if type(document) is not dict:
+        return False
+    if "generator" in document or _REPORT_SENTINEL_KEYS.intersection(document):
+        return True
+    if "name" in document and _entry_is_report_shaped(document):
+        return True
+    if _container_has_report_tool(document.get("tools")):
+        return True
+    if _container_has_report_tool(document.get("functions")):
+        return True
+
+    result = document.get("result")
+    if type(result) is dict:
+        if "generator" in result or _REPORT_SENTINEL_KEYS.intersection(result):
+            return True
+        if _container_has_report_tool(result.get("tools")):
+            return True
+
+    sources = document.get("sources")
+    source_entries: Iterable[Any]
+    if type(sources) is list:
+        source_entries = sources
+    elif type(sources) is dict:
+        source_entries = sources.values()
+    else:
+        source_entries = ()
+    for source in source_entries:
+        if type(source) is not dict:
+            continue
+        if "generator" in source or _REPORT_SENTINEL_KEYS.intersection(source):
+            return True
+        if _container_has_report_tool(source.get("tools")):
+            return True
+    return False
+
+
+def _select_schema_alias(
+    raw: dict[str, Any],
+    *,
+    field: str,
+    required_alias: str | None = None,
+    allow_missing: bool = False,
+) -> dict[str, Any]:
+    aliases = [alias for alias in _TOOL_SCHEMA_ALIASES if alias in raw]
+    if len(aliases) > 1:
+        raise SchemaError(
+            f"{field} contains competing input schema aliases: "
+            + ", ".join(aliases)
+        )
+    if not aliases:
+        if allow_missing:
+            return {}
+        raise SchemaError(
+            f"{field} must contain exactly one input schema alias "
+            f"({', '.join(_TOOL_SCHEMA_ALIASES)})"
+        )
+    alias = aliases[0]
+    if required_alias is not None and alias != required_alias:
+        raise SchemaError(
+            f"{field} uses schema alias '{alias}' from a competing tool dialect; "
+            f"expected '{required_alias}'"
+        )
+    schema = raw[alias]
+    if type(schema) is not dict:
+        raise SchemaError(f"{field} has a non-object input schema")
+    return schema
+
+
 def _tool_from_mapping(
     raw: dict[str, Any],
     *,
@@ -529,26 +660,42 @@ def _tool_from_mapping(
     source_id = raw.get("source_id", source_id)
     source_url = raw.get("source_url", source_url)
 
-    if raw.get("type") == "function" and isinstance(raw.get("function"), dict):
+    # Chat Completions wraps a function under ``function``. Responses uses the
+    # equally valid direct shape ``{type: function, name, parameters}``; the
+    # type discriminator alone must therefore not force the nested dialect.
+    nested_marker = "function" in raw
+    direct_marker = "name" in raw or any(
+        alias in raw for alias in _TOOL_SCHEMA_ALIASES
+    )
+    if nested_marker:
+        if raw.get("type") != "function" or type(raw.get("function")) is not dict:
+            raise SchemaError("malformed nested OpenAI function tool definition")
+        if direct_marker:
+            raise SchemaError(
+                "tool definition combines direct and nested OpenAI/MCP dialects"
+            )
         function = raw["function"]
         name = function.get("name")
-        schema = function.get("parameters", {})
+        schema = _select_schema_alias(
+            function,
+            field=f"nested function tool {name!r}",
+            required_alias="parameters",
+            allow_missing=True,
+        )
         annotations = raw.get("annotations", {})
     else:
         name = raw.get("name")
-        schema = raw.get("inputSchema")
-        if schema is None:
-            schema = raw.get("input_schema")
-        if schema is None:
-            schema = raw.get("parameters")
+        responses_function = raw.get("type") == "function"
+        schema = _select_schema_alias(
+            raw,
+            field=f"tool {name!r}",
+            required_alias="parameters" if responses_function else None,
+            allow_missing=responses_function,
+        )
         annotations = raw.get("annotations", {})
 
     if not isinstance(name, str) or not name.strip():
         raise SchemaError("tool definition is missing a non-empty name")
-    if schema is None:
-        schema = {}
-    if not isinstance(schema, dict):
-        raise SchemaError(f"tool '{name}' has a non-object input schema")
     if type(annotations) is not dict:
         raise SchemaError(f"tool '{name}' has non-object annotations")
     return ToolDefinition(
@@ -568,6 +715,11 @@ def _parse_tool_definitions_unchecked(document: Any) -> list[ToolDefinition]:
     Atlas fixture.
     """
 
+    if is_report_shaped_document(document):
+        raise SchemaError(
+            "schema document is report-shaped; expected raw tool definitions"
+        )
+
     if type(document) is list:
         if not document:
             return []
@@ -578,15 +730,47 @@ def _parse_tool_definitions_unchecked(document: Any) -> list[ToolDefinition]:
     if type(document) is not dict:
         raise SchemaError("schema document must be a JSON object or array")
 
-    if isinstance(document.get("sources"), list):
+    envelopes: list[str] = []
+    if "sources" in document:
+        if type(document["sources"]) is not list:
+            raise SchemaError("Atlas sources envelope must contain a sources array")
+        envelopes.append("sources")
+    result = document.get("result")
+    if type(result) is dict and "tools" in result:
+        if type(result["tools"]) is not list:
+            raise SchemaError("MCP result.tools envelope must contain a tools array")
+        envelopes.append("result.tools")
+    if "tools" in document:
+        if type(document["tools"]) is not list:
+            raise SchemaError("tools envelope must contain a tools array")
+        envelopes.append("tools")
+    if "functions" in document:
+        if type(document["functions"]) is not list:
+            raise SchemaError("functions envelope must contain a functions array")
+        envelopes.append("functions")
+    direct_schema = any(alias in document for alias in _TOOL_SCHEMA_ALIASES)
+    direct_openai_function = document.get("type") == "function"
+    if "name" in document and (direct_schema or direct_openai_function):
+        envelopes.append("direct tool")
+
+    if len(envelopes) > 1:
+        raise SchemaError(
+            "schema document contains competing tool-definition envelopes: "
+            + ", ".join(envelopes)
+        )
+    if not envelopes:
+        raise SchemaError("no recognizable tool definitions found")
+
+    envelope = envelopes[0]
+    if envelope == "sources":
         tools: list[ToolDefinition] = []
         for source in document["sources"]:
-            if not isinstance(source, dict) or not isinstance(source.get("tools"), list):
+            if type(source) is not dict or type(source.get("tools")) is not list:
                 raise SchemaError("each Atlas source must contain a tools array")
             source_id = source.get("id")
             source_url = source.get("url")
             for raw in source["tools"]:
-                if not isinstance(raw, dict):
+                if type(raw) is not dict:
                     raise SchemaError("tool definitions must be JSON objects")
                 tools.append(
                     _tool_from_mapping(
@@ -597,22 +781,21 @@ def _parse_tool_definitions_unchecked(document: Any) -> list[ToolDefinition]:
                 )
         return tools
 
-    result = document.get("result")
-    if isinstance(result, dict) and isinstance(result.get("tools"), list):
+    if envelope == "result.tools":
         return _parse_tool_definitions_unchecked(result["tools"])
-    if isinstance(document.get("tools"), list):
+    if envelope == "tools":
         return _parse_tool_definitions_unchecked(document["tools"])
-    if isinstance(document.get("functions"), list):
+    if envelope == "functions":
         if any(type(function) is not dict for function in document["functions"]):
             raise SchemaError("function definitions must be JSON objects")
         return [
             _tool_from_mapping({"type": "function", "function": function})
             for function in document["functions"]
         ]
-    if "name" in document:
+    if envelope == "direct tool":
         return [_tool_from_mapping(document)]
 
-    raise SchemaError("no recognizable tool definitions found")
+    raise AssertionError("unreachable tool-definition envelope")
 
 
 def parse_tool_definitions(document: Any) -> list[ToolDefinition]:

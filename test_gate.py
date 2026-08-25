@@ -320,6 +320,155 @@ def test_authority_sink_tokenization_does_not_match_substrings(name):
     assert confidence is Confidence.HIGH
 
 
+@pytest.mark.parametrize(
+    "param",
+    [
+        Param("destinationurl", "integer"),
+        Param("destinationaccount", "string", max_len=1_000),
+        Param("targethost", "boolean"),
+        Param("runcommand", "string", max_len=1_000),
+        Param("accesscredential", "number"),
+        Param("destinationurls2", "integer"),
+        Param("primarytargethostname", "string", max_len=1_000),
+        Param("backupdestinationaccount", "integer"),
+        Param("replyto", "string", max_len=1_000),
+        Param("accessapikey", "integer"),
+        Param("avatarurl", "string", max_len=1_000),
+        Param("authcredential", "boolean"),
+        Param("databasehost", "string", max_len=1_000),
+        Param("folderpath", "string", max_len=1_000),
+        Param("destinationurlvalue", "string", max_len=1_000),
+        Param("targethostnamevalue", "string", max_len=1_000),
+        Param("runcommandtext", "string", max_len=1_000),
+        Param("recipientemailaddress", "string", max_len=1_000),
+        Param("tempfile", "string", max_len=1_000),
+        Param("temporaryfilepath", "string", max_len=1_000),
+        Param("bankaccountnumber", "integer"),
+        Param("destinationurlvaluefield", "string", max_len=1_000),
+        Param("accountidvalue", "integer"),
+        Param("callbackurltemplate", "string", max_len=1_000),
+        Param("messageuuidstring", "string", max_len=1_000),
+        Param("logfile", "string", max_len=1_000),
+        Param("configpath", "string", max_len=1_000),
+        Param("proxyhost", "string", max_len=1_000),
+        Param("destinationurloverride", "string", max_len=1_000),
+        Param("destinationurldefault", "string", max_len=1_000),
+        Param("destinationurloptional", "string", max_len=1_000),
+        Param("destinationurlraw", "string", max_len=1_000),
+        Param("destinationurljson", "string", max_len=1_000),
+        Param("destinationurlconfig", "string", max_len=1_000),
+        Param("destinationurlsetting", "string", max_len=1_000),
+        Param("destinationurlcandidate", "string", max_len=1_000),
+        Param("destinationurlschema", "string", max_len=1_000),
+        Param("destinationurlobject", "string", max_len=1_000),
+    ],
+)
+def test_flatcase_compound_sink_suffix_wins_before_authorable_rules(param):
+    policy, confidence = infer_policy(param)
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
+
+    registry = Registry()
+    registry.add(Tool("perform_action", [param], risk=Risk.WRITE))
+    policy_set = build_policy(registry)
+    assert ("perform_action", param.name) in policy_set.review
+
+    candidate = "x" if param.type == "string" else True
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "perform_action", "input": {param.name: candidate}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "param",
+    [
+        Param("profile", "integer"),
+        Param("ghost", "integer"),
+        Param("eggshell", "boolean"),
+        Param("psychopath", "number"),
+        Param("customerprofile", "integer"),
+        Param("profile", "string", max_len=1_000),
+        Param("ghost", "string", max_len=1_000),
+        Param("eggshell", "string", max_len=1_000),
+        Param("psychopath", "string", max_len=1_000),
+        Param("accounting", "integer"),
+        Param("hostage", "integer"),
+        Param("tokenizer", "integer"),
+        Param("hamstring", "string", max_len=1_000),
+        Param("catalogue", "string", max_len=1_000),
+        Param("proxyhostage", "string", max_len=1_000),
+        Param("profilevalue", "string", max_len=1_000),
+        Param("ghostaddress", "string", max_len=1_000),
+        Param("eggshelltemplate", "string", max_len=1_000),
+        Param("psychopathstring", "string", max_len=1_000),
+        Param("accountingnumber", "integer"),
+        Param("tokenizervalue", "integer"),
+        Param("profiledefault", "string", max_len=1_000),
+        Param("ghostraw", "string", max_len=1_000),
+        Param("accountingconfig", "integer"),
+        Param("hostageoptional", "string", max_len=1_000),
+        Param("tokenizercandidate", "integer"),
+    ],
+)
+def test_compact_sink_analysis_does_not_lock_ordinary_suffix_words(param):
+    policy, confidence = infer_policy(param)
+
+    expected = (
+        Policy.OUTBOUND_PAYLOAD
+        if param.type == "string" and (param.max_len or 0) > 200
+        else Policy.TYPED_BOUNDED
+    )
+    assert policy is expected
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize("name", ["body", "message", "content", "summary"])
+def test_compact_sink_analysis_preserves_long_outbound_payload_names(name):
+    policy, confidence = infer_policy(Param(name, "string", max_len=1_000))
+
+    assert policy is Policy.OUTBOUND_PAYLOAD
+    assert confidence is Confidence.HIGH
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "destinationurl",
+        "targethost",
+        "runcommand",
+        "accesscredential",
+        "destinationurlvalue",
+        "recipientemailaddress",
+        "tempfile",
+        "bankaccountnumber",
+    ],
+)
+def test_explicit_non_sink_unlocks_flatcase_compound_sink_name(name):
+    policy, confidence = infer_policy(
+        Param(name, "string", max_len=1_000, sink=False)
+    )
+
+    assert policy is Policy.OUTBOUND_PAYLOAD
+    assert confidence is Confidence.HIGH
+
+
+def test_excessive_flatcase_qualifier_layers_stop_bounded_and_fail_closed():
+    name = "value" * 100
+    assert len(name) <= authority.MAX_IDENTIFIER_INFERENCE_CHARS
+
+    policy, confidence = infer_policy(
+        Param(name, "string", max_len=1_000)
+    )
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
+
+
 def test_overlong_identifier_fails_closed_before_unicode_normalization(
     monkeypatch,
 ):
@@ -349,8 +498,9 @@ def test_overlong_identifier_fails_closed_before_unicode_normalization(
     assert normalization_calls == []
 
 
-def test_overlong_ascii_identifier_skips_nfkc_but_remains_linear(monkeypatch):
-    overlong = "A" * (authority.MAX_NFKC_INPUT_CHARS * 4)
+def test_overlong_ascii_identifier_fails_closed_before_tokenization(monkeypatch):
+    overlong = "A" * (authority.MAX_IDENTIFIER_INFERENCE_CHARS + 1)
+    context = authority._PolicyInferenceContext()
 
     def forbidden_normalize(*args):
         raise AssertionError("ASCII must not enter Unicode normalization")
@@ -364,7 +514,16 @@ def test_overlong_ascii_identifier_skips_nfkc_but_remains_linear(monkeypatch):
         ),
     )
 
-    assert authority._identifier_tokens(overlong) == (overlong.casefold(),)
+    assert authority._identifier_tokens(overlong, context) == ()
+    assert authority._compact_identifier_segments(overlong, context) == ()
+    assert context.normalized_identifiers == {}
+    assert context.identifier_tokens == {}
+    assert context.compact_identifier_segments == {}
+    policy, confidence = infer_policy(
+        Param(overlong, "string", max_len=1_000)
+    )
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
 
 
 def test_overlong_runtime_text_fails_closed_before_nfkc_at_every_site(

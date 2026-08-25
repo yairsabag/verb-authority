@@ -21,7 +21,12 @@ tag or GitHub release was created, and the version is intentionally not reused.
   `dict.get()` defaults.
 - Add a minimal trusted-choice resolver for exact
   `key -> (value, evidence)` lookups, with explicit not-found and ambiguous
-  outcomes and no fuzzy, path, endpoint, or authorization policy.
+  outcomes and no fuzzy, path, endpoint, or authorization policy. Validate and
+  snapshot finite plain-JSON catalog values at construction, retain no caller
+  aliases, and return a fresh snapshot per lookup so one consumer cannot poison
+  later trusted resolutions. Require exact bounded built-in strings for keys,
+  evidence, and normalization results; reject hostile subclasses, surrogates,
+  oversized lookups, and non-string coercion before caller hooks can run.
 - Pin the approved-choice control-flow limit in documentation and regression
   tests: untrusted content may still influence which already approved catalog
   entry is selected even though it cannot author the resulting destination.
@@ -78,7 +83,15 @@ tag or GitHub release was created, and the version is intentionally not reused.
   the explicit release valve for an ordinary word that shares a suffix.
   Also compare an alphanumeric-only identifier view so separator-split suffixes
   such as `messageI_D`, `messageI-D`, and `walletK_eY` cannot bypass the same
-  selector boundary.
+  selector boundary. Apply the same compact boundary before numeric and
+  long-string payload rules, so flatcase authority names such as
+  `destinationurl`, `targethost`, `runcommand`, and `accesscredential` remain
+  locked unless `sink=False` explicitly releases an overloaded application
+  name. Preserve the boundary through common flattened qualifiers such as
+  `value`, `address`, `override`, `default`, and `schema`, while bounding both
+  identifier length and qualifier depth. Document that lexical inference is a
+  finite conservative heuristic and unusual labels need an explicit sink
+  declaration.
   Implement tokenization as a bounded linear pass rather than a backtracking
   uppercase-name expression.
 - Normalize valid string-valued policy/risk enum entries consistently in the
@@ -177,7 +190,12 @@ tag or GitHub release was created, and the version is intentionally not reused.
   header before advancing, so oversized regular, directory, PAX, or GNU
   extension payloads cannot consume unbounded work
   before rejection; verify the source distribution before extraction in
-  CI/release jobs, and refuse unexpected local or pre-existing release assets.
+  CI/release jobs, and refuse unexpected local assets. Re-running only a failed
+  publisher can resume from the same immutable staged artifact, and only from
+  an exact name/size/SHA-256/state-matching subset of the three independently
+  verified release assets; any conflicting or additional remote asset fails
+  closed. A full rebuild may produce different archive bytes and intentionally
+  requires manual cleanup rather than mixing attempts.
 - Parse source archives through one bounded verifier/extractor that accepts only
   the build backend's local `mtime` PAX field, rejects global PAX, size/path
   overrides and sparse metadata before allocation, and validates every portable
@@ -198,6 +216,12 @@ tag or GitHub release was created, and the version is intentionally not reused.
   dependencies, optional dependencies, and extras. Require the supported
   `Wheel-Version: 1.0`; matching attacker-edited PKG-INFO/METADATA copies are no
   longer sufficient.
+- Parse dependency and marker material with an explicit ASCII PEP 508 boundary;
+  reject non-ASCII whitespace instead of accepting metadata that pip and
+  `packaging` reject. Bind the expected project configuration, manifest, and
+  source payloads to an immutable Git commit snapshot rather than the mutable
+  post-build filesystem, so untracked matching files or build-time source
+  mutation cannot become verifier-approved release content.
 - Isolate both composite-action Python entry points with `-I` and remove
   `PYTHONPATH`/`PYTHONHOME`, so consumer-workspace `pip.py`,
   `verb_authority.py`, or a planted console script cannot turn a real widening
@@ -209,6 +233,13 @@ tag or GitHub release was created, and the version is intentionally not reused.
   metadata/assertion helpers, and installed console commands. CI plants a
   hostile module beside the copied smoke script and requires proof that it was
   never imported.
+- Split release authority across three fresh runners: build/test and independent
+  verification/staging retain read-only repository access, while the minimal
+  publisher alone receives `contents: write` and executes no project code. Pass
+  distributions only by immutable Actions artifact ID with digest validation,
+  bind upload and postflight checks to the numeric release event ID and current
+  tag commit, and compare the remote asset names, sizes, SHA-256 digests, and
+  states before accepting publication.
 - Include the research landscape, installed-wheel audit smoke, and release
   identity verifier in the source distribution.
 
@@ -246,6 +277,10 @@ tag or GitHub release was created, and the version is intentionally not reused.
   annotation-named data nested under unsupported schema keywords in unmodeled
   fingerprints, reject over-deep schemas cleanly, and terminal-escape controls
   and bidirectional formatting in text diff output.
+- Reject inputs that simultaneously match multiple supported envelopes,
+  tool-definition dialects, nested/direct definitions, or schema aliases.
+  Scanner and Diff no longer choose a benign branch by precedence while an
+  application could consume a competing authority-bearing branch.
 - Surface unresolved references, combinators, conditional/dependent schemas,
   dynamic property shapes, and nested unmodeled schemas as an explicit
   per-tool review obligation on the first scan. Include that obligation in

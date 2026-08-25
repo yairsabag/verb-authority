@@ -8,21 +8,23 @@ from __future__ import annotations
 
 import argparse
 import base64
-import configparser
 from collections import Counter
 import csv
 from dataclasses import dataclass
 from email.parser import Parser
 import gzip
 import hashlib
-from io import StringIO
+import fnmatch
+from io import BytesIO, StringIO
 import os
 import re
 import shlex
 import stat
 import struct
+import subprocess
 import sys
 import tarfile
+import threading
 import tomllib
 import unicodedata
 import zlib
@@ -82,6 +84,28 @@ _PAX_MTIME_PATTERN = re.compile(r"-?[0-9]{1,20}(?:\.[0-9]{1,20})?")
 _SUPPORTED_CORE_METADATA_VERSION = "2.4"
 _SUPPORTED_WHEEL_VERSION = "1.0"
 _GENERATED_SETUP_CFG = b"[egg_info]\ntag_build = \ntag_date = 0\n\n"
+_TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
+_FULL_GIT_OBJECT_PATTERN = re.compile(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}")
+_ASCII_OWS = " \t"
+_STATIC_CORE_METADATA_FIELDS = (
+    "Summary",
+    "License-Expression",
+    "Project-URL",
+    "Keywords",
+    "Classifier",
+    "Description-Content-Type",
+    "License-File",
+    "Dynamic",
+)
+_ALLOWED_CORE_METADATA_FIELDS = {
+    "metadata-version",
+    "name",
+    "version",
+    "requires-python",
+    "provides-extra",
+    "requires-dist",
+    *(field.casefold() for field in _STATIC_CORE_METADATA_FIELDS),
+}
 
 
 class VerificationError(ValueError):
@@ -100,6 +124,8 @@ class _ProjectReleaseConfig:
     module_payloads: dict[str, bytes]
     license_payloads: dict[str, bytes]
     sdist_source_payloads: dict[str, bytes]
+    core_metadata_fields: dict[str, tuple[str, ...]]
+    description_body: str
 
 
 @dataclass(frozen=True)
@@ -107,6 +133,12 @@ class _SdistInspection:
     identity: tuple[str, str]
     metadata_payload: bytes
     module_payloads: dict[str, bytes]
+
+
+@dataclass(frozen=True)
+class _ImmutableGitSnapshot:
+    payloads: dict[str, bytes]
+    entries: dict[str, tuple[str, str]]
 
 
 def _validate_single_gzip_member(sdist_path: Path) -> None:
@@ -118,6 +150,51 @@ def _validate_single_gzip_member(sdist_path: Path) -> None:
     directly with zlib and require it to consume the complete artifact before
     tar traversal begins.
     """
+
+    try:
+        with sdist_path.open("rb") as source:
+            header = source.read(10)
+            if len(header) != 10 or header[:3] != b"\x1f\x8b\x08":
+                raise VerificationError(
+                    "source distribution does not use a canonical gzip header"
+                )
+            flags = header[3]
+            if flags not in {0, 0x08}:
+                raise VerificationError(
+                    "source distribution gzip header contains unsupported "
+                    "optional or reserved fields"
+                )
+            if header[8] not in {0, 2, 4} or header[9] != 255:
+                raise VerificationError(
+                    "source distribution does not use the supported gzip profile"
+                )
+            if flags == 0x08:
+                expected_name = sdist_path.name.removesuffix(".gz").encode("ascii")
+                encoded_name = bytearray()
+                while len(encoded_name) <= MAX_ARCHIVE_COMPONENT_BYTES:
+                    character = source.read(1)
+                    if not character:
+                        raise VerificationError(
+                            "source distribution gzip file name is truncated"
+                        )
+                    if character == b"\0":
+                        break
+                    encoded_name.extend(character)
+                else:
+                    raise VerificationError(
+                        "source distribution gzip file name exceeds the limit"
+                    )
+                if bytes(encoded_name) != expected_name:
+                    raise VerificationError(
+                        "source distribution gzip file name does not match "
+                        "the artifact"
+                    )
+    except VerificationError:
+        raise
+    except (OSError, UnicodeEncodeError) as exc:
+        raise VerificationError(
+            f"cannot validate source-distribution gzip header: {exc}"
+        ) from exc
 
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
     decompressed_bytes = 0
@@ -157,6 +234,94 @@ def _validate_single_gzip_member(sdist_path: Path) -> None:
     raise VerificationError(
         "source distribution contains a truncated gzip member"
     )
+
+
+def _tar_octal_size(field: bytes) -> int:
+    """Parse the canonical POSIX-octal size field used by release sdists."""
+
+    if len(field) != 12 or field[:1] >= b"\x80":
+        raise VerificationError(
+            "source distribution contains a non-canonical tar size"
+        )
+    value = field.rstrip(b"\0 ").lstrip(b" ")
+    if not value:
+        return 0
+    if any(character not in b"01234567" for character in value):
+        raise VerificationError(
+            "source distribution contains a non-canonical tar size"
+        )
+    return int(value, 8)
+
+
+def _validate_tar_zero_padding(sdist_path: Path) -> None:
+    """Reject data hidden in per-member padding or the final tar record."""
+
+    consumed = 0
+
+    def read_exact(source: BinaryIO, size: int) -> bytes:
+        nonlocal consumed
+        payload = source.read(size)
+        consumed += len(payload)
+        if consumed > MAX_SDIST_DECOMPRESSED_BYTES:
+            raise VerificationError(
+                "source distribution exceeds the decompressed traversal limit"
+            )
+        if len(payload) != size:
+            raise VerificationError("source distribution contains a truncated tar")
+        return payload
+
+    try:
+        with gzip.open(sdist_path, "rb") as source:
+            zero_headers = 0
+            while True:
+                header = read_exact(source, tarfile.BLOCKSIZE)
+                if not any(header):
+                    zero_headers += 1
+                    if zero_headers < 2:
+                        continue
+                    while trailing := source.read(1024 * 1024):
+                        consumed += len(trailing)
+                        if consumed > MAX_SDIST_DECOMPRESSED_BYTES:
+                            raise VerificationError(
+                                "source distribution exceeds the decompressed "
+                                "traversal limit"
+                            )
+                        if any(trailing):
+                            raise VerificationError(
+                                "source distribution contains non-zero data in "
+                                "the final tar record"
+                            )
+                    if consumed % tarfile.RECORDSIZE:
+                        raise VerificationError(
+                            "source distribution has a non-canonical final tar "
+                            "record length"
+                        )
+                    return
+                if zero_headers:
+                    raise VerificationError(
+                        "source distribution contains data after a tar end marker"
+                    )
+                size = _tar_octal_size(header[124:136])
+                if size > MAX_SDIST_MEMBER_BYTES:
+                    raise VerificationError(
+                        "source distribution member exceeds the size limit"
+                    )
+                full_blocks = size // tarfile.BLOCKSIZE
+                remainder = size % tarfile.BLOCKSIZE
+                for _ in range(full_blocks):
+                    read_exact(source, tarfile.BLOCKSIZE)
+                if remainder:
+                    final_block = read_exact(source, tarfile.BLOCKSIZE)
+                    if any(final_block[remainder:]):
+                        raise VerificationError(
+                            "source distribution contains non-zero member padding"
+                        )
+    except VerificationError:
+        raise
+    except (OSError, EOFError, ValueError) as exc:
+        raise VerificationError(
+            f"cannot validate source-distribution tar framing: {exc}"
+        ) from exc
 
 
 class _BoundedArchiveReader:
@@ -406,7 +571,7 @@ def _validate_manifest_pattern(value: str, *, label: str) -> None:
         not value
         or path.is_absolute()
         or "\\" in value
-        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(part in {"", ".", "..", "**"} for part in path.parts)
     ):
         raise VerificationError(f"{label} contains unsafe path {value!r}")
 
@@ -540,12 +705,355 @@ def _collect_project_source_payloads(
     return payloads
 
 
-def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
+def _snapshot_glob(
+    payloads: dict[str, bytes],
+    pattern: str,
+) -> list[str]:
+    """Match a root-relative glob without consulting the mutable filesystem."""
+
+    pattern_parts = PurePosixPath(pattern).parts
+    return sorted(
+        name
+        for name in payloads
+        if len(PurePosixPath(name).parts) == len(pattern_parts)
+        and all(
+            fnmatch.fnmatchcase(component, component_pattern)
+            for component, component_pattern in zip(
+                PurePosixPath(name).parts,
+                pattern_parts,
+            )
+        )
+    )
+
+
+def _snapshot_recursive_glob(
+    payloads: dict[str, bytes],
+    directory: str,
+    pattern: str,
+) -> list[str]:
+    pattern_parts = PurePosixPath(pattern).parts
+    if len(pattern_parts) != 1:
+        raise VerificationError(
+            "MANIFEST.in recursive patterns must be single path components"
+        )
+    directory_parts = PurePosixPath(directory).parts
+    component_pattern = pattern_parts[0]
+    return sorted(
+        name
+        for name in payloads
+        if len(PurePosixPath(name).parts) > len(directory_parts)
+        and PurePosixPath(name).parts[: len(directory_parts)] == directory_parts
+        and fnmatch.fnmatchcase(PurePosixPath(name).parts[-1], component_pattern)
+    )
+
+
+def _bounded_snapshot_payload(
+    payloads: dict[str, bytes],
+    relative_name: str,
+    *,
+    label: str,
+    size_limit: int,
+) -> bytes:
+    try:
+        payload = payloads[relative_name]
+    except KeyError as exc:
+        raise VerificationError(
+            f"{label} is absent from the immutable source commit"
+        ) from exc
+    if len(payload) > size_limit:
+        raise VerificationError(f"{label} exceeds the size limit")
+    return payload
+
+
+def _collect_snapshot_source_payloads(
+    *,
+    snapshot_payloads: dict[str, bytes],
+    document: dict[str, object],
+    modules: tuple[str, ...],
+    license_patterns: list[str],
+) -> dict[str, bytes]:
+    """Resolve the sdist contract solely from immutable commit blobs."""
+
+    selected: set[str] = set()
+
+    def add(relative_name: str) -> None:
+        _portable_member_key(
+            relative_name,
+            archive_label="immutable project source manifest",
+        )
+        if any(
+            part.casefold().endswith(".egg-info")
+            for part in PurePosixPath(relative_name).parts
+        ):
+            raise VerificationError(
+                "immutable project source manifest selects generated metadata "
+                f"{relative_name!r}"
+            )
+        _bounded_snapshot_payload(
+            snapshot_payloads,
+            relative_name,
+            label=f"immutable project source {relative_name!r}",
+            size_limit=MAX_SDIST_MEMBER_BYTES,
+        )
+        selected.add(relative_name)
+
+    add("pyproject.toml")
+    for module in modules:
+        add(module.replace(".", "/") + ".py")
+
+    project = document["project"]
+    assert isinstance(project, dict)
+    readme = project.get("readme")
+    if isinstance(readme, str):
+        _validate_manifest_pattern(readme, label="project.readme")
+        add(readme)
+    elif isinstance(readme, dict):
+        readme_file = readme.get("file")
+        if readme_file is not None:
+            if not isinstance(readme_file, str):
+                raise VerificationError("project.readme.file must be a string")
+            _validate_manifest_pattern(readme_file, label="project.readme.file")
+            add(readme_file)
+    elif readme is not None:
+        raise VerificationError("project.readme must be a string or table")
+
+    for pattern in license_patterns:
+        _validate_manifest_pattern(pattern, label="project.license-files")
+        matches = _snapshot_glob(snapshot_payloads, pattern)
+        if not matches:
+            raise VerificationError(
+                f"project.license-files pattern {pattern!r} matched no "
+                "immutable commit files"
+            )
+        for match in matches:
+            add(match)
+
+    manifest_payload = snapshot_payloads.get("MANIFEST.in")
+    if manifest_payload is not None:
+        add("MANIFEST.in")
+        try:
+            manifest_lines = manifest_payload.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise VerificationError("MANIFEST.in is not UTF-8") from exc
+        for line_number, raw_line in enumerate(manifest_lines, 1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                tokens = shlex.split(stripped, comments=True, posix=True)
+            except ValueError as exc:
+                raise VerificationError(
+                    f"cannot parse MANIFEST.in line {line_number}: {exc}"
+                ) from exc
+            if not tokens:
+                continue
+            directive, *arguments = tokens
+            if directive == "include" and arguments:
+                for pattern in arguments:
+                    _validate_manifest_pattern(
+                        pattern,
+                        label="MANIFEST.in include",
+                    )
+                    matches = _snapshot_glob(snapshot_payloads, pattern)
+                    if not matches:
+                        raise VerificationError(
+                            "MANIFEST.in include pattern "
+                            f"{pattern!r} matched no immutable commit files"
+                        )
+                    for match in matches:
+                        add(match)
+            elif directive == "recursive-include" and len(arguments) >= 2:
+                directory, *patterns = arguments
+                _validate_manifest_pattern(
+                    directory,
+                    label="MANIFEST.in recursive-include",
+                )
+                if not any(
+                    PurePosixPath(name).parts[: len(PurePosixPath(directory).parts)]
+                    == PurePosixPath(directory).parts
+                    and len(PurePosixPath(name).parts)
+                    > len(PurePosixPath(directory).parts)
+                    for name in snapshot_payloads
+                ):
+                    raise VerificationError(
+                        f"MANIFEST.in directory {directory!r} is absent from "
+                        "the immutable commit"
+                    )
+                for pattern in patterns:
+                    _validate_manifest_pattern(
+                        pattern,
+                        label="MANIFEST.in recursive pattern",
+                    )
+                    matches = _snapshot_recursive_glob(
+                        snapshot_payloads,
+                        directory,
+                        pattern,
+                    )
+                    if not matches:
+                        raise VerificationError(
+                            "MANIFEST.in recursive pattern "
+                            f"{directory!r} {pattern!r} matched no immutable "
+                            "commit files"
+                        )
+                    for match in matches:
+                        add(match)
+            else:
+                raise VerificationError(
+                    f"unsupported MANIFEST.in directive on line {line_number}: "
+                    f"{directive!r}"
+                )
+
+    total_size = sum(len(snapshot_payloads[name]) for name in selected)
+    if total_size > MAX_SDIST_TOTAL_BYTES:
+        raise VerificationError("trusted project sources exceed the total-size limit")
+    return {name: snapshot_payloads[name] for name in sorted(selected)}
+
+
+def _expected_static_core_metadata(
+    project: dict[str, object],
+    *,
+    source_payloads: dict[str, bytes],
+    license_payloads: dict[str, bytes],
+) -> tuple[dict[str, tuple[str, ...]], str]:
+    """Derive static Core Metadata fields from the trusted PEP 621 table."""
+
+    expected: dict[str, tuple[str, ...]] = {}
+
+    description = project.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise VerificationError("project.description must be a string")
+        expected["Summary"] = (description,)
+
+    license_expression = project.get("license")
+    if license_expression is not None:
+        if not isinstance(license_expression, str) or not license_expression:
+            raise VerificationError(
+                "project.license must be a non-empty SPDX expression string"
+            )
+        expected["License-Expression"] = (license_expression,)
+
+    keywords = project.get("keywords", [])
+    if not isinstance(keywords, list) or any(
+        not isinstance(value, str) or not value for value in keywords
+    ):
+        raise VerificationError("project.keywords must be a string list")
+    if keywords:
+        expected["Keywords"] = (",".join(keywords),)
+
+    classifiers = project.get("classifiers", [])
+    if not isinstance(classifiers, list) or any(
+        not isinstance(value, str) or not value for value in classifiers
+    ):
+        raise VerificationError("project.classifiers must be a string list")
+    if classifiers:
+        expected["Classifier"] = tuple(classifiers)
+
+    urls = project.get("urls", {})
+    if not isinstance(urls, dict) or any(
+        not isinstance(label, str)
+        or not label
+        or not isinstance(url, str)
+        or not url
+        for label, url in urls.items()
+    ):
+        raise VerificationError("project.urls must map labels to URL strings")
+    if urls:
+        expected["Project-URL"] = tuple(
+            f"{label}, {url}" for label, url in urls.items()
+        )
+
+    description_body = ""
+    readme = project.get("readme")
+    if isinstance(readme, str):
+        try:
+            description_body = source_payloads[readme].decode("utf-8")
+        except KeyError as exc:
+            raise VerificationError(
+                "project.readme is absent from the trusted source contract"
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise VerificationError("project.readme is not UTF-8") from exc
+        suffix = PurePosixPath(readme).suffix.casefold()
+        content_type = {
+            ".md": "text/markdown",
+            ".rst": "text/x-rst",
+            ".txt": "text/plain",
+        }.get(suffix)
+        if content_type is None:
+            raise VerificationError(
+                "project.readme needs a recognized extension or explicit "
+                "content-type"
+            )
+        expected["Description-Content-Type"] = (content_type,)
+    elif isinstance(readme, dict):
+        content_type = readme.get("content-type")
+        if not isinstance(content_type, str) or not content_type:
+            raise VerificationError(
+                "project.readme table must define a content-type"
+            )
+        readme_file = readme.get("file")
+        readme_text = readme.get("text")
+        if (readme_file is None) == (readme_text is None):
+            raise VerificationError(
+                "project.readme table must define exactly one of file or text"
+            )
+        if readme_file is not None:
+            if not isinstance(readme_file, str):
+                raise VerificationError("project.readme.file must be a string")
+            try:
+                description_body = source_payloads[readme_file].decode("utf-8")
+            except (KeyError, UnicodeDecodeError) as exc:
+                raise VerificationError(
+                    "project.readme.file is absent or not UTF-8"
+                ) from exc
+        else:
+            if not isinstance(readme_text, str):
+                raise VerificationError("project.readme.text must be a string")
+            description_body = readme_text
+        expected["Description-Content-Type"] = (content_type,)
+    elif readme is not None:
+        raise VerificationError("project.readme must be a string or table")
+
+    license_files = tuple(
+        name.removeprefix("licenses/") for name in license_payloads
+    )
+    if license_files:
+        expected["License-File"] = license_files
+
+    dynamic = project.get("dynamic", [])
+    if not isinstance(dynamic, list) or any(
+        not isinstance(value, str) or not value for value in dynamic
+    ):
+        raise VerificationError("project.dynamic must be a string list")
+    expected_dynamic = list(dynamic)
+    if license_files and "license-file" not in expected_dynamic:
+        expected_dynamic.append("license-file")
+    if expected_dynamic:
+        expected["Dynamic"] = tuple(expected_dynamic)
+
+    return expected, description_body
+
+
+def _project_release_config(
+    project_path: Path,
+    *,
+    immutable_source_payloads: dict[str, bytes] | None = None,
+) -> _ProjectReleaseConfig:
     """Read the exact wheel payload contract from ``pyproject.toml``."""
 
     try:
-        with project_path.open("rb") as project_file:
-            document = tomllib.load(project_file)
+        if immutable_source_payloads is None:
+            with project_path.open("rb") as project_file:
+                document = tomllib.load(project_file)
+        else:
+            project_payload = _bounded_snapshot_payload(
+                immutable_source_payloads,
+                "pyproject.toml",
+                label="immutable pyproject.toml",
+                size_limit=MAX_SDIST_MEMBER_BYTES,
+            )
+            document = tomllib.loads(project_payload.decode("utf-8"))
         project = document["project"]
         setuptools = document["tool"]["setuptools"]
         name = project["name"]
@@ -556,7 +1064,13 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
         requires_python = project["requires-python"]
         dependencies_value = project["dependencies"]
         optional_dependencies_value = project.get("optional-dependencies", {})
-    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
         raise VerificationError(
             f"cannot read project release configuration: {exc}"
         ) from exc
@@ -566,6 +1080,10 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
         raise VerificationError("project.version must be a non-empty string")
     if not isinstance(requires_python, str) or not requires_python:
         raise VerificationError("project.requires-python must be a non-empty string")
+    _validate_ascii_pep508(
+        requires_python,
+        label="project.requires-python",
+    )
     if not isinstance(dependencies_value, list) or any(
         not isinstance(item, str) or not item for item in dependencies_value
     ):
@@ -616,6 +1134,30 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
             "project.scripts must be a non-empty string-to-string table"
         )
     scripts = dict(scripts_value)
+    script_name_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*", re.ASCII)
+    script_target_pattern = re.compile(
+        r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+        r":[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
+        re.ASCII,
+    )
+    for script_name, script_target in scripts.items():
+        if (
+            _ascii_control_value(
+                script_name,
+                label="project.scripts command name",
+            )
+            != script_name
+            or _ascii_control_value(
+                script_target,
+                label=f"project.scripts target for {script_name!r}",
+            )
+            != script_target
+            or script_name_pattern.fullmatch(script_name) is None
+            or script_target_pattern.fullmatch(script_target) is None
+        ):
+            raise VerificationError(
+                "project.scripts contains an unsafe command name or target"
+            )
     if (
         not isinstance(license_patterns, list)
         or not license_patterns
@@ -629,21 +1171,37 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
         )
 
     project_root = project_path.parent
-    sdist_source_payloads = _collect_project_source_payloads(
-        project_path,
-        document=document,
-        modules=modules,
-        license_patterns=license_patterns,
-    )
+    if immutable_source_payloads is None:
+        sdist_source_payloads = _collect_project_source_payloads(
+            project_path,
+            document=document,
+            modules=modules,
+            license_patterns=license_patterns,
+        )
+    else:
+        sdist_source_payloads = _collect_snapshot_source_payloads(
+            snapshot_payloads=immutable_source_payloads,
+            document=document,
+            modules=modules,
+            license_patterns=license_patterns,
+        )
     module_payloads: dict[str, bytes] = {}
     for module in modules:
         member_name = module.replace(".", "/") + ".py"
         _portable_member_key(member_name, archive_label="project module")
-        module_payloads[member_name] = _read_bounded_project_file(
-            project_root / member_name,
-            label=f"project module {member_name!r}",
-            size_limit=MAX_PROJECT_MODULE_BYTES,
-        )
+        if immutable_source_payloads is None:
+            module_payloads[member_name] = _read_bounded_project_file(
+                project_root / member_name,
+                label=f"project module {member_name!r}",
+                size_limit=MAX_PROJECT_MODULE_BYTES,
+            )
+        else:
+            module_payloads[member_name] = _bounded_snapshot_payload(
+                immutable_source_payloads,
+                member_name,
+                label=f"immutable project module {member_name!r}",
+                size_limit=MAX_PROJECT_MODULE_BYTES,
+            )
 
     license_payloads: dict[str, bytes] = {}
     for pattern in license_patterns:
@@ -656,40 +1214,60 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
             raise VerificationError(
                 f"project.license-files contains unsafe pattern {pattern!r}"
             )
-        try:
-            matches = sorted(project_root.glob(pattern))
-        except (OSError, ValueError) as exc:
-            raise VerificationError(
-                f"cannot expand license-file pattern {pattern!r}: {exc}"
-            ) from exc
-        regular_matches = []
-        try:
-            resolved_project_root = project_root.resolve(strict=True)
-        except OSError as exc:
-            raise VerificationError(
-                f"cannot resolve the project root: {exc}"
-            ) from exc
-        for match in matches:
-            if not match.is_file() or match.is_symlink():
-                continue
+        if immutable_source_payloads is None:
             try:
-                match.resolve(strict=True).relative_to(resolved_project_root)
+                matches = sorted(project_root.glob(pattern))
             except (OSError, ValueError) as exc:
                 raise VerificationError(
-                    f"license file {match} escapes the project root"
+                    f"cannot expand license-file pattern {pattern!r}: {exc}"
                 ) from exc
-            regular_matches.append(match)
+            regular_matches: list[Path | str] = []
+            try:
+                resolved_project_root = project_root.resolve(strict=True)
+            except OSError as exc:
+                raise VerificationError(
+                    f"cannot resolve the project root: {exc}"
+                ) from exc
+            for match in matches:
+                if not match.is_file() or match.is_symlink():
+                    continue
+                try:
+                    match.resolve(strict=True).relative_to(resolved_project_root)
+                except (OSError, ValueError) as exc:
+                    raise VerificationError(
+                        f"license file {match} escapes the project root"
+                    ) from exc
+                regular_matches.append(match)
+        else:
+            regular_matches = _snapshot_glob(
+                immutable_source_payloads,
+                pattern,
+            )
         if not regular_matches:
             raise VerificationError(
                 f"project.license-files pattern {pattern!r} matched no files"
             )
         for match in regular_matches:
-            try:
-                relative = match.relative_to(project_root).as_posix()
-            except ValueError as exc:
-                raise VerificationError(
-                    f"license file {match} escapes the project root"
-                ) from exc
+            if isinstance(match, Path):
+                try:
+                    relative = match.relative_to(project_root).as_posix()
+                except ValueError as exc:
+                    raise VerificationError(
+                        f"license file {match} escapes the project root"
+                    ) from exc
+                license_payload = _read_bounded_project_file(
+                    match,
+                    label=f"project license file {relative!r}",
+                    size_limit=MAX_LICENSE_BYTES,
+                )
+            else:
+                relative = match
+                license_payload = _bounded_snapshot_payload(
+                    immutable_source_payloads,
+                    relative,
+                    label=f"immutable project license file {relative!r}",
+                    size_limit=MAX_LICENSE_BYTES,
+                )
             wheel_member = f"licenses/{relative}"
             _portable_member_key(
                 wheel_member,
@@ -700,11 +1278,13 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
                     f"project license payload is selected more than once: "
                     f"{wheel_member!r}"
                 )
-            license_payloads[wheel_member] = _read_bounded_project_file(
-                match,
-                label=f"project license file {relative!r}",
-                size_limit=MAX_LICENSE_BYTES,
-            )
+            license_payloads[wheel_member] = license_payload
+
+    core_metadata_fields, description_body = _expected_static_core_metadata(
+        project,
+        source_payloads=sdist_source_payloads,
+        license_payloads=license_payloads,
+    )
 
     return _ProjectReleaseConfig(
         name=name,
@@ -717,6 +1297,8 @@ def _project_release_config(project_path: Path) -> _ProjectReleaseConfig:
         module_payloads=module_payloads,
         license_payloads=license_payloads,
         sdist_source_payloads=sdist_source_payloads,
+        core_metadata_fields=core_metadata_fields,
+        description_body=description_body,
     )
 
 
@@ -777,6 +1359,579 @@ def _portable_member_key(member: str, *, archive_label: str) -> str:
     return "/".join(portable_parts)
 
 
+def _run_git(
+    repository: Path,
+    *arguments: str,
+    output_limit: int = MAX_SDIST_TOTAL_BYTES,
+) -> bytes:
+    try:
+        git_stat = _TRUSTED_GIT_EXECUTABLE.lstat()
+    except OSError as exc:
+        raise VerificationError(
+            f"trusted git executable is unavailable: {exc}"
+        ) from exc
+    if (
+        not stat.S_ISREG(git_stat.st_mode)
+        or git_stat.st_uid != 0
+        or bool(git_stat.st_mode & 0o022)
+        or not os.access(_TRUSTED_GIT_EXECUTABLE, os.X_OK)
+    ):
+        raise VerificationError(
+            "trusted git executable must be a root-owned, non-writable, "
+            "executable regular file at /usr/bin/git"
+        )
+    # Construct an allowlisted environment instead of trying to enumerate all
+    # Git, dynamic-loader, locale, pager, remote-helper, and tracing knobs that
+    # an earlier untrusted build step could have set.
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "LC_ALL": "C",
+        "LANG": "C",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_LITERAL_PATHSPECS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+    def drain_bounded(
+        stream: BinaryIO,
+        limit: int,
+        result: dict[str, bytes | bool | BaseException],
+        key: str,
+    ) -> None:
+        chunks: list[bytes] = []
+        retained = 0
+        exceeded = False
+        try:
+            while chunk := stream.read(64 * 1024):
+                remaining = limit + 1 - retained
+                if remaining > 0:
+                    kept = chunk[:remaining]
+                    chunks.append(kept)
+                    retained += len(kept)
+                if retained > limit or len(chunk) > max(remaining, 0):
+                    exceeded = True
+        except BaseException as exc:  # pragma: no cover - defensive pipe boundary
+            result[f"{key}_error"] = exc
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        result[key] = b"".join(chunks)
+        result[f"{key}_exceeded"] = exceeded
+
+    try:
+        process = subprocess.Popen(
+            [
+                os.fspath(_TRUSTED_GIT_EXECUTABLE),
+                "--no-pager",
+                "--no-replace-objects",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "-c",
+                "diff.external=",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "protocol.file.allow=never",
+                "-C",
+                os.fspath(repository),
+                *arguments,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+    except (OSError, ValueError) as exc:
+        raise VerificationError(f"cannot execute git: {exc}") from exc
+    assert process.stdout is not None
+    assert process.stderr is not None
+    pipe_result: dict[str, bytes | bool | BaseException] = {}
+    stdout_thread = threading.Thread(
+        target=drain_bounded,
+        args=(process.stdout, output_limit, pipe_result, "stdout"),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=drain_bounded,
+        args=(process.stderr, 4096, pipe_result, "stderr"),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    return_code = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    pipe_error = pipe_result.get("stdout_error") or pipe_result.get("stderr_error")
+    if isinstance(pipe_error, BaseException):
+        raise VerificationError(f"cannot read git output: {pipe_error}") from pipe_error
+    stdout = pipe_result.get("stdout", b"")
+    stderr = pipe_result.get("stderr", b"")
+    assert isinstance(stdout, bytes)
+    assert isinstance(stderr, bytes)
+    if return_code != 0:
+        detail = stderr.decode("utf-8", "replace").strip()
+        if pipe_result.get("stderr_exceeded"):
+            detail += " [stderr truncated]"
+        raise VerificationError(
+            f"git {' '.join(arguments[:2])} failed: {detail or 'unknown error'}"
+        )
+    if pipe_result.get("stdout_exceeded"):
+        raise VerificationError("git output exceeds the release-verification limit")
+    return stdout
+
+
+def _canonical_git_repository(repository: Path) -> Path:
+    try:
+        canonical = repository.resolve(strict=True)
+    except OSError as exc:
+        raise VerificationError(f"cannot resolve source repository: {exc}") from exc
+    top_level_payload = _run_git(
+        canonical,
+        "rev-parse",
+        "--show-toplevel",
+        output_limit=MAX_ARCHIVE_PATH_BYTES,
+    )
+    try:
+        top_level_text = top_level_payload.decode("utf-8")
+        if top_level_text.endswith("\n"):
+            top_level_text = top_level_text[:-1]
+            if top_level_text.endswith("\r"):
+                top_level_text = top_level_text[:-1]
+        if not top_level_text or "\n" in top_level_text or "\r" in top_level_text:
+            raise VerificationError(
+                "git repository top level contains an ambiguous newline"
+            )
+        top_level = Path(top_level_text).resolve(strict=True)
+    except VerificationError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise VerificationError(
+            f"cannot resolve git repository top level: {exc}"
+        ) from exc
+    if top_level != canonical:
+        raise VerificationError(
+            "--repository must identify the exact git worktree top level"
+        )
+    return canonical
+
+
+def _resolve_exact_source_commit(repository: Path, source_commit: str) -> str:
+    if _FULL_GIT_OBJECT_PATTERN.fullmatch(source_commit) is None:
+        raise VerificationError(
+            "--source-commit must be a complete hexadecimal commit object ID"
+        )
+    resolved = _run_git(
+        repository,
+        "rev-parse",
+        "--verify",
+        f"{source_commit}^{{commit}}",
+        output_limit=256,
+    ).decode("ascii").strip()
+    if resolved.casefold() != source_commit.casefold():
+        raise VerificationError(
+            "--source-commit must identify the exact commit object, not a tag "
+            "or another indirect object"
+        )
+    head = _run_git(
+        repository,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+        output_limit=256,
+    ).decode("ascii").strip()
+    if head != resolved:
+        raise VerificationError(
+            "checked-out HEAD does not exactly match --source-commit"
+        )
+    return resolved
+
+
+def _allowed_generated_untracked_path(path: str, *, egg_info_root: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return False
+    if parts[0] in {
+        "dist",
+        "build",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+    }:
+        return True
+    if "__pycache__" in parts:
+        return True
+    return parts[0].casefold() == egg_info_root.casefold()
+
+
+def _verify_git_worktree_state(
+    repository: Path,
+    *,
+    source_commit: str,
+    egg_info_root: str,
+    project_path: Path,
+    immutable_payloads: dict[str, bytes],
+    immutable_entries: dict[str, tuple[str, str]],
+) -> None:
+    project_root, project_directory, tree_path = _resolved_project_location(
+        repository,
+        project_path,
+    )
+    commit_tree = immutable_entries
+    index_payload = _run_git(
+        repository,
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        tree_path,
+        output_limit=MAX_SDIST_TOTAL_BYTES,
+    )
+    index_tree: dict[str, tuple[str, str]] = {}
+    for record in (value for value in index_payload.split(b"\0") if value):
+        try:
+            metadata, raw_name = record.split(b"\t", 1)
+            raw_mode, raw_object_id, raw_stage = metadata.split()
+            repository_name = raw_name.decode("utf-8")
+            mode = raw_mode.decode("ascii")
+            object_id = raw_object_id.decode("ascii")
+            stage = raw_stage.decode("ascii")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise VerificationError("cannot parse git index entry") from exc
+        _portable_member_key(repository_name, archive_label="git index")
+        if stage != "0" or repository_name in index_tree:
+            raise VerificationError(
+                "release git index contains an unresolved or duplicate entry"
+            )
+        index_tree[repository_name] = (mode, object_id)
+    if index_tree != commit_tree:
+        raise VerificationError(
+            "release git index does not exactly match the source commit tree"
+        )
+    for relative_name, committed_payload in immutable_payloads.items():
+        working_payload = _read_bounded_project_file(
+            project_root.joinpath(*PurePosixPath(relative_name).parts),
+            label=f"tracked project source {relative_name!r}",
+            size_limit=MAX_SDIST_MEMBER_BYTES,
+        )
+        if working_payload != committed_payload:
+            raise VerificationError(
+                "tracked project source differs from the exact source commit: "
+                f"{relative_name!r}"
+            )
+        repository_name = (
+            PurePosixPath(*project_directory.parts, *PurePosixPath(relative_name).parts)
+            .as_posix()
+        )
+        expected_mode = commit_tree[repository_name][0]
+        try:
+            working_mode = project_root.joinpath(
+                *PurePosixPath(relative_name).parts
+            ).stat().st_mode
+        except OSError as exc:
+            raise VerificationError(
+                f"cannot inspect tracked project source mode: {exc}"
+            ) from exc
+        executable = bool(working_mode & 0o111)
+        if executable != (expected_mode == "100755"):
+            raise VerificationError(
+                "tracked project source mode differs from the exact source "
+                f"commit: {relative_name!r}"
+            )
+    untracked_payload = _run_git(
+        repository,
+        "ls-files",
+        "--others",
+        "-z",
+        output_limit=MAX_SDIST_TOTAL_BYTES,
+    )
+    try:
+        untracked = [
+            value.decode("utf-8")
+            for value in untracked_payload.split(b"\0")
+            if value
+        ]
+    except UnicodeDecodeError as exc:
+        raise VerificationError(
+            "release worktree contains a non-UTF-8 untracked path"
+        ) from exc
+    unexpected = []
+    for path in untracked:
+        _portable_member_key(path, archive_label="git untracked source")
+        if not _allowed_generated_untracked_path(
+            path,
+            egg_info_root=egg_info_root,
+        ):
+            unexpected.append(path)
+    if unexpected:
+        raise VerificationError(
+            "release worktree contains untracked source selection outside "
+            f"generated build directories: {sorted(unexpected)}"
+        )
+
+
+def _resolved_project_location(
+    repository: Path,
+    project_path: Path,
+) -> tuple[Path, PurePosixPath, str]:
+    try:
+        project_resolved = project_path.resolve(strict=True)
+        project_relative = project_resolved.relative_to(repository)
+    except (OSError, ValueError) as exc:
+        raise VerificationError(
+            "--project must resolve inside --repository without escaping it"
+        ) from exc
+    if project_relative.name != "pyproject.toml":
+        raise VerificationError("--project must identify pyproject.toml")
+    project_directory = PurePosixPath(*project_relative.parent.parts)
+    tree_path = "." if not project_directory.parts else project_directory.as_posix()
+    return project_resolved.parent, project_directory, tree_path
+
+
+def _git_object_digest(kind: str, payload: bytes, *, hexadecimal_size: int) -> str:
+    framed = f"{kind} {len(payload)}\0".encode("ascii") + payload
+    if hexadecimal_size == 40:
+        return hashlib.sha1(framed).hexdigest()
+    if hexadecimal_size == 64:
+        return hashlib.sha256(framed).hexdigest()
+    raise VerificationError("unsupported git object format")
+
+
+def _validated_git_object(
+    repository: Path,
+    *,
+    object_type: str,
+    object_id: str,
+    hexadecimal_size: int,
+    output_limit: int,
+) -> bytes:
+    payload = _run_git(
+        repository,
+        "cat-file",
+        object_type,
+        object_id,
+        output_limit=output_limit,
+    )
+    actual_id = _git_object_digest(
+        object_type,
+        payload,
+        hexadecimal_size=hexadecimal_size,
+    )
+    if actual_id != object_id.casefold():
+        raise VerificationError(
+            f"git {object_type} object content does not match its object ID"
+        )
+    return payload
+
+
+def _parse_validated_git_tree(
+    repository: Path,
+    *,
+    tree_id: str,
+    hexadecimal_size: int,
+) -> list[tuple[str, str, str]]:
+    payload = _validated_git_object(
+        repository,
+        object_type="tree",
+        object_id=tree_id,
+        hexadecimal_size=hexadecimal_size,
+        output_limit=MAX_SDIST_TOTAL_BYTES,
+    )
+    identifier_size = hexadecimal_size // 2
+    entries: list[tuple[str, str, str]] = []
+    names: set[str] = set()
+    position = 0
+    while position < len(payload):
+        if len(entries) >= MAX_SDIST_MEMBERS:
+            raise VerificationError(
+                "immutable git tree exceeds the entry-count limit"
+            )
+        separator = payload.find(b" ", position)
+        terminator = payload.find(b"\0", separator + 1)
+        object_end = terminator + 1 + identifier_size
+        if (
+            separator <= position
+            or terminator <= separator + 1
+            or object_end > len(payload)
+        ):
+            raise VerificationError("immutable git tree object is malformed")
+        try:
+            mode = payload[position:separator].decode("ascii")
+            name = payload[separator + 1 : terminator].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise VerificationError(
+                "immutable git tree contains a non-UTF-8 entry"
+            ) from exc
+        if (
+            mode not in {"40000", "040000", "100644", "100755"}
+            or not name
+            or "/" in name
+            or name in {".", ".."}
+            or name in names
+        ):
+            raise VerificationError(
+                f"immutable git tree contains an unsupported entry {name!r}"
+            )
+        names.add(name)
+        object_id = payload[terminator + 1 : object_end].hex()
+        entries.append((mode.removeprefix("0"), name, object_id))
+        position = object_end
+    return entries
+
+
+def _immutable_commit_snapshot(
+    repository: Path,
+    *,
+    source_commit: str,
+    project_path: Path,
+) -> _ImmutableGitSnapshot:
+    _, project_directory, _ = _resolved_project_location(repository, project_path)
+    hexadecimal_size = len(source_commit)
+    commit_payload = _validated_git_object(
+        repository,
+        object_type="commit",
+        object_id=source_commit,
+        hexadecimal_size=hexadecimal_size,
+        output_limit=MAX_SDIST_MEMBER_BYTES,
+    )
+    commit_headers = commit_payload.split(b"\n\n", 1)[0].splitlines()
+    tree_headers = [line[5:] for line in commit_headers if line.startswith(b"tree ")]
+    if len(tree_headers) != 1:
+        raise VerificationError("immutable git commit has no unique root tree")
+    try:
+        tree_id = tree_headers[0].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise VerificationError("immutable git commit has an invalid tree ID") from exc
+    if (
+        len(tree_id) != hexadecimal_size
+        or _FULL_GIT_OBJECT_PATTERN.fullmatch(tree_id) is None
+    ):
+        raise VerificationError("immutable git commit has an invalid tree ID")
+
+    tree_cache: dict[str, list[tuple[str, str, str]]] = {}
+
+    def parsed_tree(object_id: str) -> list[tuple[str, str, str]]:
+        entries = tree_cache.get(object_id)
+        if entries is None:
+            entries = _parse_validated_git_tree(
+                repository,
+                tree_id=object_id,
+                hexadecimal_size=hexadecimal_size,
+            )
+            tree_cache[object_id] = entries
+        return entries
+
+    if len(project_directory.parts) > MAX_SDIST_HEADER_DEPTH:
+        raise VerificationError(
+            "project path exceeds the immutable tree-depth limit"
+        )
+    for component in project_directory.parts:
+        matching = [
+            entry
+            for entry in parsed_tree(tree_id)
+            if entry[1] == component
+        ]
+        if len(matching) != 1 or matching[0][0] != "40000":
+            raise VerificationError(
+                "project directory is absent from the immutable git commit"
+            )
+        tree_id = matching[0][2]
+
+    payloads: dict[str, bytes] = {}
+    git_entries: dict[str, tuple[str, str]] = {}
+    blob_cache: dict[str, bytes] = {}
+    total_size = 0
+    visited_entry_count = 0
+
+    def visit_tree(
+        current_tree: str,
+        relative_parent: PurePosixPath,
+        depth: int,
+    ) -> None:
+        nonlocal total_size, visited_entry_count
+        if depth > MAX_SDIST_HEADER_DEPTH:
+            raise VerificationError(
+                "immutable source commit exceeds the tree-depth limit"
+            )
+        for mode, name, object_id in parsed_tree(current_tree):
+            visited_entry_count += 1
+            if visited_entry_count > MAX_SDIST_MEMBERS:
+                raise VerificationError(
+                    "immutable source commit exceeds the tree-entry-count limit"
+                )
+            relative_path = PurePosixPath(*relative_parent.parts, name)
+            relative_name = relative_path.as_posix()
+            _portable_member_key(
+                relative_name,
+                archive_label="immutable git source tree",
+            )
+            if mode == "40000":
+                visit_tree(object_id, relative_path, depth + 1)
+                continue
+            if len(payloads) >= MAX_SDIST_MEMBERS:
+                raise VerificationError(
+                    "immutable source commit exceeds the member-count limit"
+                )
+            payload = blob_cache.get(object_id)
+            if payload is None:
+                payload = _validated_git_object(
+                    repository,
+                    object_type="blob",
+                    object_id=object_id,
+                    hexadecimal_size=hexadecimal_size,
+                    output_limit=MAX_SDIST_MEMBER_BYTES,
+                )
+                blob_cache[object_id] = payload
+            total_size += len(payload)
+            if total_size > MAX_SDIST_TOTAL_BYTES:
+                raise VerificationError(
+                    "immutable source commit exceeds the total-size limit"
+                )
+            repository_name = PurePosixPath(
+                *project_directory.parts,
+                *relative_path.parts,
+            ).as_posix()
+            payloads[relative_name] = payload
+            git_entries[repository_name] = (mode, object_id)
+
+    visit_tree(tree_id, PurePosixPath(), 0)
+    if "pyproject.toml" not in payloads:
+        raise VerificationError(
+            "pyproject.toml is absent from the immutable source commit"
+        )
+    return _ImmutableGitSnapshot(payloads=payloads, entries=git_entries)
+
+
+def _verify_tag_commit(
+    repository: Path,
+    *,
+    tag: str,
+    source_commit: str,
+) -> None:
+    tag_commit = _run_git(
+        repository,
+        "rev-parse",
+        "--verify",
+        f"refs/tags/{tag}^{{commit}}",
+        output_limit=256,
+    ).decode("ascii").strip()
+    if tag_commit != source_commit:
+        raise VerificationError(
+            f"release tag {tag!r} does not point to the exact source commit"
+        )
+
+
 def _pep440_version_from_tag(tag: str) -> str:
     match = _TAG_PATTERN.fullmatch(tag)
     if match is None:
@@ -792,8 +1947,11 @@ def _pep440_version_from_tag(tag: str) -> str:
     return version
 
 
-def verify_tag(project_path: Path, tag: str) -> tuple[str, str]:
-    name, project_version = _project_identity(project_path)
+def _verify_tag_identity(
+    name: str,
+    project_version: str,
+    tag: str,
+) -> tuple[str, str]:
     tag_version = _pep440_version_from_tag(tag)
     if tag_version != project_version:
         raise VerificationError(
@@ -803,26 +1961,88 @@ def verify_tag(project_path: Path, tag: str) -> tuple[str, str]:
     return name, project_version
 
 
+def verify_tag(
+    project_path: Path,
+    tag: str,
+    *,
+    repository: Path | None = None,
+    source_commit: str | None = None,
+) -> tuple[str, str]:
+    if repository is None and source_commit is None:
+        name, project_version = _project_identity(project_path)
+        return _verify_tag_identity(name, project_version, tag)
+    config = _release_config(
+        project_path,
+        tag,
+        repository=repository,
+        source_commit=source_commit,
+    )
+    return config.name, config.version
+
+
+def _validate_ascii_control_chars(value: str, *, label: str) -> None:
+    if any(
+        character != "\t" and not (0x20 <= ord(character) <= 0x7E)
+        for character in value
+    ):
+        raise VerificationError(
+            f"{label} contains non-ASCII or control material"
+        )
+
+
+def _ascii_control_value(value: str, *, label: str) -> str:
+    """Return an ASCII SP/HTAB-trimmed release-control value."""
+
+    _validate_ascii_control_chars(value, label=label)
+    stripped = value.strip(_ASCII_OWS)
+    if not stripped:
+        raise VerificationError(f"{label} must be non-empty")
+    return stripped
+
+
 def _metadata_identity(metadata: str, label: str) -> tuple[str, str]:
     parsed = Parser().parsestr(metadata)
     names = parsed.get_all("Name", [])
     versions = parsed.get_all("Version", [])
-    if len(names) != 1 or len(versions) != 1 or not names[0] or not versions[0]:
+    if len(names) != 1 or len(versions) != 1:
         raise VerificationError(
             f"{label} metadata must contain exactly one non-empty Name and Version"
         )
-    return names[0], versions[0]
+    return (
+        _ascii_control_value(names[0], label=f"{label} Name"),
+        _ascii_control_value(versions[0], label=f"{label} Version"),
+    )
 
 
 _REQUIREMENT_PATTERN = re.compile(
-    r"\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
-    r"(?:\[(?P<extras>[A-Za-z0-9._-]+(?:\s*,\s*[A-Za-z0-9._-]+)*)\])?"
-    r"\s*(?P<specifiers>[^;]*)\s*"
+    r"[ \t]*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:\[(?P<extras>[A-Za-z0-9._-]+(?:[ \t]*,[ \t]*[A-Za-z0-9._-]+)*)\])?"
+    r"[ \t]*(?P<specifiers>[^;]*)[ \t]*",
+    flags=re.ASCII,
 )
-_SPECIFIER_PATTERN = re.compile(r"(===|~=|==|!=|<=|>=|<|>)\s*([^,\s]+)")
+_SPECIFIER_PATTERN = re.compile(
+    r"(===|~=|==|!=|<=|>=|<|>)[ \t]*([^, \t]+)",
+    flags=re.ASCII,
+)
 _EXTRA_MARKER_PATTERN = re.compile(
-    r"\s*extra\s*==\s*(['\"])(?P<extra>[A-Za-z0-9._-]+)\1\s*"
+    r"[ \t]*extra[ \t]*==[ \t]*(['\"])(?P<extra>[A-Za-z0-9._-]+)\1[ \t]*",
+    flags=re.ASCII,
 )
+
+
+def _validate_ascii_pep508(value: str, *, label: str) -> None:
+    r"""Reject Unicode and controls before parsing package requirement syntax.
+
+    PEP 508's grammar is ASCII.  In particular, Python's Unicode-aware
+    ``\s``/``isspace`` APIs must not make NBSP or another lookalike compare as
+    an ordinary SP/HTAB separator in a signed release contract.
+    """
+
+    _validate_ascii_control_chars(value, label=label)
+
+
+def _strip_ascii_ows(value: str) -> str:
+    return value.strip(_ASCII_OWS)
 
 
 def _canonical_requirement(
@@ -830,6 +2050,7 @@ def _canonical_requirement(
     *,
     label: str,
 ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]:
+    _validate_ascii_pep508(requirement, label=label)
     if "@" in requirement or ";" in requirement:
         raise VerificationError(
             f"{label} uses an unsupported URL or environment marker"
@@ -840,11 +2061,11 @@ def _canonical_requirement(
     extras_value = match.group("extras")
     extras = tuple(
         sorted(
-            _normalize_name(extra.strip())
+            _normalize_name(_strip_ascii_ows(extra))
             for extra in extras_value.split(",")
         )
     ) if extras_value else ()
-    specifier_text = match.group("specifiers").strip()
+    specifier_text = _strip_ascii_ows(match.group("specifiers"))
     specifiers: list[tuple[str, str]] = []
     if specifier_text:
         position = 0
@@ -856,7 +2077,10 @@ def _canonical_requirement(
                 )
             specifiers.append((specifier.group(1), specifier.group(2)))
             position = specifier.end()
-            while position < len(specifier_text) and specifier_text[position].isspace():
+            while (
+                position < len(specifier_text)
+                and specifier_text[position] in _ASCII_OWS
+            ):
                 position += 1
             if position == len(specifier_text):
                 break
@@ -865,7 +2089,10 @@ def _canonical_requirement(
                     f"{label} contains an unsupported version specifier"
                 )
             position += 1
-            while position < len(specifier_text) and specifier_text[position].isspace():
+            while (
+                position < len(specifier_text)
+                and specifier_text[position] in _ASCII_OWS
+            ):
                 position += 1
             if position == len(specifier_text):
                 raise VerificationError(f"{label} ends with an empty specifier")
@@ -886,6 +2113,7 @@ def _metadata_requirement(
     tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]],
     str | None,
 ]:
+    _validate_ascii_pep508(value, label=label)
     requirement, separator, marker = value.partition(";")
     canonical = _canonical_requirement(requirement, label=label)
     if not separator:
@@ -920,6 +2148,14 @@ def _expected_requirements(
         expected[(canonical, None)] += 1
     normalized_extras: set[str] = set()
     for extra, requirements in config.optional_dependencies.items():
+        _validate_ascii_pep508(
+            extra,
+            label="project.optional-dependencies extra name",
+        )
+        if re.fullmatch(r"[A-Za-z0-9._-]+", extra, flags=re.ASCII) is None:
+            raise VerificationError(
+                "project.optional-dependencies contains an invalid extra name"
+            )
         normalized_extra = _normalize_name(extra)
         if normalized_extra in normalized_extras:
             raise VerificationError(
@@ -946,14 +2182,30 @@ def _validate_core_metadata(
     except UnicodeDecodeError as exc:
         raise VerificationError(f"{label} metadata is not UTF-8") from exc
     parsed = Parser().parsestr(text)
+    if parsed.defects:
+        raise VerificationError(f"{label} metadata contains parser defects")
+    unexpected_fields = sorted(
+        {
+            field
+            for field in parsed.keys()
+            if field.casefold() not in _ALLOWED_CORE_METADATA_FIELDS
+        }
+    )
+    if unexpected_fields:
+        raise VerificationError(
+            f"{label} metadata contains unexpected fields: {unexpected_fields}"
+        )
 
     def exactly_one(field: str) -> str:
         values = parsed.get_all(field, [])
-        if len(values) != 1 or not values[0].strip():
+        if len(values) != 1:
             raise VerificationError(
                 f"{label} metadata must contain exactly one non-empty {field}"
             )
-        return values[0].strip()
+        return _ascii_control_value(
+            values[0],
+            label=f"{label} {field}",
+        )
 
     metadata_version = exactly_one("Metadata-Version")
     if metadata_version != _SUPPORTED_CORE_METADATA_VERSION:
@@ -979,14 +2231,45 @@ def _validate_core_metadata(
             f"{label} Requires-Python does not match project.requires-python"
         )
 
+    for field in _STATIC_CORE_METADATA_FIELDS:
+        actual_values = tuple(parsed.get_all(field, []))
+        expected_values = config.core_metadata_fields.get(field, ())
+        if actual_values != expected_values:
+            raise VerificationError(
+                f"{label} {field} does not exactly match the immutable "
+                "project metadata"
+            )
+    payload_body = parsed.get_payload()
+    if not isinstance(payload_body, str) or payload_body != config.description_body:
+        raise VerificationError(
+            f"{label} description body does not exactly match the immutable "
+            "project readme"
+        )
+
     provided_extras = parsed.get_all("Provides-Extra", [])
-    normalized_provided = [_normalize_name(value.strip()) for value in provided_extras]
+    normalized_provided: list[str] = []
+    for value in provided_extras:
+        stripped_value = _ascii_control_value(
+            value,
+            label=f"{label} Provides-Extra",
+        )
+        if (
+            re.fullmatch(
+                r"[A-Za-z0-9._-]+",
+                stripped_value,
+                flags=re.ASCII,
+            )
+            is None
+        ):
+            raise VerificationError(
+                f"{label} Provides-Extra contains an invalid extra name"
+            )
+        normalized_provided.append(_normalize_name(stripped_value))
     expected_extras = sorted(
         _normalize_name(extra) for extra in config.optional_dependencies
     )
     if (
-        any(not value.strip() for value in provided_extras)
-        or len(normalized_provided) != len(set(normalized_provided))
+        len(normalized_provided) != len(set(normalized_provided))
         or sorted(normalized_provided) != expected_extras
     ):
         raise VerificationError(
@@ -1040,6 +2323,191 @@ def _expected_wheel_members(
         f"{expected_root}/top_level.txt",
         f"{expected_root}/RECORD",
     }
+
+
+def _validate_canonical_wheel_zip(payload: bytes, wheel: ZipFile) -> None:
+    """Bind the ZIP container to one canonical, gap-free wheel framing."""
+
+    eocd_size = struct.calcsize("<4s4H2LH")
+    if len(payload) < eocd_size or payload[:4] != b"PK\x03\x04":
+        raise VerificationError("wheel contains a prefix or truncated ZIP framing")
+    eocd_offset = len(payload) - eocd_size
+    try:
+        (
+            signature,
+            disk_number,
+            central_disk,
+            disk_entries,
+            total_entries,
+            central_size,
+            central_offset,
+            comment_size,
+        ) = struct.unpack_from("<4s4H2LH", payload, eocd_offset)
+    except struct.error as exc:
+        raise VerificationError("wheel contains a malformed ZIP end record") from exc
+    if (
+        signature != b"PK\x05\x06"
+        or disk_number != 0
+        or central_disk != 0
+        or disk_entries != total_entries
+        or total_entries in {0xFFFF}
+        or central_size == 0xFFFFFFFF
+        or central_offset == 0xFFFFFFFF
+        or comment_size != 0
+        or central_offset + central_size != eocd_offset
+    ):
+        raise VerificationError(
+            "wheel contains a non-canonical ZIP end or central-directory record"
+        )
+
+    infos = wheel.infolist()
+    if total_entries != len(infos):
+        raise VerificationError("wheel ZIP member count disagrees with its directory")
+
+    central_cursor = central_offset
+    central_header_size = struct.calcsize("<4s6H3L5H2L")
+    for info in infos:
+        if central_cursor + central_header_size > eocd_offset:
+            raise VerificationError("wheel central directory is truncated")
+        try:
+            (
+                central_signature,
+                created_version,
+                extracted_version,
+                flags,
+                compression,
+                _modified_time,
+                _modified_date,
+                crc,
+                compressed_size,
+                file_size,
+                name_size,
+                extra_size,
+                member_comment_size,
+                member_disk,
+                _internal_attributes,
+                external_attributes,
+                local_offset,
+            ) = struct.unpack_from(
+                "<4s6H3L5H2L",
+                payload,
+                central_cursor,
+            )
+        except struct.error as exc:
+            raise VerificationError("wheel central directory is malformed") from exc
+        name_start = central_cursor + central_header_size
+        name_end = name_start + name_size
+        entry_end = name_end + extra_size + member_comment_size
+        try:
+            expected_name = info.filename.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise VerificationError("wheel member names must be ASCII") from exc
+        if (
+            central_signature != b"PK\x01\x02"
+            or entry_end > eocd_offset
+            or payload[name_start:name_end] != expected_name
+            or extra_size != 0
+            or member_comment_size != 0
+            or member_disk != 0
+            or created_version != (info.create_system << 8) | info.create_version
+            or extracted_version != info.extract_version
+            or flags != info.flag_bits
+            or compression != info.compress_type
+            or crc != info.CRC
+            or compressed_size != info.compress_size
+            or file_size != info.file_size
+            or external_attributes != info.external_attr
+            or local_offset != info.header_offset
+        ):
+            raise VerificationError(
+                f"wheel contains non-canonical central metadata at {info.filename!r}"
+            )
+        central_cursor = entry_end
+    if central_cursor != eocd_offset:
+        raise VerificationError("wheel contains a central-directory gap or suffix")
+
+    local_cursor = 0
+    local_header_size = struct.calcsize("<4s5H3L2H")
+    for info in sorted(infos, key=lambda item: item.header_offset):
+        if info.header_offset != local_cursor:
+            raise VerificationError("wheel contains a prefix or inter-member ZIP gap")
+        if local_cursor + local_header_size > central_offset:
+            raise VerificationError("wheel local header is truncated")
+        try:
+            (
+                local_signature,
+                extracted_version,
+                flags,
+                compression,
+                _modified_time,
+                _modified_date,
+                crc,
+                compressed_size,
+                file_size,
+                name_size,
+                extra_size,
+            ) = struct.unpack_from(
+                "<4s5H3L2H",
+                payload,
+                local_cursor,
+            )
+        except struct.error as exc:
+            raise VerificationError("wheel local header is malformed") from exc
+        name_start = local_cursor + local_header_size
+        name_end = name_start + name_size
+        data_start = name_end + extra_size
+        data_end = data_start + compressed_size
+        expected_name = info.filename.encode("ascii")
+        if (
+            local_signature != b"PK\x03\x04"
+            or data_end > central_offset
+            or payload[name_start:name_end] != expected_name
+            or extra_size != 0
+            or extracted_version != info.extract_version
+            or flags != 0
+            or flags != info.flag_bits
+            or compression != info.compress_type
+            or crc != info.CRC
+            or compressed_size != info.compress_size
+            or file_size != info.file_size
+        ):
+            raise VerificationError(
+                f"wheel contains non-canonical local framing at {info.filename!r}"
+            )
+        compressed_payload = payload[data_start:data_end]
+        if compression == ZIP_DEFLATED:
+            try:
+                decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+                member_payload = decompressor.decompress(
+                    compressed_payload,
+                    file_size + 1,
+                )
+            except zlib.error as exc:
+                raise VerificationError(
+                    f"wheel member has an invalid DEFLATE stream at "
+                    f"{info.filename!r}"
+                ) from exc
+            if (
+                len(member_payload) != file_size
+                or not decompressor.eof
+                or decompressor.unused_data
+                or decompressor.unconsumed_tail
+                or zlib.crc32(member_payload) != crc
+            ):
+                raise VerificationError(
+                    f"wheel member DEFLATE framing is not exact at "
+                    f"{info.filename!r}"
+                )
+        elif compression == ZIP_STORED and (
+            compressed_size != file_size
+            or zlib.crc32(compressed_payload) != crc
+        ):
+            raise VerificationError(
+                f"wheel stored member framing is not exact at {info.filename!r}"
+            )
+        local_cursor = data_end
+    if local_cursor != central_offset:
+        raise VerificationError("wheel contains data outside its ZIP members")
 
 
 def _validate_wheel_members(
@@ -1103,24 +2571,6 @@ def _validate_wheel_members(
         if total_size > MAX_WHEEL_TOTAL_BYTES:
             raise VerificationError("wheel exceeds the total-size limit")
 
-        file_type = stat.S_IFMT(info.external_attr >> 16)
-        if member.endswith("/") or file_type not in {0, stat.S_IFREG}:
-            raise VerificationError(
-                f"wheel contains unsupported member type at {member!r}"
-            )
-        if info.flag_bits & 0x1:
-            raise VerificationError(
-                f"wheel contains encrypted member {member!r}"
-            )
-        if info.extra:
-            raise VerificationError(
-                f"wheel contains unsupported extra fields at {member!r}"
-            )
-        if info.compress_type not in {ZIP_STORED, ZIP_DEFLATED}:
-            raise VerificationError(
-                f"wheel contains unsupported compression at {member!r}"
-            )
-
         dist_info_parts = [
             part for part in parts if part.casefold().endswith(".dist-info")
         ]
@@ -1130,6 +2580,40 @@ def _validate_wheel_members(
             raise VerificationError(
                 f"wheel contains metadata outside expected dist-info directory: "
                 f"{member!r}"
+            )
+
+        archived_mode = info.external_attr >> 16
+        file_type = stat.S_IFMT(archived_mode)
+        expected_mode = 0o664 if member.endswith(".dist-info/RECORD") else 0o644
+        if (
+            member.endswith("/")
+            or info.create_system != 3
+            or info.create_version != 20
+            or info.extract_version != 20
+            or info.flag_bits != 0
+            or info.internal_attr != 0
+            or file_type != stat.S_IFREG
+            or (archived_mode & 0o7777) != expected_mode
+        ):
+            raise VerificationError(
+                f"wheel member type or mode does not match the release "
+                f"contract at {member!r}"
+            )
+        if info.flag_bits & 0x1:
+            raise VerificationError(
+                f"wheel contains encrypted member {member!r}"
+            )
+        if info.extra:
+            raise VerificationError(
+                f"wheel contains unsupported extra fields at {member!r}"
+            )
+        if info.comment:
+            raise VerificationError(
+                f"wheel contains a member comment at {member!r}"
+            )
+        if info.compress_type not in {ZIP_STORED, ZIP_DEFLATED}:
+            raise VerificationError(
+                f"wheel contains unsupported compression at {member!r}"
             )
 
     metadata_members = [
@@ -1236,26 +2720,53 @@ def _verify_wheel_entry_points(
     expected_scripts: dict[str, str],
 ) -> None:
     try:
-        text = payload.decode("utf-8")
-        parsed = configparser.ConfigParser(
-            interpolation=None,
-            strict=True,
-            delimiters=("=",),
-        )
-        parsed.optionxform = str
-        parsed.read_string(text)
-    except (UnicodeDecodeError, configparser.Error) as exc:
+        text = payload.decode("ascii")
+    except UnicodeDecodeError as exc:
         raise VerificationError(
-            f"wheel entry_points.txt cannot be parsed: {exc}"
+            "wheel entry_points.txt contains non-ASCII material"
         ) from exc
-    if parsed.sections() != ["console_scripts"] or parsed.defaults():
+    if any(
+        character not in "\t\r\n" and not (0x20 <= ord(character) <= 0x7E)
+        for character in text
+    ):
+        raise VerificationError(
+            "wheel entry_points.txt contains control material"
+        )
+    lines = text.splitlines()
+    if (
+        not lines
+        or _ascii_control_value(
+            lines[0],
+            label="wheel entry_points.txt section",
+        )
+        != "[console_scripts]"
+    ):
         raise VerificationError(
             "wheel entry_points.txt must contain only [console_scripts]"
         )
-    actual_scripts = {
-        key.strip(): value.strip()
-        for key, value in parsed.items("console_scripts", raw=True)
-    }
+    actual_scripts: dict[str, str] = {}
+    for line_number, line in enumerate(lines[1:], 2):
+        if not line.strip(_ASCII_OWS):
+            continue
+        if line.count("=") != 1:
+            raise VerificationError(
+                "wheel entry_points.txt contains a malformed console script "
+                f"on line {line_number}"
+            )
+        raw_key, raw_value = line.split("=", 1)
+        key = _ascii_control_value(
+            raw_key,
+            label=f"wheel entry_points.txt key on line {line_number}",
+        )
+        value = _ascii_control_value(
+            raw_value,
+            label=f"wheel entry_points.txt value on line {line_number}",
+        )
+        if key in actual_scripts:
+            raise VerificationError(
+                f"wheel entry_points.txt repeats console script {key!r}"
+            )
+        actual_scripts[key] = value
     if actual_scripts != expected_scripts:
         raise VerificationError(
             "wheel console scripts do not exactly match project.scripts"
@@ -1264,9 +2775,16 @@ def _verify_wheel_entry_points(
 
 def _verify_wheel_top_level(payload: bytes, *, modules: tuple[str, ...]) -> None:
     try:
-        text = payload.decode("utf-8")
+        text = payload.decode("ascii")
     except UnicodeDecodeError as exc:
-        raise VerificationError("wheel top_level.txt is not UTF-8") from exc
+        raise VerificationError(
+            "wheel top_level.txt contains non-ASCII material"
+        ) from exc
+    if any(
+        character not in "\r\n" and not (0x20 <= ord(character) <= 0x7E)
+        for character in text
+    ):
+        raise VerificationError("wheel top_level.txt contains control material")
     lines = text.splitlines()
     expected = sorted({module.split(".", 1)[0] for module in modules})
     if lines != expected:
@@ -1313,7 +2831,10 @@ def _wheel_identity(
         archive_size = wheel_path.stat().st_size
         if archive_size < 0 or archive_size > MAX_WHEEL_ARCHIVE_BYTES:
             raise VerificationError("wheel exceeds the compressed-size limit")
-        with ZipFile(wheel_path) as wheel:
+        archive_payload = wheel_path.read_bytes()
+        if len(archive_payload) != archive_size:
+            raise VerificationError("wheel changed while it was being read")
+        with ZipFile(BytesIO(archive_payload)) as wheel:
             _validate_wheel_members(
                 wheel,
                 expected_root=expected_root,
@@ -1321,6 +2842,7 @@ def _wheel_identity(
                 expected_exact_sizes=expected_exact_sizes,
                 metadata_size_limits=metadata_size_limits,
             )
+            _validate_canonical_wheel_zip(archive_payload, wheel)
             payloads = _read_wheel_members(wheel)
     except VerificationError:
         raise
@@ -1354,29 +2876,66 @@ def _wheel_identity(
         raise VerificationError("wheel metadata is not UTF-8") from exc
 
     parsed_wheel = Parser().parsestr(wheel_metadata)
+    if parsed_wheel.defects:
+        raise VerificationError("wheel WHEEL metadata contains parser defects")
+    if parsed_wheel.get_payload() != "":
+        raise VerificationError("wheel WHEEL metadata must not contain a body")
     wheel_versions = parsed_wheel.get_all("Wheel-Version", [])
-    if (
-        len(wheel_versions) != 1
-        or wheel_versions[0].strip() != _SUPPORTED_WHEEL_VERSION
-    ):
+    if len(wheel_versions) != 1:
+        raise VerificationError(
+            "wheel WHEEL metadata must contain exactly one supported "
+            f"Wheel-Version: {_SUPPORTED_WHEEL_VERSION}"
+        )
+    wheel_version = _ascii_control_value(
+        wheel_versions[0],
+        label="wheel Wheel-Version",
+    )
+    if wheel_version != _SUPPORTED_WHEEL_VERSION:
         raise VerificationError(
             "wheel WHEEL metadata must contain exactly one supported "
             f"Wheel-Version: {_SUPPORTED_WHEEL_VERSION}"
         )
     purelib_values = parsed_wheel.get_all("Root-Is-Purelib", [])
-    if (
-        len(purelib_values) != 1
-        or purelib_values[0].strip().lower() != "true"
-    ):
+    if len(purelib_values) != 1:
         raise VerificationError(
             "wheel WHEEL metadata must contain exactly one "
             "Root-Is-Purelib: true"
         )
-    tags = [value.strip() for value in parsed_wheel.get_all("Tag", [])]
+    purelib = _ascii_control_value(
+        purelib_values[0],
+        label="wheel Root-Is-Purelib",
+    )
+    if purelib.lower() != "true":
+        raise VerificationError(
+            "wheel WHEEL metadata must contain exactly one "
+            "Root-Is-Purelib: true"
+        )
+    tags = [
+        _ascii_control_value(value, label="wheel Tag")
+        for value in parsed_wheel.get_all("Tag", [])
+    ]
     if len(tags) != 1 or set(tags) != {"py3-none-any"}:
         raise VerificationError(
             "wheel WHEEL compatibility tags must be exactly "
             f"['py3-none-any']; found {tags}"
+        )
+    generator_values = parsed_wheel.get_all("Generator", [])
+    if len(generator_values) != 1:
+        raise VerificationError(
+            "wheel WHEEL metadata must contain exactly one Generator"
+        )
+    _ascii_control_value(generator_values[0], label="wheel Generator")
+    wheel_field_counts = Counter(field.casefold() for field in parsed_wheel.keys())
+    if wheel_field_counts != Counter(
+        {
+            "wheel-version": 1,
+            "generator": 1,
+            "root-is-purelib": 1,
+            "tag": 1,
+        }
+    ):
+        raise VerificationError(
+            "wheel WHEEL metadata fields do not match the release contract"
         )
     _verify_wheel_record(payloads, record_name=record_name)
     _verify_wheel_entry_points(
@@ -1473,6 +3032,13 @@ def _verify_sdist_requires(
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise VerificationError("sdist requires.txt is not UTF-8") from exc
+    if any(
+        character not in "\t\r\n" and not (0x20 <= ord(character) <= 0x7E)
+        for character in text
+    ):
+        raise VerificationError(
+            "sdist requires.txt contains non-ASCII or control material"
+        )
     current_extra: str | None = None
     seen_sections: set[str] = set()
     actual: Counter[
@@ -1482,7 +3048,11 @@ def _verify_sdist_requires(
         ]
     ] = Counter()
     for line_number, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
+        _validate_ascii_pep508(
+            line,
+            label=f"sdist requires.txt line {line_number}",
+        )
+        stripped = _strip_ascii_ows(line)
         if not stripped:
             continue
         if stripped.startswith("[") and stripped.endswith("]"):
@@ -1595,6 +3165,7 @@ def _inspect_sdist(
                     tarfile.AREGTYPE,
                 }
                 directory = member.type == tarfile.DIRTYPE
+                expected_mode = 0o644 if regular_file else 0o755
                 sparse_headers = any(
                     key.startswith("GNU.sparse") or key == "SCHILY.realsize"
                     for key in member.pax_headers
@@ -1618,6 +3189,16 @@ def _inspect_sdist(
                             f"source-distribution root {metadata_root!r} does not "
                             f"match expected {expected_root!r}"
                         )
+                if directory and member.size != 0:
+                    raise VerificationError(
+                        "source distribution directory member has non-zero size: "
+                        f"{member.name!r}"
+                    )
+                if (regular_file or directory) and member.mode != expected_mode:
+                    raise VerificationError(
+                        "source distribution member mode does not match the "
+                        f"release contract at {member.name!r}"
+                    )
                 if (
                     path.is_absolute()
                     or not path.parts
@@ -1659,11 +3240,6 @@ def _inspect_sdist(
                     raise VerificationError(
                         f"source-distribution module size does not match the "
                         f"project: {target_module!r}"
-                    )
-                if directory and member.size != 0:
-                    raise VerificationError(
-                        "source distribution directory member has non-zero size: "
-                        f"{member.name!r}"
                     )
                 trusted_source_payload = config.sdist_source_payloads.get(
                     relative_name
@@ -1809,6 +3385,7 @@ def _inspect_sdist(
                         "source distribution contains non-zero data after the "
                         "tar end marker"
                     )
+            _validate_tar_zero_padding(sdist_path)
     except VerificationError:
         raise
     except (
@@ -1838,23 +3415,69 @@ def _inspect_sdist(
 def _release_config(
     project_path: Path,
     tag: str | None,
+    *,
+    repository: Path | None = None,
+    source_commit: str | None = None,
 ) -> _ProjectReleaseConfig:
-    config = _project_release_config(project_path)
+    if (repository is None) != (source_commit is None):
+        raise VerificationError(
+            "--repository and --source-commit must be supplied together"
+        )
+    canonical_repository: Path | None = None
+    resolved_commit: str | None = None
+    if repository is None:
+        config = _project_release_config(project_path)
+    else:
+        assert source_commit is not None
+        canonical_repository = _canonical_git_repository(repository)
+        resolved_commit = _resolve_exact_source_commit(
+            canonical_repository,
+            source_commit,
+        )
+        immutable_snapshot = _immutable_commit_snapshot(
+            canonical_repository,
+            source_commit=resolved_commit,
+            project_path=project_path,
+        )
+        config = _project_release_config(
+            project_path,
+            immutable_source_payloads=immutable_snapshot.payloads,
+        )
+        _verify_git_worktree_state(
+            canonical_repository,
+            source_commit=resolved_commit,
+            egg_info_root=f"{_artifact_distribution_name(config.name)}.egg-info",
+            project_path=project_path,
+            immutable_payloads=immutable_snapshot.payloads,
+            immutable_entries=immutable_snapshot.entries,
+        )
     if tag is not None:
-        tag_name, tag_version = verify_tag(project_path, tag)
-        if tag_name != config.name or tag_version != config.version:
-            raise VerificationError(
-                "release tag and project release configuration disagree"
+        _verify_tag_identity(config.name, config.version, tag)
+        if canonical_repository is not None and resolved_commit is not None:
+            _verify_tag_commit(
+                canonical_repository,
+                tag=tag,
+                source_commit=resolved_commit,
             )
     return config
 
 
 def verify_sdist(
-    project_path: Path, dist_path: Path, tag: str | None = None
+    project_path: Path,
+    dist_path: Path,
+    tag: str | None = None,
+    *,
+    repository: Path | None = None,
+    source_commit: str | None = None,
 ) -> Path:
     """Verify the sole built sdist before any archive extraction occurs."""
 
-    config = _release_config(project_path, tag)
+    config = _release_config(
+        project_path,
+        tag,
+        repository=repository,
+        source_commit=source_commit,
+    )
 
     sdists = sorted(dist_path.glob("*.tar.gz"))
     if len(sdists) != 1:
@@ -1904,11 +3527,25 @@ def extract_sdist(
     dist_path: Path,
     output_path: Path,
     tag: str | None = None,
+    *,
+    repository: Path | None = None,
+    source_commit: str | None = None,
 ) -> Path:
     """Verify and extract an sdist with the same bounded streaming parser."""
 
-    sdist = verify_sdist(project_path, dist_path, tag)
-    config = _release_config(project_path, tag)
+    sdist = verify_sdist(
+        project_path,
+        dist_path,
+        tag,
+        repository=repository,
+        source_commit=source_commit,
+    )
+    config = _release_config(
+        project_path,
+        tag,
+        repository=repository,
+        source_commit=source_commit,
+    )
     try:
         output_path.mkdir(mode=0o700, parents=False, exist_ok=False)
     except OSError as exc:
@@ -1929,9 +3566,19 @@ def extract_sdist(
 
 
 def verify_artifacts(
-    project_path: Path, dist_path: Path, tag: str | None = None
+    project_path: Path,
+    dist_path: Path,
+    tag: str | None = None,
+    *,
+    repository: Path | None = None,
+    source_commit: str | None = None,
 ) -> tuple[Path, Path]:
-    config = _release_config(project_path, tag)
+    config = _release_config(
+        project_path,
+        tag,
+        repository=repository,
+        source_commit=source_commit,
+    )
 
     wheels = sorted(dist_path.glob("*.whl"))
     sdists = sorted(dist_path.glob("*.tar.gz"))
@@ -2010,12 +3657,36 @@ def _parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--project", required=True, type=Path)
     tag_parser.add_argument("--tag", required=True)
 
+    def add_immutable_source_arguments(
+        command_parser: argparse.ArgumentParser,
+    ) -> None:
+        command_parser.add_argument(
+            "--repository",
+            type=Path,
+            help="exact git worktree top level containing the trusted source",
+        )
+        command_parser.add_argument(
+            "--source-commit",
+            help="complete git commit object ID that defines source bytes",
+        )
+        command_parser.add_argument(
+            "--allow-mutable-source",
+            action="store_true",
+            help=(
+                "explicitly use current filesystem bytes (local tests only; "
+                "never for CI or release verification)"
+            ),
+        )
+
+    add_immutable_source_arguments(tag_parser)
+
     artifacts_parser = subparsers.add_parser(
         "artifacts", help="verify exactly one wheel and sdist plus their metadata"
     )
     artifacts_parser.add_argument("--project", required=True, type=Path)
     artifacts_parser.add_argument("--dist", required=True, type=Path)
     artifacts_parser.add_argument("--tag")
+    add_immutable_source_arguments(artifacts_parser)
 
     sdist_parser = subparsers.add_parser(
         "sdist",
@@ -2024,6 +3695,7 @@ def _parser() -> argparse.ArgumentParser:
     sdist_parser.add_argument("--project", required=True, type=Path)
     sdist_parser.add_argument("--dist", required=True, type=Path)
     sdist_parser.add_argument("--tag")
+    add_immutable_source_arguments(sdist_parser)
 
     extract_parser = subparsers.add_parser(
         "extract-sdist",
@@ -2033,17 +3705,43 @@ def _parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--dist", required=True, type=Path)
     extract_parser.add_argument("--output", required=True, type=Path)
     extract_parser.add_argument("--tag")
+    add_immutable_source_arguments(extract_parser)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        immutable_source_selected = (
+            args.repository is not None or args.source_commit is not None
+        )
+        if args.allow_mutable_source and immutable_source_selected:
+            raise VerificationError(
+                "--allow-mutable-source cannot be combined with immutable git "
+                "source arguments"
+            )
+        if not args.allow_mutable_source and not immutable_source_selected:
+            raise VerificationError(
+                "release verification requires --repository and "
+                "--source-commit; use --allow-mutable-source only for local "
+                "non-git tests"
+            )
         if args.command == "tag":
-            name, version = verify_tag(args.project, args.tag)
+            name, version = verify_tag(
+                args.project,
+                args.tag,
+                repository=args.repository,
+                source_commit=args.source_commit,
+            )
             print(f"release identity verified: {name} {version} ({args.tag})")
         elif args.command == "sdist":
-            sdist = verify_sdist(args.project, args.dist, args.tag)
+            sdist = verify_sdist(
+                args.project,
+                args.dist,
+                args.tag,
+                repository=args.repository,
+                source_commit=args.source_commit,
+            )
             print(f"source distribution verified before extraction: {sdist.name}")
         elif args.command == "extract-sdist":
             root = extract_sdist(
@@ -2051,10 +3749,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.dist,
                 args.output,
                 args.tag,
+                repository=args.repository,
+                source_commit=args.source_commit,
             )
             print(f"source distribution safely extracted: {root}")
         else:
-            wheel, sdist = verify_artifacts(args.project, args.dist, args.tag)
+            wheel, sdist = verify_artifacts(
+                args.project,
+                args.dist,
+                args.tag,
+                repository=args.repository,
+                source_commit=args.source_commit,
+            )
             print(
                 "release artifacts verified: "
                 f"wheel={wheel.name}; sdist={sdist.name}"

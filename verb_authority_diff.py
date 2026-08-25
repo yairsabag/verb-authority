@@ -20,6 +20,7 @@ from verb_authority_scan import (
     REPORT_VERSION,
     SchemaError,
     canonical_decimal_text,
+    is_report_shaped_document,
     load_json_path,
     scan_documents,
     validate_plain_json,
@@ -60,84 +61,13 @@ _EVIDENCE = frozenset({"observed", "declared", "attested"})
 _BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
 _BOUND_STATUS = frozenset({"enforced", "specified", "not_stated"})
 _HEX = frozenset("0123456789abcdef")
-_REPORT_SENTINEL_KEYS = frozenset(
-    {
-        "report_version",
-        "privacy",
-        "schema_fingerprint_sha256",
-        "summary",
-        "declared_controls",
-        "control_declaration_fingerprint_sha256",
-    }
-)
-_REPORT_TOOL_SENTINEL_KEYS = frozenset(
-    {
-        "arguments",
-        "risk_source",
-        "risk_evidence",
-        "inferred_risk",
-        "risk_inference",
-        "risk_conflict",
-        "risk_review_required",
-        "needs_confirmation",
-        "schema_review_required",
-        "annotation_conflicts",
-        "schema_material_fingerprint_sha256",
-        "unmodeled_schema_fingerprint_sha256",
-    }
-)
-
-
 class DiffError(ValueError):
     """Raised when reports cannot be correlated safely."""
 
 
 def _is_report_shaped(document: Any) -> bool:
     """Recognize report sentinels in every supported raw-schema envelope."""
-
-    if type(document) is dict and (
-        "generator" in document or _REPORT_SENTINEL_KEYS.intersection(document)
-    ):
-        return True
-
-    def entry_is_report_shaped(entry: Any) -> bool:
-        if type(entry) is not dict:
-            return False
-        if _REPORT_TOOL_SENTINEL_KEYS.intersection(entry):
-            return True
-        function = entry.get("function")
-        return (
-            entry.get("type") == "function"
-            and type(function) is dict
-            and bool(_REPORT_TOOL_SENTINEL_KEYS.intersection(function))
-        )
-
-    candidate_entries: list[Any] = []
-    if type(document) is list:
-        candidate_entries.extend(document)
-    elif type(document) is dict:
-        if "name" in document:
-            candidate_entries.append(document)
-
-        tools = document.get("tools")
-        if type(tools) is list:
-            candidate_entries.extend(tools)
-
-        functions = document.get("functions")
-        if type(functions) is list:
-            candidate_entries.extend(functions)
-
-        result = document.get("result")
-        if type(result) is dict and type(result.get("tools")) is list:
-            candidate_entries.extend(result["tools"])
-
-        sources = document.get("sources")
-        if type(sources) is list:
-            for source in sources:
-                if type(source) is dict and type(source.get("tools")) is list:
-                    candidate_entries.extend(source["tools"])
-
-    return any(entry_is_report_shaped(entry) for entry in candidate_entries)
+    return is_report_shaped_document(document)
 
 
 def _require_object(value: Any, *, field: str) -> dict[str, Any]:
