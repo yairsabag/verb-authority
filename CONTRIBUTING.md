@@ -41,7 +41,7 @@ Do not include API keys, proprietary schemas, user data, or claims such as
 Prefer a redacted report over the original schema:
 
 ```bash
-python -m verb_authority scan tools.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
   --redact-names --output authority-report.md
 ```
 

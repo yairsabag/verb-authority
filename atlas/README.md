@@ -14,7 +14,7 @@ does not use them.
 Regenerate the checked-in report locally:
 
 ```bash
-python -m verb_authority scan atlas/public_mcp_schemas.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan atlas/public_mcp_schemas.json \
   --format markdown --output atlas/public_mcp_report.md
 ```
 
@@ -35,6 +35,6 @@ endpoints.
 For a private schema, keep the original local and share only a redacted report:
 
 ```bash
-python -m verb_authority scan private-tools.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan private-tools.json \
   --redact-names --output verb-authority-report.md
 ```

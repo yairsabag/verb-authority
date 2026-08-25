@@ -104,13 +104,13 @@ def run():
     if broke_at:
         i, label = broke_at
         print(f"resistance depth: held {held} tiers, broke at tier {i} ({label}).")
-        print("the tiers reached before the break (plain / homograph / uppercase /")
-        print("extraction) are blocked by sink policy, mixed-script rejection, or")
-        print("canonical matching. the break is the SEMANTIC boundary: a")
-        print("value the agent must interpret and reconstruct (at->@, dot->.) is")
-        print("no longer the same string in disguise -- it's content the model")
-        print("understood. closing that needs interpreter-level dataflow tracking")
-        print("(CaMeL/FIDES), not normalization. that limit is honest and known.")
+        print("the earlier tiers are blocked by sink policy, mixed-script")
+        print("rejection, or canonical matching. the observed break is the")
+        print("SEMANTIC / REPRESENTATION boundary: the Base64 text is not itself")
+        print("the protected destination, but downstream interpretation could")
+        print("turn it into one. close that path by decoding/normalizing before")
+        print("the gate into a typed trusted resolution, or with interpreter-level")
+        print("dataflow tracking such as CaMeL/FIDES. this limit is honest and known.")
     else:
         print(f"resistance depth: held all {held} tiers. No break found in this arsenal.")
 

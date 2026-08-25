@@ -1,1 +1,10 @@
 recursive-include fixtures *.json *.md
+recursive-include benchmarks *.py *.json *.md
+recursive-include docs *.md *.png
+recursive-include atlas *.md *.json
+recursive-include .github *.yml
+include CHANGELOG.md CONTRIBUTING.md LANDSCAPE.md SECURITY.md action.yml
+include scripts/installed_wheel_smoke.py scripts/verify_release_artifacts.py
+include test_*.py
+include validate_v01.py chain_demo.py adversarial.py adaptive.py capability_demo.py agent_demo.py resolve_live.py
+include trusted_choice_demo.py

@@ -25,6 +25,10 @@ schema. The next evidence milestones are to expand that public corpus, obtain
 reviewed redacted reports, and express compatible scenarios in AgentDojo where
 practical.
 
+The [`agentdojo/`](agentdojo/) exercise is the first source-pinned half-step:
+it exports and scans all four public AgentDojo tool suites without running an
+agent or claiming an attack benchmark result.
+
 ## v0.9.0 baseline
 
 | Measure | Result |

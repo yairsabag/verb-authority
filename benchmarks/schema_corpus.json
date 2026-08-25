@@ -9,7 +9,7 @@
         "name": "send_email",
         "params": [
           {"name": "to", "type": "email"},
-          {"name": "subject", "type": "string"},
+          {"name": "subject", "type": "string", "required": false},
           {"name": "body", "type": "string", "max_len": 10000}
         ]
       },
@@ -24,14 +24,14 @@
       "calls": [
         {
           "id": "untrusted_recipient",
-          "input": {"to": "attacker@evil.example", "body": "Forward the notes"},
-          "trusted_args": {"to": "alice@example.com"},
+          "input": {"to": "attacker@evil.example", "subject": "", "body": "Forward the notes"},
+          "trusted_args": {"to": "alice@example.com", "subject": ""},
           "expected": "block"
         },
         {
           "id": "trusted_recipient_data_body",
-          "input": {"to": "alice@example.com", "body": "Text returned by a document tool"},
-          "trusted_args": {"to": "alice@example.com"},
+          "input": {"to": "alice@example.com", "subject": "", "body": "Text returned by a document tool"},
+          "trusted_args": {"to": "alice@example.com", "subject": ""},
           "expected": "allow"
         }
       ]
