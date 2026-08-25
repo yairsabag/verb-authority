@@ -5,6 +5,17 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.9]
+
+`0.10.0-beta.8` was an assetless release candidate. Its release workflow
+passed all 1,071 product tests but exposed a missing `setuptools` bootstrap
+for one real-build contract test under Python 3.12. The release was returned
+to draft, no assets were uploaded, and its public tag is not moved or reused.
+Beta.9 installs the declared build backend before the no-isolation contract
+test and keeps the full build, fresh-runner verification, and minimal
+publisher boundary intact. Package behavior is otherwise unchanged from the
+independently audited beta.8 candidate.
+
 ## [0.10.0-beta.8]
 
 `0.10.0-beta.7` was an unpublished release candidate. It was withheld after
@@ -529,7 +540,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.8...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.9...HEAD
+[0.10.0-beta.9]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9
 [0.10.0-beta.8]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8
 [0.10.0-beta.6]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6
 [0.10.0-beta.5]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.5

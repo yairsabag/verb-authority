@@ -29,7 +29,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install package and test dependency
-        run: python -m pip install ".[dev]"
+        run: python -m pip install "setuptools>=77" ".[dev]"
 
       - name: Run complete test suite
         run: python -m pytest -v
@@ -180,7 +180,7 @@ jobs:
           printf 'RELEASE_VERIFIER=%s\n' "$verifier" >> "$GITHUB_ENV"
 
       - name: Install build frontend
-        run: python -m pip install "build>=1.2,<2"
+        run: python -m pip install "build>=1.2,<2" "setuptools>=77"
 
       - name: Build source distribution
         run: python -m build --sdist

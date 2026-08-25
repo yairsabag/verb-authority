@@ -2676,7 +2676,7 @@ def _raw_callable_shape(
     ``inspect.signature`` normally honors caller-controlled ``__signature__``
     and follows ``__wrapped__``. Neither is execution evidence. Explicit
     ``__signature__`` metadata is rejected and wrapping is deliberately not
-    followed. Beta.8 accepts only exact Python functions. Bound methods,
+    followed. Beta.9 accepts only exact Python functions. Bound methods,
     callable objects, and opaque builtin/extension callables carry receiver or
     implementation state that is not a declared tool argument, so they fail
     closed.

@@ -170,7 +170,7 @@ jobs:
             --source-commit "$SOURCE_COMMIT"
 
       - name: Install build frontend
-        run: python -m pip install "build>=1.2,<2"
+        run: python -m pip install "build>=1.2,<2" "setuptools>=77"
 
       - name: Build source distribution
         run: python -m build --sdist

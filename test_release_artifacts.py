@@ -31,7 +31,7 @@ from scripts.verify_release_artifacts import (  # noqa: E402
 
 
 PROJECT_NAME = "verb-authority"
-PROJECT_VERSION = "0.10.0b8"
+PROJECT_VERSION = "0.10.0b9"
 ARTIFACT_NAME = "verb_authority"
 MODULES = ("verb_authority", "verb_authority_scan", "verb_authority_diff")
 SCRIPTS = {
@@ -499,20 +499,20 @@ def _rewrite_sdist(
     sdist.write_bytes(buffer.getvalue())
 
 
-def test_beta_8_tag_matches_project_version(tmp_path):
+def test_beta_9_tag_matches_project_version(tmp_path):
     project_path = _write_project(tmp_path)
 
-    assert verify_tag(project_path, "v0.10.0-beta.8") == (
+    assert verify_tag(project_path, "v0.10.0-beta.9") == (
         PROJECT_NAME,
         PROJECT_VERSION,
     )
 
 
-def test_beta_7_tag_is_rejected_for_beta_8_project(tmp_path):
+def test_beta_8_tag_is_rejected_for_beta_9_project(tmp_path):
     project_path = _write_project(tmp_path)
 
-    with pytest.raises(VerificationError, match="0.10.0b7.*0.10.0b8"):
-        verify_tag(project_path, "v0.10.0-beta.7")
+    with pytest.raises(VerificationError, match="0.10.0b8.*0.10.0b9"):
+        verify_tag(project_path, "v0.10.0-beta.8")
 
 
 def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
@@ -521,7 +521,7 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
     assert verify_artifacts(
         project_path,
         wheel.parent,
-        "v0.10.0-beta.8",
+        "v0.10.0-beta.9",
     ) == (wheel, sdist)
 
 
@@ -564,7 +564,7 @@ def test_normalized_internal_wheel_dist_info_root_is_accepted(tmp_path):
     dist.mkdir()
     wheel = _write_wheel(
         dist,
-        internal_dist_info_name="verb_authority-0.10.0b8.dist-info",
+        internal_dist_info_name="verb_authority-0.10.0b9.dist-info",
     )
     sdist = _write_sdist(dist)
 
@@ -595,7 +595,7 @@ def test_normalized_internal_sdist_root_is_accepted(tmp_path):
     wheel = _write_wheel(dist)
     sdist = _write_sdist(
         dist,
-        internal_root_name="verb_authority-0.10.0b8",
+        internal_root_name="verb_authority-0.10.0b9",
     )
 
     assert verify_artifacts(project_path, dist) == (wheel, sdist)
@@ -607,7 +607,7 @@ def test_pre_extraction_sdist_verifier_accepts_sole_valid_archive(tmp_path):
     dist.mkdir()
     sdist = _write_sdist(dist)
 
-    assert verify_sdist(project_path, dist, "v0.10.0-beta.8") == sdist
+    assert verify_sdist(project_path, dist, "v0.10.0-beta.9") == sdist
     assert (
         main(
             [
@@ -617,7 +617,7 @@ def test_pre_extraction_sdist_verifier_accepts_sole_valid_archive(tmp_path):
                 "--dist",
                 str(dist),
                 "--tag",
-                "v0.10.0-beta.8",
+                "v0.10.0-beta.9",
                 "--allow-mutable-source",
             ]
         )
@@ -683,7 +683,7 @@ def test_wrong_internal_sdist_root_is_rejected(tmp_path):
 
     with pytest.raises(
         VerificationError,
-        match="source-distribution root.*verb_authority-0.10.0b8",
+        match="source-distribution root.*verb_authority-0.10.0b9",
     ):
         verify_artifacts(project_path, dist)
 
@@ -695,7 +695,7 @@ def test_sdist_member_path_cannot_escape_expected_root(tmp_path):
     _write_wheel(dist)
     _write_sdist(
         dist,
-        extra_member_name="verb_authority-0.10.0b8/../escape.txt",
+        extra_member_name="verb_authority-0.10.0b9/../escape.txt",
     )
 
     with pytest.raises(VerificationError, match="unsafe or (?:unexpected|ambiguous) member path"):
@@ -1276,6 +1276,9 @@ def test_workflows_use_bounded_extractor_instead_of_command_line_tar():
         assert '--source-commit "$SOURCE_COMMIT"' in text
         assert '$SDIST_ROOT/scripts/verify_release_artifacts.py" artifacts' not in text
         assert 'python -I scripts/verify_release_artifacts.py artifacts' not in text
+        assert (
+            'python -m pip install "build>=1.2,<2" "setuptools>=77"' in text
+        )
 
 
 def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
@@ -1957,7 +1960,7 @@ def test_artifact_filename_version_must_match_project(tmp_path):
         wheel.with_name(wheel.name.replace(PROJECT_VERSION, "0.10.0b7", 1))
     )
 
-    with pytest.raises(VerificationError, match="wheel filename.*0.10.0b8"):
+    with pytest.raises(VerificationError, match="wheel filename.*0.10.0b9"):
         verify_artifacts(project_path, wheel.parent)
 
 
@@ -2903,7 +2906,7 @@ def test_post_build_tracked_mutation_cannot_redefine_source_bytes(tmp_path):
 def test_release_tag_must_point_to_exact_source_commit(tmp_path):
     project_path = _write_project(tmp_path)
     tagged_commit = _commit_test_project(tmp_path)
-    _git(tmp_path, "tag", "v0.10.0-beta.8", tagged_commit)
+    _git(tmp_path, "tag", "v0.10.0-beta.9", tagged_commit)
     (tmp_path / "verb_authority.py").write_text(
         'VALUE = "second commit"\n',
         encoding="utf-8",
@@ -2915,7 +2918,7 @@ def test_release_tag_must_point_to_exact_source_commit(tmp_path):
     with pytest.raises(VerificationError, match="does not point.*source commit"):
         verify_tag(
             project_path,
-            "v0.10.0-beta.8",
+            "v0.10.0-beta.9",
             repository=tmp_path,
             source_commit=later_commit,
         )
