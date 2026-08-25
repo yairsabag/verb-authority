@@ -1,4 +1,4 @@
-"""Installed-wheel audit smoke for the beta.9 release boundary.
+"""Installed-wheel audit smoke for the beta.10 release boundary.
 
 Run this copy from outside the source checkout after installing the wheel. The
 checks intentionally repeat all audited blocker families, then exercise the

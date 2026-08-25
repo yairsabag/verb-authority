@@ -5,6 +5,16 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+## [0.10.0-beta.10]
+
+`0.10.0-beta.9` was an assetless release candidate. Its build job passed the
+complete suite and produced valid distributions, but the fresh-runner verifier
+correctly rejected candidate-download and verification directories created
+inside the Git worktree as untracked source selection. The release was returned
+to draft, no assets were uploaded, and its public tag is not moved or reused.
+Beta.10 keeps all download, verification, and staging directories under the
+isolated runner temporary directory, outside the trusted checkout.
+
 ## [0.10.0-beta.9]
 
 `0.10.0-beta.8` was an assetless release candidate. Its release workflow
@@ -540,7 +550,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.9...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.10...HEAD
+[0.10.0-beta.10]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10
 [0.10.0-beta.9]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9
 [0.10.0-beta.8]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8
 [0.10.0-beta.6]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6

@@ -50,14 +50,14 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.9"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.10"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.9 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9)
+The [beta.10 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
@@ -147,7 +147,7 @@ that value before the gate. A protected materialized value must also appear,
 with the same exact JSON type and value, in `trusted_args`. `required=False`
 is retained as beta schema/API metadata; it is not permission to execute an
 implicit default. The runner also rejects registered callables that consume an
-undeclared parameter or rely on an undeclared default. Beta.9 accepts only an
+undeclared parameter or rely on an undeclared default. Beta.10 accepts only an
 exact plain Python function as an implementation. Bound methods, callable
 instances or classes, builtins, and partials are rejected because their hidden
 receiver or bound state is not a declared tool argument; materialize that
@@ -594,7 +594,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.9
+- uses: yairsabag/verb-authority@v0.10.0-beta.10
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -620,7 +620,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.9
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.10
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
@@ -852,9 +852,9 @@ those deeper systems rather than this module.
 ## Project status
 
 v0.9.0 is the latest stable release. This source tree describes
-v0.10.0-beta.9 for the local schema scanner, control evidence, Authority Diff,
-Tool Authority Atlas, and runtime-integration boundary; beta.7 and beta.8 were
-withheld and are not reused.
+v0.10.0-beta.10 for the local schema scanner, control evidence, Authority Diff,
+Tool Authority Atlas, and runtime-integration boundary; beta.7, beta.8, and
+beta.9 were withheld and are not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

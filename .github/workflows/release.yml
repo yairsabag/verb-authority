@@ -483,22 +483,25 @@ jobs:
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.candidate_artifact_id }}
-          path: incoming
+          path: ${{ runner.temp }}/incoming
           merge-multiple: false
           digest-mismatch: error
 
       - name: Verify, checksum, and stage the exact release file set
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INCOMING_DIR: ${{ runner.temp }}/incoming
+          VERIFY_DIST_DIR: ${{ runner.temp }}/verify-dist
+          STAGED_DIR: ${{ runner.temp }}/staged
         run: |
           shopt -s nullglob dotglob
-          entries=(incoming/*)
-          wheels=(incoming/*.whl)
-          sdists=(incoming/*.tar.gz)
+          entries=("$INCOMING_DIR"/*)
+          wheels=("$INCOMING_DIR"/*.whl)
+          sdists=("$INCOMING_DIR"/*.tar.gz)
           test "${#entries[@]}" -eq 3
           test "${#wheels[@]}" -eq 1
           test "${#sdists[@]}" -eq 1
-          for candidate in "${wheels[0]}" "${sdists[0]}" incoming/SHA256SUMS; do
+          for candidate in "${wheels[0]}" "${sdists[0]}" "$INCOMING_DIR/SHA256SUMS"; do
             test -f "$candidate"
             test ! -L "$candidate"
           done
@@ -506,29 +509,29 @@ jobs:
           sdist_name=$(basename "${sdists[0]}")
           expected=$(mktemp)
           (
-            cd incoming
+            cd "$INCOMING_DIR"
             LC_ALL=C sha256sum -- "$wheel_name" "$sdist_name"
           ) > "$expected"
-          cmp -s "$expected" incoming/SHA256SUMS
+          cmp -s "$expected" "$INCOMING_DIR/SHA256SUMS"
 
-          mkdir verify-dist
-          install -m 0644 -- "${wheels[0]}" "verify-dist/$wheel_name"
-          install -m 0644 -- "${sdists[0]}" "verify-dist/$sdist_name"
+          mkdir -- "$VERIFY_DIST_DIR"
+          install -m 0644 -- "${wheels[0]}" "$VERIFY_DIST_DIR/$wheel_name"
+          install -m 0644 -- "${sdists[0]}" "$VERIFY_DIST_DIR/$sdist_name"
           "$RELEASE_PYTHON" -I "$RELEASE_VERIFIER" artifacts \
             --project pyproject.toml \
-            --dist verify-dist \
+            --dist "$VERIFY_DIST_DIR" \
             --tag "$RELEASE_TAG" \
             --repository "${{ github.workspace }}" \
             --source-commit "$SOURCE_COMMIT"
 
-          mkdir staged
-          install -m 0644 -- "verify-dist/$wheel_name" "staged/$wheel_name"
-          install -m 0644 -- "verify-dist/$sdist_name" "staged/$sdist_name"
+          mkdir -- "$STAGED_DIR"
+          install -m 0644 -- "$VERIFY_DIST_DIR/$wheel_name" "$STAGED_DIR/$wheel_name"
+          install -m 0644 -- "$VERIFY_DIST_DIR/$sdist_name" "$STAGED_DIR/$sdist_name"
           (
-            cd staged
+            cd "$STAGED_DIR"
             LC_ALL=C sha256sum -- "$wheel_name" "$sdist_name"
-          ) > staged/SHA256SUMS
-          cmp -s incoming/SHA256SUMS staged/SHA256SUMS
+          ) > "$STAGED_DIR/SHA256SUMS"
+          cmp -s "$INCOMING_DIR/SHA256SUMS" "$STAGED_DIR/SHA256SUMS"
 
       - name: Preserve only freshly verified release assets
         id: upload_verified
@@ -536,9 +539,9 @@ jobs:
         with:
           name: verified-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            staged/*.whl
-            staged/*.tar.gz
-            staged/SHA256SUMS
+            ${{ runner.temp }}/staged/*.whl
+            ${{ runner.temp }}/staged/*.tar.gz
+            ${{ runner.temp }}/staged/SHA256SUMS
           if-no-files-found: error
           retention-days: 1
           compression-level: 0

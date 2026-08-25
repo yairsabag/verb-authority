@@ -31,7 +31,7 @@ from scripts.verify_release_artifacts import (  # noqa: E402
 
 
 PROJECT_NAME = "verb-authority"
-PROJECT_VERSION = "0.10.0b9"
+PROJECT_VERSION = "0.10.0b10"
 ARTIFACT_NAME = "verb_authority"
 MODULES = ("verb_authority", "verb_authority_scan", "verb_authority_diff")
 SCRIPTS = {
@@ -499,20 +499,20 @@ def _rewrite_sdist(
     sdist.write_bytes(buffer.getvalue())
 
 
-def test_beta_9_tag_matches_project_version(tmp_path):
+def test_beta_10_tag_matches_project_version(tmp_path):
     project_path = _write_project(tmp_path)
 
-    assert verify_tag(project_path, "v0.10.0-beta.9") == (
+    assert verify_tag(project_path, "v0.10.0-beta.10") == (
         PROJECT_NAME,
         PROJECT_VERSION,
     )
 
 
-def test_beta_8_tag_is_rejected_for_beta_9_project(tmp_path):
+def test_beta_9_tag_is_rejected_for_beta_10_project(tmp_path):
     project_path = _write_project(tmp_path)
 
-    with pytest.raises(VerificationError, match="0.10.0b8.*0.10.0b9"):
-        verify_tag(project_path, "v0.10.0-beta.8")
+    with pytest.raises(VerificationError, match="0.10.0b9.*0.10.0b10"):
+        verify_tag(project_path, "v0.10.0-beta.9")
 
 
 def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
@@ -521,7 +521,7 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
     assert verify_artifacts(
         project_path,
         wheel.parent,
-        "v0.10.0-beta.9",
+        "v0.10.0-beta.10",
     ) == (wheel, sdist)
 
 
@@ -564,7 +564,7 @@ def test_normalized_internal_wheel_dist_info_root_is_accepted(tmp_path):
     dist.mkdir()
     wheel = _write_wheel(
         dist,
-        internal_dist_info_name="verb_authority-0.10.0b9.dist-info",
+        internal_dist_info_name="verb_authority-0.10.0b10.dist-info",
     )
     sdist = _write_sdist(dist)
 
@@ -595,7 +595,7 @@ def test_normalized_internal_sdist_root_is_accepted(tmp_path):
     wheel = _write_wheel(dist)
     sdist = _write_sdist(
         dist,
-        internal_root_name="verb_authority-0.10.0b9",
+        internal_root_name="verb_authority-0.10.0b10",
     )
 
     assert verify_artifacts(project_path, dist) == (wheel, sdist)
@@ -607,7 +607,7 @@ def test_pre_extraction_sdist_verifier_accepts_sole_valid_archive(tmp_path):
     dist.mkdir()
     sdist = _write_sdist(dist)
 
-    assert verify_sdist(project_path, dist, "v0.10.0-beta.9") == sdist
+    assert verify_sdist(project_path, dist, "v0.10.0-beta.10") == sdist
     assert (
         main(
             [
@@ -617,7 +617,7 @@ def test_pre_extraction_sdist_verifier_accepts_sole_valid_archive(tmp_path):
                 "--dist",
                 str(dist),
                 "--tag",
-                "v0.10.0-beta.9",
+                "v0.10.0-beta.10",
                 "--allow-mutable-source",
             ]
         )
@@ -683,7 +683,7 @@ def test_wrong_internal_sdist_root_is_rejected(tmp_path):
 
     with pytest.raises(
         VerificationError,
-        match="source-distribution root.*verb_authority-0.10.0b9",
+        match="source-distribution root.*verb_authority-0.10.0b10",
     ):
         verify_artifacts(project_path, dist)
 
@@ -695,7 +695,7 @@ def test_sdist_member_path_cannot_escape_expected_root(tmp_path):
     _write_wheel(dist)
     _write_sdist(
         dist,
-        extra_member_name="verb_authority-0.10.0b9/../escape.txt",
+        extra_member_name="verb_authority-0.10.0b10/../escape.txt",
     )
 
     with pytest.raises(VerificationError, match="unsafe or (?:unexpected|ambiguous) member path"):
@@ -1358,6 +1358,7 @@ def test_release_candidate_is_reverified_on_a_fresh_read_only_runner():
     assert "persist-credentials: false" in verify
     assert "actions/download-artifact@" in verify
     assert "artifact-ids: ${{ needs.build.outputs.candidate_artifact_id }}" in verify
+    assert "path: ${{ runner.temp }}/incoming" in verify
     assert "merge-multiple: false" in verify
     assert "digest-mismatch: error" in verify
     assert "CANDIDATE_ARTIFACT_DIGEST" in verify
@@ -1367,10 +1368,38 @@ def test_release_candidate_is_reverified_on_a_fresh_read_only_runner():
     assert "python -m pytest" not in verify
     assert "installed_wheel_smoke" not in verify
     assert '"$RELEASE_PYTHON" -I "$RELEASE_VERIFIER" artifacts' in verify
+    assert 'INCOMING_DIR: ${{ runner.temp }}/incoming' in verify
+    assert 'VERIFY_DIST_DIR: ${{ runner.temp }}/verify-dist' in verify
+    assert 'STAGED_DIR: ${{ runner.temp }}/staged' in verify
+    assert 'entries=("$INCOMING_DIR"/*)' in verify
+    assert 'wheels=("$INCOMING_DIR"/*.whl)' in verify
+    assert 'sdists=("$INCOMING_DIR"/*.tar.gz)' in verify
+    assert 'mkdir -- "$VERIFY_DIST_DIR"' in verify
+    assert 'install -m 0644 -- "${wheels[0]}" "$VERIFY_DIST_DIR/$wheel_name"' in verify
+    assert 'install -m 0644 -- "${sdists[0]}" "$VERIFY_DIST_DIR/$sdist_name"' in verify
+    assert '--dist "$VERIFY_DIST_DIR"' in verify
+    assert 'mkdir -- "$STAGED_DIR"' in verify
+    assert 'install -m 0644 -- "$VERIFY_DIST_DIR/$wheel_name" "$STAGED_DIR/$wheel_name"' in verify
+    assert 'install -m 0644 -- "$VERIFY_DIST_DIR/$sdist_name" "$STAGED_DIR/$sdist_name"' in verify
     assert "--repository \"${{ github.workspace }}\"" in verify
     assert '--source-commit "$SOURCE_COMMIT"' in verify
     assert 'test "${#entries[@]}" -eq 3' in verify
-    assert "cmp -s incoming/SHA256SUMS staged/SHA256SUMS" in verify
+    assert 'cmp -s "$INCOMING_DIR/SHA256SUMS" "$STAGED_DIR/SHA256SUMS"' in verify
+    for staged_path in (
+        "${{ runner.temp }}/staged/*.whl",
+        "${{ runner.temp }}/staged/*.tar.gz",
+        "${{ runner.temp }}/staged/SHA256SUMS",
+    ):
+        assert staged_path in verify
+    for old_path in (
+        "path: incoming",
+        "entries=(incoming/*)",
+        "--dist verify-dist",
+        "staged/*.whl",
+        "staged/*.tar.gz",
+        "staged/SHA256SUMS",
+    ):
+        assert f"            {old_path}" not in verify
     assert "id: upload_verified" in verify
     assert "verified_artifact_id:" in verify
     assert "verified_artifact_digest:" in verify
@@ -1960,7 +1989,7 @@ def test_artifact_filename_version_must_match_project(tmp_path):
         wheel.with_name(wheel.name.replace(PROJECT_VERSION, "0.10.0b7", 1))
     )
 
-    with pytest.raises(VerificationError, match="wheel filename.*0.10.0b9"):
+    with pytest.raises(VerificationError, match="wheel filename.*0.10.0b10"):
         verify_artifacts(project_path, wheel.parent)
 
 
@@ -2903,10 +2932,36 @@ def test_post_build_tracked_mutation_cannot_redefine_source_bytes(tmp_path):
         )
 
 
+def test_immutable_verifier_accepts_distribution_staging_outside_worktree(
+    tmp_path,
+):
+    repository = tmp_path / "checkout"
+    repository.mkdir()
+    project_path = _write_project(repository)
+    source_commit = _commit_test_project(repository)
+    build_dist = repository / "dist"
+    build_dist.mkdir()
+    built_wheel = _write_wheel(build_dist)
+    built_sdist = _write_sdist(build_dist)
+    dist = tmp_path / "runner-temp" / "verify-dist"
+    dist.mkdir(parents=True)
+    wheel = dist / built_wheel.name
+    sdist = dist / built_sdist.name
+    wheel.write_bytes(built_wheel.read_bytes())
+    sdist.write_bytes(built_sdist.read_bytes())
+
+    assert verify_artifacts(
+        project_path,
+        dist,
+        repository=repository,
+        source_commit=source_commit,
+    ) == (wheel, sdist)
+
+
 def test_release_tag_must_point_to_exact_source_commit(tmp_path):
     project_path = _write_project(tmp_path)
     tagged_commit = _commit_test_project(tmp_path)
-    _git(tmp_path, "tag", "v0.10.0-beta.9", tagged_commit)
+    _git(tmp_path, "tag", "v0.10.0-beta.10", tagged_commit)
     (tmp_path / "verb_authority.py").write_text(
         'VALUE = "second commit"\n',
         encoding="utf-8",
@@ -2918,7 +2973,7 @@ def test_release_tag_must_point_to_exact_source_commit(tmp_path):
     with pytest.raises(VerificationError, match="does not point.*source commit"):
         verify_tag(
             project_path,
-            "v0.10.0-beta.9",
+            "v0.10.0-beta.10",
             repository=tmp_path,
             source_commit=later_commit,
         )
