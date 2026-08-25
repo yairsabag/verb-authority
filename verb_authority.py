@@ -383,12 +383,18 @@ _RISK_TOKENS: list[tuple[Risk, frozenset[str]]] = [
 NEEDS_CONFIRM = {Risk.UNKNOWN, Risk.FINANCIAL, Risk.DESTRUCTIVE, Risk.CODE_EXEC}
 
 
-def _tool_name_tokens(tool_name: str) -> tuple[str, ...]:
-    return _identifier_tokens(tool_name)
+def _tool_name_tokens(
+    tool_name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> tuple[str, ...]:
+    return _identifier_tokens(tool_name, _context)
 
 
-def infer_risk(tool_name: str) -> RiskAssessment:
-    tokens = _tool_name_tokens(tool_name)
+def infer_risk(
+    tool_name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> RiskAssessment:
+    tokens = _tool_name_tokens(tool_name, _context)
     for risk, candidates in _RISK_TOKENS:
         matched = tuple(token for token in tokens if token in candidates)
         if matched:
@@ -977,10 +983,8 @@ def build_policy(
     policy, risk, review, confirm = {}, {}, [], []
     risk_inference, risk_review, risk_conflicts = {}, [], []
     for name, tool in reg.tools.items():
-        inferred = infer_risk(name)
-        declared = tool.risk
-        if isinstance(declared, str):
-            declared = Risk(declared)
+        inferred = infer_risk(name, inference_context)
+        declared = _normalize_declared_risk(tool.risk)
         conflict = declared is not None and inferred.risk is not Risk.UNKNOWN and declared is not inferred.risk
         # A caller-mutable name cannot establish runtime behavior. Keep the
         # effective tier unknown until the application makes a declaration.
@@ -2528,10 +2532,15 @@ def _normalize_declared_risk(value: Risk | str | None) -> Risk | None:
     if value is None:
         return None
     if isinstance(value, Risk):
-        return value
-    if type(value) is str:
-        return Risk(value)
-    raise TypeError("tool risk must be a Risk, string, or None")
+        normalized = value
+    elif type(value) is str:
+        normalized = Risk(value)
+    else:
+        raise TypeError("tool risk must be a Risk, string, or None")
+    # UNKNOWN is the fail-closed absence of an established application claim,
+    # not a declaration that can resolve review. Treating it exactly like an
+    # omitted tier preserves the unknown => review-and-confirm invariant.
+    return None if normalized is Risk.UNKNOWN else normalized
 
 
 @dataclass(frozen=True)
@@ -2807,7 +2816,7 @@ def _freeze_policy_set(
     expected_risk_conflicts: list[str] = []
     inference_context = _PolicyInferenceContext()
     for tool_name, tool in registry.tools.items():
-        inferred = infer_risk(tool_name)
+        inferred = infer_risk(tool_name, inference_context)
         conflict = (
             tool.risk is not None
             and inferred.risk is not Risk.UNKNOWN

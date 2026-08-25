@@ -355,6 +355,48 @@ def test_openai_responses_direct_function_uses_parameters_schema():
     }
 
 
+def test_type_less_legacy_direct_function_with_parameters_remains_valid():
+    definitions = parse_tool_definitions(
+        {
+            "name": "legacy_send_message",
+            "parameters": {
+                "type": "object",
+                "properties": {"recipient": {"type": "string"}},
+            },
+        }
+    )
+
+    assert definitions[0].name == "legacy_send_message"
+    assert definitions[0].input_schema["properties"] == {
+        "recipient": {"type": "string"}
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_type",
+    ("functoin", 7),
+    ids=("misspelled-string", "non-string"),
+)
+def test_openai_responses_direct_parameters_reject_explicit_non_function_type(
+    invalid_type,
+):
+    document = {
+        "tools": [
+            {
+                "type": invalid_type,
+                "name": "send_message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(SchemaError, match="must use type 'function'"):
+        parse_tool_definitions(document)
+
+
 def test_top_level_name_metadata_does_not_compete_with_tools_envelope():
     definitions = parse_tool_definitions(
         {

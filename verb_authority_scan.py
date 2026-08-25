@@ -685,6 +685,15 @@ def _tool_from_mapping(
         annotations = raw.get("annotations", {})
     else:
         name = raw.get("name")
+        if (
+            "parameters" in raw
+            and "type" in raw
+            and raw["type"] != "function"
+        ):
+            raise SchemaError(
+                "direct OpenAI function tool definition with 'parameters' "
+                "must use type 'function'"
+            )
         responses_function = raw.get("type") == "function"
         schema = _select_schema_alias(
             raw,

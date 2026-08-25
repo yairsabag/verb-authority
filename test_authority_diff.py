@@ -816,6 +816,40 @@ def test_diff_loader_accepts_openai_responses_direct_schema(tmp_path):
     assert report["tools"][0]["arguments"][0]["name"] == "amount"
 
 
+@pytest.mark.parametrize(
+    "invalid_type",
+    ("functoin", 7),
+    ids=("misspelled-string", "non-string"),
+)
+def test_raw_diff_rejects_direct_openai_parameters_with_non_function_type(
+    tmp_path, capsys, invalid_type
+):
+    before = {
+        "tools": [
+            {
+                "type": "function",
+                "name": "set_limit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"amount": {"type": "number"}},
+                },
+            }
+        ]
+    }
+    after = copy.deepcopy(before)
+    after["tools"][0]["type"] = invalid_type
+    before_path = tmp_path / "before-valid-responses.json"
+    after_path = tmp_path / "after-invalid-responses.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(before_path), str(after_path), "--fail-on-review"])
+
+    assert exc_info.value.code == 2
+    assert "must use type 'function'" in capsys.readouterr().err
+
+
 def test_diff_loader_accepts_openai_zero_argument_function(tmp_path):
     document = {
         "tools": [{"type": "function", "name": "read_status"}]

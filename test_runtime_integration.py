@@ -80,6 +80,54 @@ def _run_resolved_email(runner, resolver, requested_contact, body):
     return resolution, execution
 
 
+def test_frozen_policy_keeps_explicit_unknown_in_review_and_confirmation():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "evaluate",
+            [],
+            fn=lambda: None,
+            risk=Risk.UNKNOWN,
+        )
+    )
+
+    runner = GuardedToolRunner(registry, build_policy(registry))
+
+    assert runner.policy_set.risk["evaluate"] is Risk.UNKNOWN
+    assert runner.policy_set.risk_review == ("evaluate",)
+    assert runner.policy_set.confirm == ("evaluate",)
+    assert runner.policy_set.risk_conflicts == ()
+
+
+def test_frozen_policy_validation_shares_tool_name_normalization_budget(
+    monkeypatch,
+):
+    registry = Registry()
+    for index in range(65):
+        name = chr(0x500 + index) + ("é" * 511)
+        registry.add(Tool(name, [], risk=Risk.READ_ONLY))
+    policy_set = build_policy(registry)
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+    calls = []
+    original = authority.unicodedata.normalize
+
+    def counted(form, value):
+        calls.append((form, value))
+        return original(form, value)
+
+    monkeypatch.setattr(authority.unicodedata, "normalize", counted)
+
+    authority._freeze_policy_set(policy_set, frozen_registry)
+
+    assert len(calls) == (
+        authority.MAX_NFKC_OPERATION_CHARS
+        // authority.MAX_IDENTIFIER_INFERENCE_CHARS
+    )
+
+
 def test_resolver_returns_canonical_value_and_evidence():
     resolution = _contacts().resolve("  dANA ")
 

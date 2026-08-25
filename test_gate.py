@@ -770,6 +770,48 @@ def test_explicit_risk_declaration_controls_runtime_policy():
     assert "place_bid" in policy_set.confirm
 
 
+@pytest.mark.parametrize("declared", [Risk.UNKNOWN, "unknown"])
+def test_explicit_unknown_risk_remains_unresolved_for_review(declared):
+    registry = Registry()
+    registry.add(Tool("evaluate", [], risk=declared))
+
+    policy_set = build_policy(registry)
+
+    assert policy_set.risk["evaluate"] is Risk.UNKNOWN
+    assert "evaluate" in policy_set.risk_review
+    assert "evaluate" in policy_set.confirm
+    assert "evaluate" not in policy_set.risk_conflicts
+
+
+def test_tool_name_normalization_shares_the_policy_operation_budget(monkeypatch):
+    registry = Registry()
+    for index in range(65):
+        name = chr(0x400 + index) + ("é" * 511)
+        assert len(name) == authority.MAX_IDENTIFIER_INFERENCE_CHARS
+        registry.add(Tool(name, [], risk=Risk.READ_ONLY))
+
+    calls = []
+    original = authority.unicodedata.normalize
+
+    def counted(form, value):
+        calls.append((form, value))
+        return original(form, value)
+
+    monkeypatch.setattr(authority.unicodedata, "normalize", counted)
+
+    policy_set = build_policy(registry)
+
+    assert len(calls) == (
+        authority.MAX_NFKC_OPERATION_CHARS
+        // authority.MAX_IDENTIFIER_INFERENCE_CHARS
+    )
+    assert len(policy_set.risk_inference) == 65
+    assert all(
+        assessment.risk is Risk.UNKNOWN
+        for assessment in policy_set.risk_inference.values()
+    )
+
+
 def test_lower_risk_declaration_keeps_confirmation_on_name_conflict():
     registry = Registry()
     registry.add(

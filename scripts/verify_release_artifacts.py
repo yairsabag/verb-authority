@@ -354,6 +354,21 @@ class _BoundedTarInfo(tarfile.TarInfo):
     """Count raw and recursively nested tar extension headers."""
 
     def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        # GNU longname/longlink headers are consumed recursively by tarfile
+        # before the resulting member reaches the manifest-validation loop.
+        # Consecutive headers can therefore create a parser differential: the
+        # stdlib reports the outer value while another extractor can apply the
+        # inner value.  Release sdists do not need either GNU extension, so
+        # reject them at the raw-header boundary before reading or applying
+        # their payload.
+        if self.type == tarfile.GNUTYPE_LONGNAME:
+            raise VerificationError(
+                "source distribution contains a GNU longname header"
+            )
+        if self.type == tarfile.GNUTYPE_LONGLINK:
+            raise VerificationError(
+                "source distribution contains a GNU longlink header"
+            )
         # Global PAX state changes the interpretation of every later raw
         # header.  In particular, a global ``size`` override creates a parser
         # differential between Python's streaming reader and command-line tar
@@ -375,8 +390,6 @@ class _BoundedTarInfo(tarfile.TarInfo):
             tarfile.XHDTYPE,
             tarfile.XGLTYPE,
             tarfile.SOLARIS_XHDTYPE,
-            tarfile.GNUTYPE_LONGNAME,
-            tarfile.GNUTYPE_LONGLINK,
         } and (self.size < 0 or self.size > MAX_SDIST_EXTENSION_BYTES):
             raise VerificationError(
                 "source distribution extension header exceeds the size limit"

@@ -406,6 +406,22 @@ def _gzip_sdist_payload(sdist: Path, payload: bytes) -> None:
     sdist.write_bytes(buffer.getvalue())
 
 
+def _insert_raw_tar_before_member(
+    sdist: Path,
+    member_name: str,
+    raw_headers: bytes,
+) -> None:
+    payload = gzip.decompress(sdist.read_bytes())
+    member_offset = payload.index(member_name.encode("utf-8") + b"\0")
+    assert member_offset % tarfile.BLOCKSIZE == 0
+    rewritten = payload[:member_offset] + raw_headers + payload[member_offset:]
+    rewritten += b"\0" * ((-len(rewritten)) % tarfile.RECORDSIZE)
+    _gzip_sdist_payload(
+        sdist,
+        rewritten,
+    )
+
+
 def _rewrite_sdist(
     sdist: Path,
     *,
@@ -850,6 +866,74 @@ def test_sdist_rejects_nested_extension_headers_before_python_recursion_limit(
 
     with pytest.raises(VerificationError, match="nested-header-depth limit"):
         verify_artifacts(project_path, dist)
+
+
+def test_sdist_rejects_nested_gnu_longname_parser_differential(tmp_path):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    exact_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/LICENSE"
+    traversal_name = "../VERB-AUTHORITY-BSDTAR-ESCAPE"
+    outer_payload = exact_member.encode("utf-8") + b"\0"
+    inner_payload = traversal_name.encode("utf-8") + b"\0"
+    outer = tarfile.TarInfo("././@LongLink")
+    outer.type = tarfile.GNUTYPE_LONGNAME
+    outer.size = len(outer_payload)
+    inner = tarfile.TarInfo("././@LongLink")
+    inner.type = tarfile.GNUTYPE_LONGNAME
+    inner.size = len(inner_payload)
+    _insert_raw_tar_before_member(
+        sdist,
+        exact_member,
+        _tar_block(outer, outer_payload) + _tar_block(inner, inner_payload),
+    )
+
+    # Python consumes both extension headers and exposes only the safe outer
+    # name, which is why post-processed member validation alone is insufficient.
+    with tarfile.open(sdist, "r:gz") as archive:
+        names = [member.name for member in archive.getmembers()]
+    assert exact_member in names
+    assert traversal_name not in names
+
+    with pytest.raises(VerificationError, match="GNU longname header"):
+        verify_artifacts(project_path, wheel.parent)
+
+
+def test_sdist_rejects_gnu_longlink_hidden_payload(tmp_path):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    exact_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/LICENSE"
+    hidden_payload = b"uncommitted-release-control-data\0"
+    longlink = tarfile.TarInfo("././@LongLink")
+    longlink.type = tarfile.GNUTYPE_LONGLINK
+    longlink.size = len(hidden_payload)
+    _insert_raw_tar_before_member(
+        sdist,
+        exact_member,
+        _tar_block(longlink, hidden_payload),
+    )
+
+    # The GNU extension payload is not returned as a manifest member.
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert hidden_payload.rstrip(b"\0").decode("ascii") not in {
+            member.name for member in archive.getmembers()
+        }
+
+    with pytest.raises(VerificationError, match="GNU longlink header"):
+        verify_artifacts(project_path, wheel.parent)
+
+
+def test_sdist_still_accepts_local_pax_mtime_header(tmp_path):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    exact_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/LICENSE"
+    pax_payload = _pax_record("mtime", "1787637503.125")
+    local_pax = tarfile.TarInfo("././@PaxHeader")
+    local_pax.type = tarfile.XHDTYPE
+    local_pax.size = len(pax_payload)
+    _insert_raw_tar_before_member(
+        sdist,
+        exact_member,
+        _tar_block(local_pax, pax_payload),
+    )
+
+    assert verify_artifacts(project_path, wheel.parent) == (wheel, sdist)
 
 
 def test_sdist_malformed_pax_integer_fails_without_raw_value_error(tmp_path):
