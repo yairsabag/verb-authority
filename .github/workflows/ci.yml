@@ -53,16 +53,16 @@ jobs:
 
       - name: Verify source distribution before extraction
         run: |
-          python scripts/verify_release_artifacts.py sdist \
+          python -I scripts/verify_release_artifacts.py sdist \
             --project pyproject.toml \
             --dist dist
 
       - name: Extract and inspect source distribution
         run: |
-          mkdir -p "${{ runner.temp }}/verb-authority-sdist"
-          sdist_archive=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
-          test -n "$sdist_archive"
-          tar -xzf "$sdist_archive" -C "${{ runner.temp }}/verb-authority-sdist"
+          python -I scripts/verify_release_artifacts.py extract-sdist \
+            --project pyproject.toml \
+            --dist dist \
+            --output "${{ runner.temp }}/verb-authority-sdist"
           sdist_root=$(find "${{ runner.temp }}/verb-authority-sdist" \
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
@@ -83,8 +83,8 @@ jobs:
 
       - name: Verify distribution identities
         run: |
-          python "$SDIST_ROOT/scripts/verify_release_artifacts.py" artifacts \
-            --project "$SDIST_ROOT/pyproject.toml" \
+          python -I scripts/verify_release_artifacts.py artifacts \
+            --project pyproject.toml \
             --dist "${{ github.workspace }}/dist"
 
       - name: Generate and verify SHA-256 checksums
@@ -106,7 +106,7 @@ jobs:
             'Path("installed-smoke-shadow.marker").write_text("temp module imported", encoding="utf-8")' \
             'raise SystemExit(0)' \
             > verb_authority.py
-          env -u PYTHONPATH -u PYTHONHOME \
+          env -u PYTHONHOME PYTHONPATH="${{ runner.temp }}" \
             python -I -m verb_authority
           env -u PYTHONPATH -u PYTHONHOME \
             verb-authority scan --help

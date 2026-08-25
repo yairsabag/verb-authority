@@ -9,11 +9,13 @@ shared with substantially less disclosure than the original schema.
 from __future__ import annotations
 
 import argparse
+import codecs
 import copy
 import hashlib
 import html
 import json
 import math
+import re
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -28,6 +30,7 @@ from verb_authority import (
     Registry,
     Risk,
     Tool,
+    _PolicyInferenceContext,
     build_policy,
     infer_policy,
 )
@@ -137,6 +140,8 @@ _MODELED_ARGUMENT_CONSTRAINTS = frozenset({"enum", "maxLength", "maximum"})
 _SHA256_HEX_LENGTH = 64
 MAX_JSON_DEPTH = 128
 MAX_SCAN_INPUT_BYTES = 8 * 1024 * 1024
+MAX_SCAN_TOTAL_INPUT_BYTES = 16 * 1024 * 1024
+MAX_SCAN_SCHEMA_DOCUMENTS = 500
 MAX_SCAN_JSON_NODES = 100_000
 MAX_SCAN_JSON_MATERIAL_BYTES = 2 * 1024 * 1024
 MAX_SCAN_TOOL_DEFINITIONS = 500
@@ -147,6 +152,35 @@ MAX_SCAN_CONTROL_COLLECTION_MEMBERS = 2_000
 
 class SchemaError(ValueError):
     """Raised when an input does not contain recognizable tool definitions."""
+
+
+class _CLIInputBudget:
+    """Lazy raw-input budget shared by every document in one CLI scan."""
+
+    __slots__ = ("remaining_bytes", "remaining_documents")
+
+    def __init__(self) -> None:
+        limits = (MAX_SCAN_TOTAL_INPUT_BYTES, MAX_SCAN_SCHEMA_DOCUMENTS)
+        if any(type(limit) is not int or limit < 1 for limit in limits):
+            raise SchemaError("scanner aggregate input limits are invalid")
+        self.remaining_bytes = MAX_SCAN_TOTAL_INPUT_BYTES
+        self.remaining_documents = MAX_SCAN_SCHEMA_DOCUMENTS
+
+    def consume_document(self) -> None:
+        self.remaining_documents -= 1
+        if self.remaining_documents < 0:
+            raise SchemaError(
+                "scanner CLI input exceeds the aggregate document limit of "
+                f"{MAX_SCAN_SCHEMA_DOCUMENTS}"
+            )
+
+    def consume_bytes(self, amount: int) -> None:
+        self.remaining_bytes -= amount
+        if self.remaining_bytes < 0:
+            raise SchemaError(
+                "scanner CLI input exceeds the aggregate UTF-8 input limit of "
+                f"{MAX_SCAN_TOTAL_INPUT_BYTES} bytes"
+            )
 
 
 class _ScannerBudget:
@@ -380,32 +414,64 @@ def _scanner_input_limit() -> int:
     return MAX_SCAN_INPUT_BYTES
 
 
-def _read_bounded_json_text(stream: Any) -> str:
+def _read_bounded_json_text(
+    stream: Any, *, _input_budget: _CLIInputBudget | None = None
+) -> str:
     limit = _scanner_input_limit()
     chunks: list[str] = []
     total_bytes = 0
+    stream_kind: str | None = None
+    decoder: Any = None
     while True:
         chunk = stream.read(64 * 1024)
-        if chunk == "":
+        if chunk == "" or chunk == b"":
             break
-        if type(chunk) is not str:
-            raise SchemaError("JSON input stream must provide text")
-        try:
-            total_bytes += len(chunk.encode("utf-8"))
-        except UnicodeEncodeError as exc:
-            raise SchemaError("JSON input contains invalid Unicode") from exc
+        if type(chunk) is str:
+            if stream_kind == "bytes":
+                raise SchemaError("JSON input stream changed data type")
+            stream_kind = "text"
+            try:
+                chunk_bytes = len(chunk.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise SchemaError("JSON input contains invalid Unicode") from exc
+            decoded_chunk = chunk
+        elif type(chunk) is bytes:
+            if stream_kind == "text":
+                raise SchemaError("JSON input stream changed data type")
+            stream_kind = "bytes"
+            if decoder is None:
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+            chunk_bytes = len(chunk)
+            try:
+                decoded_chunk = decoder.decode(chunk)
+            except UnicodeDecodeError as exc:
+                raise SchemaError("JSON input contains invalid Unicode") from exc
+        else:
+            raise SchemaError("JSON input stream must provide text or bytes")
+        total_bytes += chunk_bytes
+        if _input_budget is not None:
+            _input_budget.consume_bytes(chunk_bytes)
         if total_bytes > limit:
             raise SchemaError(
                 f"JSON input exceeds the UTF-8 input limit of {limit} bytes"
             )
-        chunks.append(chunk)
+        chunks.append(decoded_chunk)
+    if stream_kind == "bytes":
+        try:
+            final_chunk = decoder.decode(b"", final=True)
+        except UnicodeDecodeError as exc:
+            raise SchemaError("JSON input contains invalid Unicode") from exc
+        if final_chunk:
+            chunks.append(final_chunk)
     return "".join(chunks)
 
 
-def _load_json_stream(stream: Any) -> Any:
+def _load_json_stream(
+    stream: Any, *, _input_budget: _CLIInputBudget | None = None
+) -> Any:
     try:
         value = json.loads(
-            _read_bounded_json_text(stream),
+            _read_bounded_json_text(stream, _input_budget=_input_budget),
             object_pairs_hook=_json_object_without_duplicates,
             parse_constant=_reject_json_constant,
             parse_float=Decimal,
@@ -420,21 +486,29 @@ def _load_json_stream(stream: Any) -> Any:
     return value
 
 
-def load_json_path(path: str, *, allow_stdin: bool = False) -> Any:
+def load_json_path(
+    path: str,
+    *,
+    allow_stdin: bool = False,
+    _input_budget: _CLIInputBudget | None = None,
+) -> Any:
     """Load strict JSON while rejecting duplicate keys and non-finite numbers."""
 
+    if _input_budget is not None:
+        _input_budget.consume_document()
     if path == "-":
         if not allow_stdin:
             raise SchemaError("stdin is not supported for this input")
-        return _load_json_stream(sys.stdin)
+        stdin_stream = getattr(sys.stdin, "buffer", sys.stdin)
+        return _load_json_stream(stdin_stream, _input_budget=_input_budget)
     input_path = Path(path)
     limit = _scanner_input_limit()
     if input_path.stat().st_size > limit:
         raise SchemaError(
             f"JSON input exceeds the UTF-8 input limit of {limit} bytes"
         )
-    with input_path.open(encoding="utf-8") as source:
-        return _load_json_stream(source)
+    with input_path.open("rb") as source:
+        return _load_json_stream(source, _input_budget=_input_budget)
 
 
 @dataclass
@@ -927,9 +1001,10 @@ def _is_direct_shape_schema(schema: Any) -> bool:
 
 def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
     schema = definition.input_schema
+    properties_present = "properties" in schema
     properties = schema.get("properties")
-    direct_shape = properties is None and _is_direct_shape_schema(schema)
-    if properties is None:
+    direct_shape = not properties_present and _is_direct_shape_schema(schema)
+    if not properties_present:
         # Some SDK exports expose the input shape directly rather than wrapping
         # it in a JSON Schema object. A document containing recognized schema
         # structure is still a wrapped schema, even when its caller-visible
@@ -962,9 +1037,16 @@ def _properties(definition: ToolDefinition) -> tuple[dict[str, Any], set[str]]:
 
 
 def _schema_closes_unknown_arguments(definition: ToolDefinition) -> bool:
+    schema = definition.input_schema
+    pattern_properties = schema.get("patternProperties")
+    pattern_properties_are_empty = (
+        "patternProperties" not in schema
+        or (type(pattern_properties) is dict and not pattern_properties)
+    )
     return (
-        not _is_direct_shape_schema(definition.input_schema)
-        and definition.input_schema.get("additionalProperties") is False
+        not _is_direct_shape_schema(schema)
+        and schema.get("additionalProperties") is False
+        and pattern_properties_are_empty
     )
 
 
@@ -993,6 +1075,12 @@ def _schema_requires_authority_review(schema: Any) -> bool:
             _schema_requires_authority_review(subschema)
             for subschema in schema.values()
         )
+    if "properties" in schema and schema.get("type") != "object":
+        # A root mapping named ``properties`` is indistinguishable from a
+        # direct-shape argument with that literal name unless the document
+        # unambiguously declares an object schema. Preserve any modeled inner
+        # arguments, but never present the ambiguous shape as a clean audit.
+        return True
     schema_type = schema.get("type")
     if type(schema_type) is list and (
         len(schema_type) != 1
@@ -1018,9 +1106,10 @@ def _schema_requires_authority_review(schema: Any) -> bool:
     ):
         return True
 
-    pattern_properties = schema.get("patternProperties")
-    if type(pattern_properties) is dict and pattern_properties:
-        return True
+    if "patternProperties" in schema:
+        pattern_properties = schema["patternProperties"]
+        if type(pattern_properties) is not dict or pattern_properties:
+            return True
     if type(schema.get("additionalProperties")) is dict:
         return True
 
@@ -1282,6 +1371,7 @@ def _validate_control_declarations(
                     f"{tool_name}.{argument_name}"
                 )
             bounds = []
+            bound_keys: set[tuple[str, str, str, str | None]] = set()
             for bound_index, raw_bound in enumerate(raw_bounds, start=1):
                 if not isinstance(raw_bound, dict):
                     raise SchemaError(
@@ -1339,6 +1429,17 @@ def _validate_control_declarations(
                 )
                 if enforcement is not None:
                     bound["enforcement"] = enforcement
+                bound_key = (
+                    source,
+                    mutability,
+                    bound["operational_status"],
+                    enforcement,
+                )
+                if bound_key in bound_keys:
+                    raise SchemaError(
+                        f"duplicate bound for '{tool_name}.{argument_name}'"
+                    )
+                bound_keys.add(bound_key)
                 bounds.append(bound)
 
             argument = {"authority": authority, "evidence": evidence}
@@ -1681,7 +1782,11 @@ def _scan_definitions_bounded(
         params_by_tool[definition.name] = params
         required_by_tool[definition.name] = required
 
-    policy_set = build_policy(registry)
+    inference_context = _PolicyInferenceContext()
+    policy_set = build_policy(
+        registry,
+        _inference_context=inference_context,
+    )
     review_pairs = set(policy_set.review)
     report_tools = []
     counts = {
@@ -1711,14 +1816,26 @@ def _scan_definitions_bounded(
         )
         conflicts = _annotation_conflicts(risk, definition.annotations)
         counts["annotation_conflicts"] += len(conflicts)
-        schema_review_required = _schema_requires_authority_review(
-            definition.input_schema
+        schema_closes_unknown_arguments = _schema_closes_unknown_arguments(
+            definition
+        )
+        unexposed_without_schema_closure = bool(
+            declared_tool is not None
+            and declared_tool["unexposed_arguments"]
+            and not schema_closes_unknown_arguments
+        )
+        schema_review_required = (
+            _schema_requires_authority_review(definition.input_schema)
+            or unexposed_without_schema_closure
         )
         if schema_review_required:
             counts["schema_review_required_tools"] += 1
         arguments = []
         for param_index, param in enumerate(params_by_tool[tool_name], start=1):
-            initial_policy, confidence = infer_policy(param)
+            initial_policy, confidence = infer_policy(
+                param,
+                inference_context,
+            )
             final_policy = policy_set.policy[tool_name][param.name]
             needs_review = (tool_name, param.name) in review_pairs
             counts["parameters"] += 1
@@ -1782,9 +1899,7 @@ def _scan_definitions_bounded(
             "risk_conflict": risk_conflict,
             "risk_review_required": tool_name in policy_set.risk_review,
             "needs_confirmation": tool_name in policy_set.confirm,
-            "schema_closes_unknown_arguments": _schema_closes_unknown_arguments(
-                definition
-            ),
+            "schema_closes_unknown_arguments": schema_closes_unknown_arguments,
             "schema_review_required": schema_review_required,
             "annotation_conflicts": conflicts,
             "arguments": arguments,
@@ -1924,19 +2039,29 @@ def _markdown_cell(value: Any) -> str:
         else:
             safe.append(character)
     escaped = html.escape("".join(safe), quote=False)
+    zwnj_insertions: set[int] = set()
+    for match in re.finditer(r"(?<![A-Za-z0-9_])(?i:gh)-(?:[0-9]+)\b", escaped):
+        hyphen_index = escaped.find("-", match.start(), match.end())
+        zwnj_insertions.add(hyphen_index)
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_])[0-9A-Fa-f]{7,40}(?![A-Za-z0-9_])", escaped
+    ):
+        zwnj_insertions.add(match.start() + (match.end() - match.start()) // 2)
     markdown_safe: list[str] = []
     for index, character in enumerate(escaped):
         # Link syntax is escaped below. Neutralize the remaining bare-autolink
         # signals while preserving how cells render: scheme separators, email
         # or mention markers, issue-reference markers, and a leading www-dot.
+        if index in zwnj_insertions:
+            markdown_safe.append("&#8204;")
         if character == ":" and escaped[index + 1 : index + 3] == "//":
             markdown_safe.append("&#58;")
             continue
         if character == "@":
-            markdown_safe.append("&#64;")
+            markdown_safe.append("@&#8204;")
             continue
         if character == "#":
-            markdown_safe.append("&#35;")
+            markdown_safe.append("#&#8204;")
             continue
         if (
             character == "."
@@ -2212,15 +2337,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        input_budget = _CLIInputBudget()
         if args.controls == "-" and "-" in args.schemas:
             raise SchemaError("schemas and control declarations cannot both use stdin")
         controls = (
-            load_json_path(args.controls, allow_stdin=True)
+            load_json_path(
+                args.controls,
+                allow_stdin=True,
+                _input_budget=input_budget,
+            )
             if args.controls
             else None
         )
         report = scan_documents(
-            (load_json_path(path, allow_stdin=True) for path in args.schemas),
+            (
+                load_json_path(
+                    path,
+                    allow_stdin=True,
+                    _input_budget=input_budget,
+                )
+                for path in args.schemas
+            ),
             redact_names=args.redact_names,
             control_declarations=controls,
         )

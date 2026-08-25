@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 
@@ -180,12 +181,70 @@ def test_invalid_modeled_constraints_are_rejected(property_schema, message):
                 }
             ]
         },
+        {
+            "tools": [
+                {
+                    "name": "set_value",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": None,
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+        },
         {"tools": [], "non_finite": float("nan")},
     ],
 )
 def test_scanner_rejects_non_plain_or_malformed_json_shapes(document):
     with pytest.raises(SchemaError):
         scan_documents([document])
+
+
+def test_scanner_shares_and_caches_identifier_nfkc_work(monkeypatch):
+    original_normalize = verb_authority.unicodedata.normalize
+    normalization_calls = []
+    monkeypatch.setattr(verb_authority, "MAX_NFKC_OPERATION_CHARS", 8)
+
+    def counted_normalize(form, value):
+        normalization_calls.append((form, value))
+        return original_normalize(form, value)
+
+    monkeypatch.setattr(
+        verb_authority,
+        "unicodedata",
+        type(
+            "UnicodeProxy",
+            (),
+            {
+                "normalize": staticmethod(counted_normalize),
+                "name": staticmethod(verb_authority.unicodedata.name),
+            },
+        ),
+    )
+    document = {
+        "tools": [
+            {
+                "name": "write_values",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "éaaa": {"type": "integer"},
+                        "öbbb": {"type": "integer"},
+                        "üccc": {"type": "integer"},
+                    },
+                },
+            }
+        ]
+    }
+
+    report = scan_documents([document])
+
+    assert len(normalization_calls) == 2
+    assert all(
+        argument["policy"] == "trusted_fixed"
+        for argument in report["tools"][0]["arguments"]
+    )
 
 
 def test_scanner_rejects_compact_programmatic_schema_dag():
@@ -945,6 +1004,57 @@ def test_markdown_neutralizes_active_link_and_image_syntax():
     )
 
 
+def test_markdown_neutralizes_github_shorthand_and_raw_commit_references():
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    hostile = f"GH-26 #7 @yairsabag {commit}"
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": hostile,
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+
+    assert "GH-26" not in markdown
+    assert "#7" not in markdown
+    assert "@yairsabag" not in markdown
+    assert commit not in markdown
+    assert "GH&#8204;-26" in markdown
+    assert "#&#8204;7" in markdown
+    assert "@&#8204;yairsabag" in markdown
+    assert "0123456789abcdef0123&#8204;456789abcdef01234567" in markdown
+
+
+@pytest.mark.parametrize("length", [7, 8, 12, 20, 39])
+def test_markdown_neutralizes_standalone_commit_prefixes(length):
+    token = "0123456789abcdef0123456789abcdef01234567"[:length]
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": token,
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+    midpoint = length // 2
+
+    assert token not in markdown
+    assert token[:midpoint] + "&#8204;" + token[midpoint:] in markdown
+
+
 def test_reports_declared_controls_without_overriding_inferred_policy():
     document = {
         "tools": [
@@ -1014,6 +1124,41 @@ def test_reports_declared_controls_without_overriding_inferred_policy():
     assert "destination_path" in markdown
     assert "runtime path containment" in markdown
     assert "not_stated" in markdown
+
+
+def test_unexposed_control_on_open_schema_requires_schema_review():
+    document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "unexposed_arguments": {
+                    "recipient": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "authenticated session",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+
+    assert report["tools"][0]["schema_closes_unknown_arguments"] is False
+    assert report["tools"][0]["schema_review_required"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
 
 
 def test_redacts_declared_control_names_attribution_and_fingerprint_inputs():
@@ -1509,6 +1654,7 @@ def test_simple_schema_and_enum_instance_values_do_not_require_schema_review():
                     {
                         "name": "set_mode",
                         "inputSchema": {
+                            "type": "object",
                             "$defs": {
                                 "unused": {
                                     "allOf": [{"properties": {"recipient": {}}}]
@@ -1692,7 +1838,7 @@ def test_properties_keyword_collision_cannot_produce_a_clean_empty_audit(
     assert report["summary"]["schema_review_required_tools"] == 1
 
 
-def test_boolean_additional_properties_are_handled_by_schema_closure_not_review():
+def test_boolean_additional_properties_are_handled_by_schema_closure():
     reports = [
         scan_documents(
             [
@@ -1701,6 +1847,7 @@ def test_boolean_additional_properties_are_handled_by_schema_closure_not_review(
                         {
                             "name": f"tool_{str(value).lower()}",
                             "inputSchema": {
+                                "type": "object",
                                 "properties": {},
                                 "additionalProperties": value,
                             },
@@ -1719,6 +1866,69 @@ def test_boolean_additional_properties_are_handled_by_schema_closure_not_review(
         report["tools"][0]["schema_closes_unknown_arguments"]
         for report in reports
     ] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "ambiguous_schema",
+    (
+        {"properties": {}},
+        {"properties": {}, "type": {}},
+        {"properties": {}, "enum": []},
+        {"properties": {}, "const": None},
+        {"properties": {}, "additionalProperties": False},
+        {"properties": {}, "patternProperties": {}},
+        {"properties": {}, "description": "looks like a wrapper"},
+        {
+            "properties": {},
+            "type": {},
+            "additionalProperties": False,
+            "description": "combined ambiguity",
+        },
+    ),
+)
+def test_properties_without_unambiguous_object_type_always_require_review(
+    ambiguous_schema,
+):
+    report = scan_documents(
+        [{"tools": [{"name": "send_message", "inputSchema": ambiguous_schema}]}]
+    )
+
+    assert report["tools"][0]["schema_review_required"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
+
+
+def test_ambiguous_properties_root_preserves_inner_arguments_and_fails_cli_review(
+    tmp_path,
+):
+    document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "properties": {"recipient": {"type": "string"}}
+                },
+            }
+        ]
+    }
+    report = scan_documents([document])
+    assert [argument["name"] for argument in report["tools"][0]["arguments"]] == [
+        "recipient"
+    ]
+    assert report["tools"][0]["schema_review_required"] is True
+
+    schema_path = tmp_path / "ambiguous.json"
+    output_path = tmp_path / "report.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    assert main(
+        [
+            str(schema_path),
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+            "--fail-on-review",
+        ]
+    ) == 2
 
 
 def test_cli_fail_on_review_rejects_hidden_authority_in_local_ref(tmp_path):
@@ -1828,10 +2038,14 @@ def test_cli_loads_schema_paths_lazily_under_the_aggregate_budget(
     original_loader = scanner.load_json_path
     load_count = 0
 
-    def counted_loader(path, *, allow_stdin=False):
+    def counted_loader(path, *, allow_stdin=False, _input_budget=None):
         nonlocal load_count
         load_count += 1
-        return original_loader(path, allow_stdin=allow_stdin)
+        return original_loader(
+            path,
+            allow_stdin=allow_stdin,
+            _input_budget=_input_budget,
+        )
 
     monkeypatch.setattr(scanner, "MAX_SCAN_JSON_MATERIAL_BYTES", 4_096)
     monkeypatch.setattr(scanner, "load_json_path", counted_loader)
@@ -1841,6 +2055,175 @@ def test_cli_loads_schema_paths_lazily_under_the_aggregate_budget(
 
     assert exc_info.value.code == 2
     assert 1 <= load_count <= 2
+
+
+def test_cli_caps_actual_aggregate_utf8_bytes_across_whitespace_documents(
+    tmp_path, monkeypatch
+):
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        " " * 80
+        + json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scanner, "MAX_SCAN_TOTAL_INPUT_BYTES", 250)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path), str(schema_path), "--format", "json"])
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_aggregate_budget_counts_raw_crlf_bytes(tmp_path, monkeypatch):
+    schema_path = tmp_path / "schema.json"
+    document = json.dumps(
+        {
+            "tools": [
+                {
+                    "name": "read_record",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        }
+    ).encode("utf-8")
+    raw_document = (b"\r\n" * 64) + document
+    normalized_size = len(raw_document.replace(b"\r\n", b"\n"))
+    schema_path.write_bytes(raw_document)
+    monkeypatch.setattr(
+        scanner, "MAX_SCAN_TOTAL_INPUT_BYTES", normalized_size * 2
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(schema_path), str(schema_path), "--format", "json"])
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_document_limit_is_shared_by_controls_and_lazy_schema_loads(
+    tmp_path, monkeypatch
+):
+    schema_path = tmp_path / "schema.json"
+    controls_path = tmp_path / "controls.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    controls_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(scanner, "MAX_SCAN_SCHEMA_DOCUMENTS", 2)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                str(schema_path),
+                str(schema_path),
+                "--controls",
+                str(controls_path),
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_aggregate_byte_limit_includes_stdin(monkeypatch):
+    document = json.dumps(
+        {
+            "tools": [
+                {
+                    "name": "read_record",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(scanner, "MAX_SCAN_TOTAL_INPUT_BYTES", len(document) - 1)
+    monkeypatch.setattr(scanner.sys, "stdin", io.StringIO(document))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["-", "--format", "json"])
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_prefers_raw_binary_stdin_for_aggregate_budget(monkeypatch):
+    document = json.dumps(
+        {
+            "tools": [
+                {
+                    "name": "read_record",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        }
+    ).encode("utf-8")
+    raw_document = (b"\r\n" * 32) + document
+
+    class BinaryBackedStdin:
+        buffer = io.BytesIO(raw_document)
+
+        def read(self, _size=-1):
+            raise AssertionError("text stdin must not be used when .buffer exists")
+
+    monkeypatch.setattr(scanner, "MAX_SCAN_TOTAL_INPUT_BYTES", len(raw_document) - 1)
+    monkeypatch.setattr(scanner.sys, "stdin", BinaryBackedStdin())
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["-", "--format", "json"])
+
+    assert exc_info.value.code == 2
+
+
+def test_rejects_duplicate_exact_control_bounds():
+    document = {
+        "tools": [
+            {
+                "name": "send",
+                "inputSchema": {
+                    "properties": {"recipient": {"type": "string"}}
+                },
+            }
+        ]
+    }
+    bound = {
+        "source": "approved contacts",
+        "bounds_mutability": "trusted_party",
+        "operational_status": "enforced",
+        "enforcement": "resolver lookup",
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "send": {
+                "arguments": {
+                    "recipient": {
+                        "authority": "constrained",
+                        "evidence": "declared",
+                        "bounds": [bound, dict(bound)],
+                    }
+                }
+            }
+        },
+    }
+
+    with pytest.raises(SchemaError, match="duplicate bound"):
+        scan_documents([document], control_declarations=controls)
 
 
 def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):

@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable
 import asyncio
 import functools
 import hashlib
+import io
 import inspect
 import json
 import marshal
@@ -36,6 +37,64 @@ from types import (
     GeneratorType,
     MethodType,
 )
+
+
+MAX_NFKC_INPUT_CHARS = 4_096
+"""Maximum text length accepted by one Unicode compatibility normalization.
+
+Some normalization inputs with adversarial combining-class order take
+quadratic work in common Unicode implementations. This ceiling is checked
+*before* every NFKC call. Identifier inference and runtime enforcement choose
+their own fail-closed outcome when the ceiling is exceeded.
+"""
+
+MAX_NFKC_OPERATION_CHARS = 8 * MAX_NFKC_INPUT_CHARS
+"""Maximum cumulative Unicode-normalization input in one runtime operation."""
+
+
+class _NFKCWorkLimitExceeded(ValueError):
+    """Internal signal that Unicode normalization was refused before work."""
+
+
+class _NFKCWorkBudget:
+    """Charge cumulative NFKC input before entering the Unicode algorithm."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self) -> None:
+        if (
+            type(MAX_NFKC_OPERATION_CHARS) is not int
+            or MAX_NFKC_OPERATION_CHARS < 1
+        ):
+            self.remaining = 0
+        else:
+            self.remaining = MAX_NFKC_OPERATION_CHARS
+
+    def consume(self, value: str) -> None:
+        if type(value) is not str:
+            raise _NFKCWorkLimitExceeded("invalid Unicode normalization input")
+        amount = len(value)
+        if amount > MAX_NFKC_INPUT_CHARS or amount > self.remaining:
+            self.remaining = 0
+            raise _NFKCWorkLimitExceeded(
+                "Unicode normalization work exceeds the operation limit"
+            )
+        self.remaining -= amount
+
+
+def _bounded_nfkc(
+    value: str,
+    budget: _NFKCWorkBudget | None = None,
+) -> str:
+    """Normalize only after both the per-input and shared budgets approve."""
+
+    if type(value) is not str or len(value) > MAX_NFKC_INPUT_CHARS:
+        raise _NFKCWorkLimitExceeded(
+            "Unicode normalization input exceeds the work limit"
+        )
+    if budget is not None:
+        budget.consume(value)
+    return unicodedata.normalize("NFKC", value)
 
 
 # === roles a parameter value may play =====================================
@@ -362,7 +421,39 @@ _SELECTOR_TOKENS = frozenset(
 _PAYLOAD_TOKENS = frozenset(
     {"body", "message", "content", "text", "summary", "reply", "note", "description"}
 )
-def _identifier_tokens(name: str) -> tuple[str, ...]:
+
+
+class _PolicyInferenceContext:
+    """Cache identifier normalization under one aggregate work budget."""
+
+    __slots__ = ("normalization_budget", "normalized_identifiers")
+
+    def __init__(self) -> None:
+        self.normalization_budget = _NFKCWorkBudget()
+        self.normalized_identifiers: dict[str, str | None] = {}
+
+    def normalize_identifier(self, name: Any) -> str | None:
+        if type(name) is not str:
+            return None
+        if name in self.normalized_identifiers:
+            return self.normalized_identifiers[name]
+        if name.isascii():
+            normalized: str | None = name
+        elif len(name) > MAX_NFKC_INPUT_CHARS:
+            normalized = None
+        else:
+            try:
+                normalized = _bounded_nfkc(name, self.normalization_budget)
+            except _NFKCWorkLimitExceeded:
+                normalized = None
+        self.normalized_identifiers[name] = normalized
+        return normalized
+
+
+def _identifier_tokens(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> tuple[str, ...]:
     """Split common schema identifier styles without substring guessing.
 
     Tool providers use snake_case, kebab-case, dotted/slashed paths,
@@ -373,9 +464,10 @@ def _identifier_tokens(name: str) -> tuple[str, ...]:
     suffix, as in ``keyboard`` or ``guidance``, remains ordinary text.
     """
 
-    if type(name) is not str:
+    context = _context or _PolicyInferenceContext()
+    normalized = context.normalize_identifier(name)
+    if normalized is None:
         return ()
-    normalized = unicodedata.normalize("NFKC", name)
     tokens: list[str] = []
     current: list[str] = []
 
@@ -428,10 +520,59 @@ def _identifier_tokens(name: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _is_sink_name(name: str) -> bool:
+def _compact_identifier_segments(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> tuple[str, ...]:
+    """Return separator-delimited ASCII segments without camel-case guesses.
+
+    A provider-controlled casing pattern can defeat a camel-case boundary
+    detector (for example ``recipientiD``). Selector suffixes are authority
+    evidence even when those internal boundaries are misleading, so preserve
+    each complete alphanumeric run, case-fold it, and ignore only trailing
+    numeric ordinals. The generic suffix rule remains deliberately
+    conservative; applications can explicitly opt ordinary names out with
+    ``sink=False``.
+    """
+
+    context = _context or _PolicyInferenceContext()
+    normalized = context.normalize_identifier(name)
+    if normalized is None:
+        return ()
+    segments: list[str] = []
+    flattened: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        segment = "".join(current).casefold().rstrip("0123456789")
+        if segment:
+            segments.append(segment)
+        current.clear()
+
+    for character in normalized:
+        if character.isascii() and character.isalnum():
+            current.append(character)
+            flattened.append(character)
+        else:
+            flush()
+    flush()
+    flattened_segment = "".join(flattened).casefold().rstrip("0123456789")
+    if flattened_segment and flattened_segment not in segments:
+        # Separators are provider-controlled too: messageI_D and walletK-eY
+        # must not turn one selector suffix into harmless one-letter tokens.
+        segments.append(flattened_segment)
+    return tuple(segments)
+
+
+def _is_sink_name(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> bool:
     """Return structural sink evidence across common identifier styles."""
 
-    tokens = _identifier_tokens(name)
+    tokens = _identifier_tokens(name, _context)
     if not tokens:
         return False
     if _AUTHORITY_SINK_TOKENS.intersection(tokens):
@@ -447,7 +588,10 @@ def _is_sink_name(name: str) -> bool:
     return bool(semantic_tokens and semantic_tokens[-1] == "to")
 
 
-def _is_selector_name(name: str) -> bool:
+def _is_selector_name(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> bool:
     """Return complete-token or flatcase selector-suffix evidence.
 
     Flatcase exports erase the boundary in names such as ``customerid`` and
@@ -457,23 +601,34 @@ def _is_selector_name(name: str) -> bool:
     until the application explicitly declares ``sink=False``.
     """
 
-    tokens = _identifier_tokens(name)
+    tokens = _identifier_tokens(name, _context)
     semantic_tokens = tuple(token for token in tokens if not token.isdigit())
+    compact_segments = _compact_identifier_segments(name, _context)
     return bool(_SELECTOR_TOKENS.intersection(semantic_tokens)) or any(
         token.endswith(suffix) and token != suffix
         for token in semantic_tokens
         for suffix in _SELECTOR_TOKENS
+    ) or any(
+        segment == suffix or segment.endswith(suffix)
+        for segment in compact_segments
+        for suffix in _SELECTOR_TOKENS
     )
 
 
-def _is_payload_name(name: str) -> bool:
+def _is_payload_name(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> bool:
     """Recognize only a complete final payload token across name styles."""
 
-    tokens = _identifier_tokens(name)
+    tokens = _identifier_tokens(name, _context)
     return bool(tokens and tokens[-1] in _PAYLOAD_TOKENS)
 
 
-def _identifier_name_requires_review(name: str) -> bool:
+def _identifier_name_requires_review(
+    name: str,
+    _context: _PolicyInferenceContext | None = None,
+) -> bool:
     """Fail closed when the English identifier heuristic cannot model a name.
 
     Compatibility forms such as fullwidth Latin normalize to ASCII and remain
@@ -483,16 +638,21 @@ def _identifier_name_requires_review(name: str) -> bool:
     ``sink=False`` declaration above this fallback.
     """
 
-    if type(name) is not str:
+    context = _context or _PolicyInferenceContext()
+    normalized = context.normalize_identifier(name)
+    if normalized is None:
         return True
-    normalized = unicodedata.normalize("NFKC", name)
     if not normalized.isascii():
         return True
-    tokens = _identifier_tokens(name)
+    tokens = _identifier_tokens(name, context)
     return not any(re.search(r"[A-Za-z]", token) for token in tokens)
 
 
-def infer_policy(p: Param):
+def infer_policy(
+    p: Param,
+    _context: _PolicyInferenceContext | None = None,
+):
+    context = _context or _PolicyInferenceContext()
     # A declared capability always wins over name-based guessing (DylanWang):
     # the tool manifest is authoritative, so we don't infer sink-ness from the
     # param name when the developer has stated it outright.
@@ -502,7 +662,7 @@ def infer_policy(p: Param):
         # explicitly not a sink: still type-check, but data may fill it
         if p.type in ("number", "integer", "enum", "boolean"):
             return Policy.TYPED_BOUNDED, Confidence.HIGH
-        if _is_payload_name(p.name) or (
+        if _is_payload_name(p.name, context) or (
             p.type == "string" and (p.max_len or 0) > 200
         ):
             return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
@@ -513,15 +673,15 @@ def infer_policy(p: Param):
     # as ``reply_to`` must not become authorable merely because another token
     # resembles free text.  Generic ``*_id``/``*_key`` selectors remain locked
     # but uncertain so consequential tools surface them in PolicySet.review.
-    if p.type in ("email", "uri") or _is_sink_name(p.name):
+    if p.type in ("email", "uri") or _is_sink_name(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.HIGH
-    if _is_selector_name(p.name):
+    if _is_selector_name(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
-    if _identifier_name_requires_review(p.name):
+    if _identifier_name_requires_review(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
     if p.type in ("number", "integer", "enum", "boolean"):
         return Policy.TYPED_BOUNDED, Confidence.HIGH
-    if _is_payload_name(p.name) or (
+    if _is_payload_name(p.name, context) or (
         p.type == "string" and (p.max_len or 0) > 200
     ):
         return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
@@ -542,7 +702,11 @@ class PolicySet:
     registry_version: int | None = None
 
 
-def build_policy(reg: Registry) -> PolicySet:
+def build_policy(
+    reg: Registry,
+    _inference_context: _PolicyInferenceContext | None = None,
+) -> PolicySet:
+    inference_context = _inference_context or _PolicyInferenceContext()
     policy, risk, review, confirm = {}, {}, [], []
     risk_inference, risk_review, risk_conflicts = {}, [], []
     for name, tool in reg.tools.items():
@@ -571,7 +735,7 @@ def build_policy(reg: Registry) -> PolicySet:
             confirm.append(name)
         policy[name] = {}
         for p in tool.params:
-            pol, conf = infer_policy(p)
+            pol, conf = infer_policy(p, inference_context)
             if conf is Confidence.UNCERTAIN:
                 if r is Risk.READ_ONLY:
                     pol = Policy.TYPED_BOUNDED        # safe to auto-relax: no side effects
@@ -1011,22 +1175,35 @@ def _unicode_script(character: str) -> str | None:
     return None
 
 
-def _has_mixed_script(v: Any) -> bool:
+def _has_mixed_script(
+    v: Any,
+    _budget: _NFKCWorkBudget | None = None,
+) -> bool:
     if type(v) is not str:
         return False
+    if v.isascii():
+        return False
+    # Over-limit text is unsafe to normalize. For a value flowing into a
+    # locked sink, treating it as suspicious is the fail-closed result.
+    if len(v) > MAX_NFKC_INPUT_CHARS:
+        return True
     scripts = {
         script
-        for character in unicodedata.normalize("NFKC", v)
+        for character in _bounded_nfkc(v, _budget)
         if (script := _unicode_script(character)) is not None
     }
     return len(scripts) > 1
 
 
-def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
+def _contains_mixed_script(
+    value: Any,
+    seen: set[int] | None = None,
+    _budget: _NFKCWorkBudget | None = None,
+) -> bool:
     """Inspect built-in JSON containers for homographs without cycling."""
 
     if type(value) is str:
-        return _has_mixed_script(value)
+        return _has_mixed_script(value, _budget)
     if type(value) not in (dict, list, tuple):
         return False
 
@@ -1038,11 +1215,13 @@ def _contains_mixed_script(value: Any, seen: set[int] | None = None) -> bool:
     try:
         if type(value) is dict:
             return any(
-                (type(key) is str and _has_mixed_script(key))
-                or _contains_mixed_script(item, seen)
+                (type(key) is str and _has_mixed_script(key, _budget))
+                or _contains_mixed_script(item, seen, _budget)
                 for key, item in value.items()
             )
-        return any(_contains_mixed_script(item, seen) for item in value)
+        return any(
+            _contains_mixed_script(item, seen, _budget) for item in value
+        )
     finally:
         seen.remove(identity)
 
@@ -1124,17 +1303,30 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
                 f"param '{display_name}' has an implicit optional default; "
                 "materialize and validate it before gating",
             )
+    nfkc_budget = _NFKCWorkBudget()
     for name, val in args.items():
         display_name = _safe_reason_text(name)
         if name not in pol:
             return Decision(False, f"unknown param '{display_name}'")
-        # Structural check first: a mixed-script value in a locked sink is a
-        # homograph impersonation regardless of declared provenance.
-        if pol[name] is Policy.TRUSTED_FIXED and _contains_mixed_script(val):
-            return Decision(False, f"param '{display_name}' mixes scripts (homograph); rejected as impersonation")
         prov = provenance.get(name, "data")
         if pol[name] is Policy.TRUSTED_FIXED and prov == "data":
             return Decision(False, f"param '{display_name}' is a locked sink; data may not author it")
+        # Only an otherwise trusted value needs structural homograph review;
+        # untrusted data was already denied above. Share one work budget across
+        # every nested value so repeated near-limit strings cannot amplify CPU.
+        if pol[name] is Policy.TRUSTED_FIXED:
+            try:
+                mixed_script = _contains_mixed_script(
+                    val,
+                    _budget=nfkc_budget,
+                )
+            except _NFKCWorkLimitExceeded:
+                return Decision(
+                    False,
+                    f"param '{display_name}' exceeds the Unicode normalization work limit",
+                )
+            if mixed_script:
+                return Decision(False, f"param '{display_name}' mixes scripts (homograph); rejected as impersonation")
         # Provenance decides who may author the value; it never waives the
         # registered type, enum, length, or numeric cap.
         if not _type_ok(by_name[name], val):
@@ -1193,6 +1385,12 @@ MAX_LEDGER_UTF8_BYTES = 8 * 1024 * 1024
 MAX_LEDGER_LOOKUP_CHARACTERS = 16 * 1024 * 1024
 """Maximum containment-search work shared by one dispatch decision."""
 
+MAX_CANONICAL_SKELETON_UNIQUE_CODEPOINTS = 4_096
+"""Maximum distinct non-ASCII code points folded in one long result blob."""
+
+MAX_CANONICAL_SKELETON_CHARS = MAX_NFKC_OPERATION_CHARS
+"""Maximum compatibility-skeleton material built before failing closed."""
+
 
 class _LedgerCapacityExceeded(ValueError):
     """Internal signal that a session ledger must be replaced, not retried."""
@@ -1205,7 +1403,7 @@ class _LedgerLookupBudgetExceeded(ValueError):
 class _LedgerLookupBudget:
     """Deterministic character-work budget for ledger containment searches."""
 
-    __slots__ = ("remaining", "exhausted")
+    __slots__ = ("remaining", "exhausted", "normalization_budget")
 
     def __init__(self) -> None:
         if (
@@ -1217,6 +1415,7 @@ class _LedgerLookupBudget:
         else:
             self.remaining = MAX_LEDGER_LOOKUP_CHARACTERS
             self.exhausted = False
+        self.normalization_budget = _NFKCWorkBudget()
 
     def consume(self, amount: int) -> None:
         # Charge before each substring operation. Once exhausted, this shared
@@ -1263,9 +1462,10 @@ class ProvenanceLedger:
     check cheap and the false-positive surface small.
 
     Still NOT closed (the honest next boundary): a value the agent *rewrites*
-    -- attacker [at] evil [dot] com, a base64 blob, a translated string -- has
-    no verbatim substring in the tainted text, so it escapes. That needs real
-    dataflow tracking through transforms (CaMeL's interpreter), not matching.
+    semantically -- "attacker at evil dot com" as ordinary words, a base64
+    blob, or a translated string -- is no longer the same lexical value. That
+    needs real dataflow tracking through transforms (CaMeL's interpreter), not
+    matching.
 
     Retention is fail-closed and bounded. Once either the entry or UTF-8 text
     budget is exhausted, the attempted write is not partially committed, the
@@ -1283,6 +1483,12 @@ class ProvenanceLedger:
     )
     _canon_blobs: set[str] = field(
         default_factory=set, init=False, repr=False, compare=False
+    )
+    _normalization_incomplete: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
+    _ascii_normalization_incomplete: bool = field(
+        default=False, init=False, repr=False, compare=False
     )
     _utf8_bytes: int = field(default=0, init=False, repr=False, compare=False)
     _saturated: bool = field(default=False, init=False, repr=False, compare=False)
@@ -1327,7 +1533,11 @@ class ProvenanceLedger:
             pending_containers: set[tuple[str, str]] = set()
             pending_blobs: set[str] = set()
             pending_canon_blobs: set[str] = set()
+            pending_normalization_incomplete = False
+            pending_ascii_normalization_incomplete = False
             pending_utf8_bytes = 0
+            normalization_budget = _NFKCWorkBudget()
+            risk_form_cache: dict[str, bool] = {}
 
             def reserve(text: str) -> None:
                 nonlocal pending_utf8_bytes
@@ -1356,6 +1566,11 @@ class ProvenanceLedger:
                 self._mark_saturated()
 
             for leaf, is_key in _iter_json_taint_values(normalized_result):
+                normalization_too_expensive = (
+                    type(leaf) is str
+                    and len(leaf) > MAX_NFKC_INPUT_CHARS
+                    and not leaf.isascii()
+                )
                 token = _json_leaf_token(leaf)
                 if token is None:
                     continue
@@ -1365,21 +1580,76 @@ class ProvenanceLedger:
                         reserve(leaf)
                 if capacity_exceeded():
                     self._mark_saturated()
-                if type(leaf) is str and (
-                    not is_key or _has_risk_shaped_form(leaf)
-                ):
+                if type(leaf) is str:
+                    blob_already_indexed = (
+                        leaf in self._blobs or leaf in pending_blobs
+                    )
+                    if not is_key or blob_already_indexed:
+                        needs_search_index = True
+                    else:
+                        cached_risk_form = risk_form_cache.get(leaf)
+                        if cached_risk_form is None:
+                            try:
+                                cached_risk_form = _has_risk_shaped_form(
+                                    leaf,
+                                    normalization_budget,
+                                )
+                            except _NFKCWorkLimitExceeded:
+                                self._mark_saturated()
+                            risk_form_cache[leaf] = cached_risk_form
+                        needs_search_index = cached_risk_form
+                    if not needs_search_index:
+                        continue
+                    if blob_already_indexed:
+                        # Canonical material for this exact blob was already
+                        # indexed (or deliberately marked incomplete). Do not
+                        # repeat adversarial normalization for duplicate leaves
+                        # within this result or in later record_result calls.
+                        continue
                     if leaf not in self._blobs and leaf not in pending_blobs:
                         pending_blobs.add(leaf)
                         reserve(leaf)
                     if capacity_exceeded():
                         self._mark_saturated()
-                    canonical = _canonical(leaf)
-                    if (
-                        canonical not in self._canon_blobs
-                        and canonical not in pending_canon_blobs
-                    ):
-                        pending_canon_blobs.add(canonical)
-                        reserve(canonical)
+                    if normalization_too_expensive:
+                        # Preserve exact and raw-containment taint without
+                        # entering adversarial whole-string NFKC work. An
+                        # ASCII compatibility skeleton retains useful email/
+                        # URL containment while non-ASCII candidates remain
+                        # conservatively incomplete.
+                        pending_normalization_incomplete = True
+                        try:
+                            canonical = _canonical_ascii_skeleton(
+                                leaf,
+                                normalization_budget,
+                                MAX_LEDGER_UTF8_BYTES
+                                - self._utf8_bytes
+                                - pending_utf8_bytes,
+                            )
+                        except _NFKCWorkLimitExceeded:
+                            self._mark_saturated()
+                        if canonical is None:
+                            pending_ascii_normalization_incomplete = True
+                        elif (
+                            canonical not in self._canon_blobs
+                            and canonical not in pending_canon_blobs
+                        ):
+                            pending_canon_blobs.add(canonical)
+                            reserve(canonical)
+                    else:
+                        try:
+                            canonical = _canonical(
+                                leaf,
+                                normalization_budget,
+                            )
+                        except _NFKCWorkLimitExceeded:
+                            self._mark_saturated()
+                        if (
+                            canonical not in self._canon_blobs
+                            and canonical not in pending_canon_blobs
+                        ):
+                            pending_canon_blobs.add(canonical)
+                            reserve(canonical)
                 if capacity_exceeded():
                     self._mark_saturated()
 
@@ -1401,6 +1671,14 @@ class ProvenanceLedger:
             self._tainted_containers.update(pending_containers)
             self._blobs.update(pending_blobs)
             self._canon_blobs.update(pending_canon_blobs)
+            self._normalization_incomplete = (
+                self._normalization_incomplete
+                or pending_normalization_incomplete
+            )
+            self._ascii_normalization_incomplete = (
+                self._ascii_normalization_incomplete
+                or pending_ascii_normalization_incomplete
+            )
             self._utf8_bytes += pending_utf8_bytes
             self._version += 1
 
@@ -1441,7 +1719,7 @@ class ProvenanceLedger:
                     0,
                     budget,
                 )
-            except _LedgerLookupBudgetExceeded:
+            except (_LedgerLookupBudgetExceeded, _NFKCWorkLimitExceeded):
                 return True
 
     def _is_tainted_value(
@@ -1481,7 +1759,10 @@ class ProvenanceLedger:
                         and (
                             ("string", key) in self._tainted
                             or (
-                                _has_risk_shaped_form(key)
+                                _has_risk_shaped_form(
+                                    key,
+                                    budget.normalization_budget,
+                                )
                                 and self._is_tainted_string(key, budget)
                             )
                         )
@@ -1506,6 +1787,11 @@ class ProvenanceLedger:
         value: str,
         budget: _LedgerLookupBudget,
     ) -> bool:
+        # No lookup result may become a false negative merely because it is
+        # too expensive to normalize. This check precedes hashing, stripping,
+        # risk-shape matching, and canonicalization.
+        if len(value) > MAX_NFKC_INPUT_CHARS and not value.isascii():
+            return True
         if ("string", value) in self._tainted:            # layer 1: exact
             return True
         v = value.strip()
@@ -1521,13 +1807,28 @@ class ProvenanceLedger:
         # for it in the canonicalized blobs. This catches the family the
         # adaptive attacker found -- homograph / uppercase / spaced variants
         # of a tainted address -- without a separate rule per trick.
-        cv = _canonical(v)
+        try:
+            cv = _canonical(v, budget.normalization_budget)
+        except _NFKCWorkLimitExceeded:
+            return True
         if _is_risk_shaped(cv):
             budget.consume(len(cv))
             for canonical_blob in self._canon_blobs:
                 budget.consume(len(cv) + len(canonical_blob))
                 if cv in canonical_blob:
                     return True
+            if (
+                cv.isascii()
+                and self._ascii_normalization_incomplete
+            ) or (
+                not cv.isascii()
+                and self._normalization_incomplete
+            ):
+                # At least one retained Unicode blob was too large to
+                # canonicalize safely. It could contain this destination in a
+                # lexical disguise, so absence from the partial index is not
+                # evidence of trusted independence.
+                return True
         return False
 
 
@@ -1542,6 +1843,8 @@ def _ledger_internal_binding(ledger: ProvenanceLedger) -> tuple[int, ...]:
         or type(ledger._tainted_containers) is not set
         or type(ledger._blobs) is not set
         or type(ledger._canon_blobs) is not set
+        or type(ledger._normalization_incomplete) is not bool
+        or type(ledger._ascii_normalization_incomplete) is not bool
         or type(ledger._lock) is not _RLOCK_TYPE
         or type(ledger._utf8_bytes) is not int
         or ledger._utf8_bytes < 0
@@ -1575,17 +1878,100 @@ def _ledger_internal_binding(ledger: ProvenanceLedger) -> tuple[int, ...]:
 # interpreter-level dataflow tracking (CaMeL/FIDES), not normalization.
 
 _DISGUISE = re.compile(r"[\s\[\](){}<>]+")
+_BRACKETED_AT = re.compile(r"[\[({<]\s*a\s*t\s*[\])}>]")
+_BRACKETED_DOT = re.compile(r"[\[({<]\s*d\s*o\s*t\s*[\])}>]")
 
 
-def _canonical(s: str) -> str:
+def _finish_canonical(value: str) -> str:
+    value = value.casefold()
+    value = _BRACKETED_AT.sub("@", value)
+    value = _BRACKETED_DOT.sub(".", value)
+    value = _DISGUISE.sub("", value)
+    return value
+
+
+def _canonical(
+    s: str,
+    _budget: _NFKCWorkBudget | None = None,
+) -> str:
     if type(s) is not str:
         return ""
-    n = unicodedata.normalize("NFKC", s)
-    n = n.casefold()
-    n = _DISGUISE.sub("", n)
-    # common textual separators used to break up an address
-    n = n.replace("[at]", "@").replace("(at)", "@").replace("[dot]", ".").replace("(dot)", ".")
-    return n
+    if s.isascii():
+        n = s
+    else:
+        n = _bounded_nfkc(s, _budget)
+    return _finish_canonical(n)
+
+
+def _canonical_ascii_skeleton(
+    s: str,
+    _budget: _NFKCWorkBudget | None = None,
+    _max_output_chars: int | None = None,
+) -> str | None:
+    """Fold ASCII-compatible material in a long Unicode blob safely.
+
+    NFKC compatibility decomposition is local to each code point; canonical
+    reordering/composition cannot create an ASCII destination by deleting a
+    retained non-ASCII character. Fold each distinct code point through an
+    input of length one, preserve ASCII output, map removable Unicode
+    whitespace to ordinary space, and keep every other non-ASCII output as a
+    sentinel. This supports ASCII email/URL containment without normalizing a
+    hostile long string as one unit.
+    """
+
+    output_limit = (
+        MAX_CANONICAL_SKELETON_CHARS
+        if _max_output_chars is None
+        else min(MAX_CANONICAL_SKELETON_CHARS, _max_output_chars)
+    )
+    if (
+        type(s) is not str
+        or type(MAX_CANONICAL_SKELETON_UNIQUE_CODEPOINTS) is not int
+        or MAX_CANONICAL_SKELETON_UNIQUE_CODEPOINTS < 1
+        or type(MAX_CANONICAL_SKELETON_CHARS) is not int
+        or MAX_CANONICAL_SKELETON_CHARS < 1
+        or type(output_limit) is not int
+        or output_limit < 1
+    ):
+        return None
+    cache: dict[str, str] = {}
+    output = io.StringIO()
+    output_chars = 0
+    previous_was_sentinel = False
+    sentinel = "\x00"
+    for character in s:
+        if character.isascii():
+            mapped = character
+        else:
+            mapped = cache.get(character)
+            if mapped is None:
+                if len(cache) >= MAX_CANONICAL_SKELETON_UNIQUE_CODEPOINTS:
+                    return None
+                folded = _bounded_nfkc(character, _budget).casefold()
+                mapped_parts: list[str] = []
+                mapped_sentinel = False
+                for folded_character in folded:
+                    if folded_character.isascii():
+                        mapped_parts.append(folded_character)
+                        mapped_sentinel = False
+                    elif _DISGUISE.fullmatch(folded_character):
+                        mapped_parts.append(" ")
+                        mapped_sentinel = False
+                    elif not mapped_sentinel:
+                        mapped_parts.append(sentinel)
+                        mapped_sentinel = True
+                mapped = "".join(mapped_parts)
+                cache[character] = mapped
+        for mapped_character in mapped:
+            is_sentinel = mapped_character == sentinel
+            if is_sentinel and previous_was_sentinel:
+                continue
+            output.write(mapped_character)
+            previous_was_sentinel = is_sentinel
+            output_chars += 1
+            if output_chars > output_limit:
+                return None
+    return _finish_canonical(output.getvalue())
 
 
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
@@ -1601,11 +1987,20 @@ def _is_risk_shaped(v: str) -> bool:
     return bool(_EMAIL_RE.fullmatch(v) or _URI_RE.fullmatch(v))
 
 
-def _has_risk_shaped_form(v: str) -> bool:
+def _has_risk_shaped_form(
+    v: str,
+    _budget: _NFKCWorkBudget | None = None,
+) -> bool:
     """True when the original or lexical canonical form is an email/URL."""
 
+    if len(v) > MAX_NFKC_INPUT_CHARS and not v.isascii():
+        # Callers use this predicate to decide whether a value needs the
+        # canonical search index. Over-limit input therefore fails closed.
+        return True
     stripped = v.strip()
-    return _is_risk_shaped(stripped) or _is_risk_shaped(_canonical(stripped))
+    return _is_risk_shaped(stripped) or _is_risk_shaped(
+        _canonical(stripped, _budget)
+    )
 
 
 def _json_container_token(value: Any) -> tuple[str, str] | None:
@@ -2143,6 +2538,7 @@ def _freeze_policy_set(
     expected_confirm: list[str] = []
     expected_risk_review: list[str] = []
     expected_risk_conflicts: list[str] = []
+    inference_context = _PolicyInferenceContext()
     for tool_name, tool in registry.tools.items():
         inferred = infer_risk(tool_name)
         conflict = (
@@ -2166,7 +2562,10 @@ def _freeze_policy_set(
 
         expected_policies[tool_name] = {}
         for param in tool.params:
-            inferred_policy, confidence = infer_policy(param)
+            inferred_policy, confidence = infer_policy(
+                param,
+                inference_context,
+            )
             if confidence is Confidence.UNCERTAIN:
                 if effective_risk is Risk.READ_ONLY:
                     inferred_policy = Policy.TYPED_BOUNDED
@@ -2984,7 +3383,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return diff_main(argv[1:])
     if argv:
-        print("usage: python -m verb_authority [scan|diff ...]", file=sys.stderr)
+        print(
+            "usage: env -u PYTHONPATH -u PYTHONHOME python -I -m "
+            "verb_authority [scan|diff ...]",
+            file=sys.stderr,
+        )
         return 2
     demo()
     return 0

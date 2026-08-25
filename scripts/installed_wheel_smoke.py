@@ -2079,6 +2079,8 @@ def _constraint_diff_and_migration() -> None:
 def _scanner_resource_boundaries() -> None:
     limit_names = (
         "MAX_SCAN_INPUT_BYTES",
+        "MAX_SCAN_TOTAL_INPUT_BYTES",
+        "MAX_SCAN_SCHEMA_DOCUMENTS",
         "MAX_SCAN_JSON_NODES",
         "MAX_SCAN_JSON_MATERIAL_BYTES",
         "MAX_SCAN_TOOL_DEFINITIONS",
@@ -2510,6 +2512,463 @@ def _daybreak_scanner_diff_regressions() -> None:
         )
 
 
+def _daybreak_followup_regressions() -> None:
+    """Repeat the post-adeb1fa audit families from the installed artifact."""
+
+    calls: list[dict[str, Any]] = []
+
+    def write_selection(**arguments: Any) -> dict[str, bool]:
+        calls.append(arguments)
+        return {"ok": True}
+
+    for selector_name in (
+        "recipientiD",
+        "messageiD2",
+        "walletkeY",
+        "customeruuiD",
+        "messageI_D",
+        "messageI-D",
+        "walletK_eY",
+    ):
+        registry = Registry()
+        registry.add(
+            Tool(
+                "write_selection",
+                [Param(selector_name, "integer")],
+                fn=write_selection,
+                risk=Risk.WRITE,
+            )
+        )
+        policy = build_policy(registry)
+        execution = GuardedToolRunner(registry, policy).run(
+            {
+                "name": "write_selection",
+                "input": {selector_name: 7},
+            }
+        )
+        _check(
+            policy.policy["write_selection"][selector_name]
+            is Policy.TRUSTED_FIXED
+            and ("write_selection", selector_name) in policy.review
+            and not execution.invoked
+            and not execution.executed,
+            f"installed mixed-case selector bypassed authority: {selector_name}",
+        )
+    _check(calls == [], "installed selector regression reached an executor")
+
+    normalization_calls: list[tuple[str, str]] = []
+    original_unicode = verb_authority.unicodedata
+    original_normalize = original_unicode.normalize
+
+    def counted_normalize(form: str, value: str) -> str:
+        normalization_calls.append((form, value))
+        return original_normalize(form, value)
+
+    normalization_registry = Registry()
+    normalization_registry.add(
+        Tool(
+            "send_value",
+            [Param("destination", "json", sink=True)],
+            risk=Risk.WRITE,
+        )
+    )
+    normalization_policy = build_policy(normalization_registry)
+    verb_authority.unicodedata = types.SimpleNamespace(
+        normalize=counted_normalize,
+        name=original_unicode.name,
+    )
+    try:
+        rejected = verb_authority.gate(
+            normalization_registry,
+            normalization_policy,
+            "send_value",
+            {
+                "destination": [
+                    "é" * verb_authority.MAX_NFKC_INPUT_CHARS
+                ]
+                * 300
+            },
+            {"destination": "data"},
+        )
+        _check(
+            not rejected.allow and normalization_calls == [],
+            "installed gate normalized a data-authored locked sink before denial",
+        )
+
+        adversarial = "\u0315\u0300" * (
+            verb_authority.MAX_NFKC_INPUT_CHARS // 2
+        )
+        duplicate_ledger = verb_authority.ProvenanceLedger()
+        duplicate_ledger.record_result([adversarial] * 300)
+        duplicate_ledger.record_result([adversarial] * 300)
+        _check(
+            not duplicate_ledger.saturated and len(normalization_calls) == 1,
+            "installed ledger repeated NFKC work for duplicate result leaves",
+        )
+    finally:
+        verb_authority.unicodedata = original_unicode
+
+    overlong_unicode = "a" + "\u0315\u0300" * (
+        verb_authority.MAX_NFKC_INPUT_CHARS // 2 + 1
+    )
+    _check(
+        verb_authority._identifier_tokens(overlong_unicode) == ()
+        and verb_authority._has_mixed_script(overlong_unicode),
+        "installed runtime entered unbounded identifier normalization",
+    )
+    long_hebrew = "א" * (verb_authority.MAX_NFKC_INPUT_CHARS + 1)
+    ledger = verb_authority.ProvenanceLedger()
+    ledger.record_result({"payload": long_hebrew})
+    _check(
+        not ledger.saturated
+        and ledger._normalization_incomplete is True
+        and ledger._ascii_normalization_incomplete is False
+        and not ledger.is_tainted("https://approved.example/path")
+        and ledger.is_tainted("https://例え.テスト/path")
+        and not ledger.is_tainted("ordinary short text"),
+        "installed ledger mishandled its bounded partial canonical index",
+    )
+    skeleton_ledger = verb_authority.ProvenanceLedger()
+    skeleton_ledger.record_result(
+        {
+            "payload": long_hebrew
+            + "ｈｔｔｐｓ：／／ｅｖｉｌ．ｅｘａｍｐｌｅ／ｐａｔｈ "
+            + "attacker [a t] evil {d\to\tt} com"
+        }
+    )
+    _check(
+        skeleton_ledger.is_tainted("https://evil.example/path")
+        and skeleton_ledger.is_tainted("attacker@evil.com")
+        and not skeleton_ledger.is_tainted("https://approved.example/path"),
+        "installed ledger lost an ASCII destination hidden in long Unicode",
+    )
+
+    ambiguous_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "properties": {"recipient": {"type": "string"}}
+                },
+            }
+        ]
+    }
+    ambiguous_report = scan_documents([ambiguous_document])
+    _check(
+        ambiguous_report["tools"][0]["schema_review_required"] is True
+        and [
+            argument["name"]
+            for argument in ambiguous_report["tools"][0]["arguments"]
+        ]
+        == ["recipient"],
+        "installed scanner produced a clean properties collision",
+    )
+    empty_collision = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "inputSchema": {"properties": {}},
+                    }
+                ]
+            }
+        ]
+    )
+    _check(
+        empty_collision["tools"][0]["schema_review_required"] is True,
+        "installed scanner produced a clean empty properties collision",
+    )
+
+    pattern_before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    pattern_after_document = copy.deepcopy(pattern_before_document)
+    pattern_after_schema = pattern_after_document["tools"][0]["inputSchema"]
+    pattern_after_schema["properties"] = {}
+    pattern_after_schema["patternProperties"] = {"^recipient$": True}
+    pattern_after = scan_documents([pattern_after_document])
+    pattern_diff = diff_reports(
+        scan_documents([pattern_before_document]),
+        pattern_after,
+    )
+    removed = next(
+        change
+        for change in pattern_diff["changes"]
+        if change["kind"] == "argument_removed"
+    )
+    _check(
+        pattern_after["tools"][0]["schema_closes_unknown_arguments"] is False
+        and pattern_after["tools"][0]["schema_review_required"] is True
+        and removed["classification"] == "authority_increase",
+        "installed diff presented patternProperties removal as protection",
+    )
+
+    exposure_before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                    "additionalProperties": True,
+                },
+            }
+        ]
+    }
+    exposure_after_document = copy.deepcopy(exposure_before_document)
+    exposure_after_document["tools"][0]["inputSchema"]["properties"] = {}
+    exposure_before_controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "arguments": {
+                    "recipient": {
+                        "authority": "locked",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+    exposure_after_controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "unexposed_arguments": {
+                    "recipient": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "authenticated session",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+    exposure_after = scan_documents(
+        [exposure_after_document],
+        control_declarations=exposure_after_controls,
+    )
+    exposure_diff = diff_reports(
+        scan_documents(
+            [exposure_before_document],
+            control_declarations=exposure_before_controls,
+        ),
+        exposure_after,
+    )
+    exposure_change = next(
+        change
+        for change in exposure_diff["changes"]
+        if change["kind"] == "argument_exposure_changed"
+    )
+    _check(
+        exposure_after["tools"][0]["schema_review_required"] is True
+        and exposure_change["classification"] == "authority_increase",
+        "installed diff trusted an unexposed declaration on an open schema",
+    )
+
+    bound_schema = {
+        "tools": [
+            {
+                "name": "place_order",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"amount": {"type": "number"}},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+    def bound(source: str) -> dict[str, Any]:
+        return {
+            "source": source,
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": source,
+        }
+
+    def controls(bounds: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "tools": {
+                "place_order": {
+                    "risk": {
+                        "tier": "write",
+                        "evidence": "attested",
+                        "effects": ["places_order"],
+                    },
+                    "arguments": {
+                        "amount": {
+                            "authority": "constrained",
+                            "evidence": "attested",
+                            "bounds": bounds,
+                        }
+                    },
+                }
+            },
+        }
+
+    bound_diff = diff_reports(
+        scan_documents(
+            [bound_schema],
+            control_declarations=controls([bound("amount <= 100")]),
+        ),
+        scan_documents(
+            [bound_schema],
+            control_declarations=controls(
+                [bound("amount <= 1000000000"), bound("amount >= 0")]
+            ),
+        ),
+    )
+    bound_change = next(
+        change
+        for change in bound_diff["changes"]
+        if change["kind"] == "bounds_changed"
+    )
+    _check(
+        bound_change["classification"] == "review"
+        and bound_diff["summary"]["protection_increases"] == 0,
+        "installed diff ordered replacement bounds by count",
+    )
+
+    downgrade_before = controls(
+        [
+            {
+                "source": "absolute ceiling",
+                "bounds_mutability": "immutable",
+                "operational_status": "enforced",
+                "enforcement": "constant check",
+            }
+        ]
+    )
+    downgrade_after = controls(
+        [
+            {
+                "source": "absolute ceiling",
+                "bounds_mutability": "trusted_party",
+                "operational_status": "enforced",
+                "enforcement": "constant check",
+            },
+            {
+                "source": "different immutable budget",
+                "bounds_mutability": "immutable",
+                "operational_status": "enforced",
+                "enforcement": "separate constant check",
+            },
+        ]
+    )
+    downgrade_diff = diff_reports(
+        scan_documents(
+            [bound_schema], control_declarations=downgrade_before
+        ),
+        scan_documents([bound_schema], control_declarations=downgrade_after),
+    )
+    downgrade_change = next(
+        change
+        for change in downgrade_diff["changes"]
+        if change["kind"] == "bounds_changed"
+    )
+    _check(
+        downgrade_change["classification"] == "authority_increase",
+        "installed diff let a new bound mask a known bound downgrade",
+    )
+
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    short_commit = commit[:7]
+    markdown = render_markdown(
+        scan_documents(
+            [
+                {
+                    "tools": [
+                        {
+                            "name": (
+                                f"GH-26 #7 @yairsabag {short_commit} {commit}"
+                            ),
+                            "inputSchema": {"type": "object"},
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+    _check(
+        "GH-26" not in markdown
+        and "#7" not in markdown
+        and "@yairsabag" not in markdown
+        and commit not in markdown
+        and "GH&#8204;-26" in markdown
+        and "#&#8204;7" in markdown
+        and "@&#8204;yairsabag" in markdown
+        and short_commit[:3] + "&#8204;" + short_commit[3:] in markdown,
+        "installed Markdown renderer emitted a GitHub reference",
+    )
+
+    original_total = verb_authority_scan.MAX_SCAN_TOTAL_INPUT_BYTES
+    original_documents = verb_authority_scan.MAX_SCAN_SCHEMA_DOCUMENTS
+    try:
+        with TemporaryDirectory(prefix="verb-authority-wheel-aggregate-") as directory:
+            root = Path(directory)
+            schema_path = root / "schema.json"
+            output_path = root / "report.json"
+            schema_text = " " * 80 + json.dumps(
+                {
+                    "tools": [
+                        {
+                            "name": "read_record",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        }
+                    ]
+                }
+            )
+            schema_path.write_text(schema_text, encoding="utf-8")
+            verb_authority_scan.MAX_SCAN_TOTAL_INPUT_BYTES = len(schema_text) + 1
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(stderr):
+                    verb_authority_scan.main(
+                        [
+                            str(schema_path),
+                            str(schema_path),
+                            "--format",
+                            "json",
+                            "--output",
+                            str(output_path),
+                        ]
+                    )
+            except SystemExit as exc:
+                _check(exc.code == 2, "aggregate byte cap returned wrong status")
+            else:
+                raise AssertionError("installed scanner ignored aggregate bytes")
+
+            verb_authority_scan.MAX_SCAN_TOTAL_INPUT_BYTES = original_total
+            verb_authority_scan.MAX_SCAN_SCHEMA_DOCUMENTS = 1
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    verb_authority_scan.main(
+                        [str(schema_path), str(schema_path), "--format", "json"]
+                    )
+            except SystemExit as exc:
+                _check(exc.code == 2, "document cap returned wrong status")
+            else:
+                raise AssertionError("installed scanner ignored document count")
+    finally:
+        verb_authority_scan.MAX_SCAN_TOTAL_INPUT_BYTES = original_total
+        verb_authority_scan.MAX_SCAN_SCHEMA_DOCUMENTS = original_documents
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the installed Verb Authority wheel outside its checkout."
@@ -2550,6 +3009,7 @@ def main() -> int:
         _constraint_diff_and_migration,
         _scanner_resource_boundaries,
         _daybreak_scanner_diff_regressions,
+        _daybreak_followup_regressions,
     )
     for check in checks:
         check()

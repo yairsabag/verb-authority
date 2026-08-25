@@ -27,7 +27,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python scripts/verify_release_artifacts.py tag \
+          python -I scripts/verify_release_artifacts.py tag \
             --project pyproject.toml \
             --tag "$RELEASE_TAG"
 
@@ -41,17 +41,20 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python scripts/verify_release_artifacts.py sdist \
+          python -I scripts/verify_release_artifacts.py sdist \
             --project pyproject.toml \
             --dist dist \
             --tag "$RELEASE_TAG"
 
       - name: Extract and inspect source distribution
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          mkdir -p "${{ runner.temp }}/verb-authority-sdist"
-          sdist_archive=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
-          test -n "$sdist_archive"
-          tar -xzf "$sdist_archive" -C "${{ runner.temp }}/verb-authority-sdist"
+          python -I scripts/verify_release_artifacts.py extract-sdist \
+            --project pyproject.toml \
+            --dist dist \
+            --output "${{ runner.temp }}/verb-authority-sdist" \
+            --tag "$RELEASE_TAG"
           sdist_root=$(find "${{ runner.temp }}/verb-authority-sdist" \
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
@@ -74,8 +77,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python "$SDIST_ROOT/scripts/verify_release_artifacts.py" artifacts \
-            --project "$SDIST_ROOT/pyproject.toml" \
+          python -I scripts/verify_release_artifacts.py artifacts \
+            --project pyproject.toml \
             --dist "${{ github.workspace }}/dist" \
             --tag "$RELEASE_TAG"
 
@@ -93,7 +96,12 @@ jobs:
       - name: Exercise installed commands outside the checkout
         working-directory: ${{ runner.temp }}
         run: |
-          env -u PYTHONPATH -u PYTHONHOME \
+          printf '%s\n' \
+            'from pathlib import Path' \
+            'Path("installed-smoke-shadow.marker").write_text("temp module imported", encoding="utf-8")' \
+            'raise SystemExit(0)' \
+            > verb_authority.py
+          env -u PYTHONHOME PYTHONPATH="${{ runner.temp }}" \
             python -I -m verb_authority
           env -u PYTHONPATH -u PYTHONHOME \
             verb-authority scan --help
@@ -120,6 +128,7 @@ jobs:
             python -I -c 'import json; assert json.load(open("authority-diff.json"))["summary"]["changes"] == 0'
           env -u PYTHONPATH -u PYTHONHOME \
             python -I -m pip check
+          test ! -e installed-smoke-shadow.marker
 
       - name: Preserve release distributions
         uses: actions/upload-artifact@v7

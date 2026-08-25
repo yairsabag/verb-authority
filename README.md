@@ -50,24 +50,30 @@ Verb Authority is not published on PyPI. Install the current source directly
 from GitHub:
 
 ```bash
-python -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.6"
-python -m verb_authority
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.8"
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.6 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.6)
+The [beta.8 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
+
+The `verb-authority`, `verb-authority-scan`, and `verb-authority-diff` console
+shortcuts are convenient in a trusted interpreter environment, but a console
+script cannot enable Python isolation for itself and can honor a hostile
+`PYTHONPATH`. When the current directory or environment is not fully trusted,
+use the isolated `env -u ... python -I -m verb_authority` form shown above.
 
 For a local checkout instead:
 
 ```bash
 git clone https://github.com/yairsabag/verb-authority.git
 cd verb-authority
-python -m pip install .
+python -I -m pip install .
 ```
 
 ## 60-second quickstart
@@ -203,6 +209,12 @@ the ledger becomes permanently saturated, and every later call is denied until
 the application starts a new session with a fresh ledger. The already-entered
 tool must not be retried: the runner reports `invoked=True`, `executed=False`,
 and `contract_violation="ledger_capacity_exceeded"` with that instruction.
+Unicode normalization is bounded twice: no individual NFKC input may exceed
+4,096 characters, and one policy-inference, gate, ledger-publication, or lookup
+operation shares a cumulative 32,768-character work budget across all of its
+nested values. Repeated result strings are normalized once per publication.
+Budget exhaustion fails closed; data-authored locked sinks are rejected before
+their nested values enter normalization at all.
 
 The runner is deliberately synchronous. It rejects coroutine and async-
 generator implementations before invocation, rejects awaitable results, and
@@ -281,7 +293,7 @@ Export the tool definitions your client already receives, then scan them
 without starting a tool server or uploading the schema:
 
 ```bash
-python -m verb_authority scan tools.json --output authority-report.md
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json --output authority-report.md
 ```
 
 The scanner accepts MCP `tools/list` responses, OpenAI function tools, and
@@ -294,17 +306,22 @@ descriptions, examples, defaults, runtime values, and the input filename. For a
 report intended for public sharing, also remove tool and parameter names:
 
 ```bash
-python -m verb_authority scan tools.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
   --redact-names --format json --output authority-report.json
 ```
 
 Scanner inputs have their own fail-closed resource boundary. Each JSON file is
-limited to 8 MiB of UTF-8 before parsing. One logical scan, aggregated across
-all schema documents and a control sidecar, is limited to 100,000 JSON values
+limited to 8 MiB of UTF-8 before parsing. The CLI additionally limits one scan
+to 500 input documents and 16 MiB of actual UTF-8 input shared lazily across
+all schema files, stdin, and the control sidecar. One logical scan is limited
+to 100,000 JSON values
 and object keys, 2 MiB of conservatively estimated ASCII-safe JSON material,
 500 tool definitions, 2,000 schema or unexposed arguments, 10,000 enum members,
 and 2,000 declaration collection members across risk effects and argument
 bounds. The generated report is checked against the same node/material limits.
+Identifier inference also shares one bounded NFKC work budget across the whole
+scan and reuses cached decisions, so many individually valid Unicode names
+cannot multiply normalization work.
 `parse_tool_definitions`, `scan_definitions`, `scan_documents`, and the CLI
 enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
 reports before indexing them. An over-limit CLI input exits with status 2 and
@@ -358,8 +375,10 @@ composition need attention. The scanner does not resolve `$ref`, `allOf`,
 `summary.schema_review_required_tools`, so authority-bearing properties hidden
 behind those constructs cannot produce a silent clean result. The same flag is
 set for required names absent from the modeled `properties` map, multi-type
-unions, and ambiguous direct-shape exports whose argument names collide with
-JSON Schema wrapper keywords. Direct-shape collisions preserve the arguments
+unions, dynamic `patternProperties`, and ambiguous direct-shape exports whose
+argument names collide with JSON Schema wrapper keywords. A schema with
+dynamic property admission is not reported as closed to unknown arguments.
+Direct-shape collisions preserve the arguments
 in the report rather than silently replacing them with an empty list. The
 structurally indistinguishable `properties` collision remains an explicit
 review obligation instead of a clean empty audit. Static inference is a review
@@ -417,7 +436,7 @@ implementation evidence:
 Pass that file separately from the exported schemas:
 
 ```bash
-python -m verb_authority scan tools.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
   --controls controls.json --output authority-report.md
 ```
 
@@ -440,6 +459,11 @@ a design that is not running (`specified`). If omitted, the report preserves
 the absence as `not_stated` rather than assuming the control is active.
 Evidence may be `observed`, `declared`, or `attested`. Unexposed arguments
 currently support the explicit `server_fixed` control.
+Declaring an argument unexposed does not close an otherwise open or dynamic
+schema: that contradiction remains `schema_review_required`, and moving a
+previously exposed argument to such a declaration is not reported as a
+protection increase unless the candidate schema actually closes unknown
+arguments.
 
 These declarations are author-supplied evidence: the scanner validates their
 shape, fingerprints them, and displays them alongside (not instead of) its
@@ -465,7 +489,7 @@ Compare two exported tool schemas directly. Verb Authority scans both inputs
 locally, then reports only authority-relevant changes:
 
 ```bash
-python -m verb_authority diff tools-main.json tools-pr.json
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority diff tools-main.json tools-pr.json
 ```
 
 Example output:
@@ -492,7 +516,7 @@ visible without tripping that flag. Add `--fail-on-review` when any ambiguous
 or unmodeled change should also return status 2:
 
 ```bash
-python -m verb_authority diff tools-main.json tools-pr.json \
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority diff tools-main.json tools-pr.json \
   --fail-on-increase --fail-on-review
 ```
 
@@ -504,7 +528,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.6
+- uses: yairsabag/verb-authority@v0.10.0-beta.8
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -524,9 +548,8 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.6
-pin in the example above predates `fail_on_review`; pin beta.8 or later after
-that release is published to use the second threshold. The action removes
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.8
+pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
 `pip` or the installed Verb Authority package.
@@ -538,9 +561,13 @@ review. Authority Diff is not a complete JSON Schema equivalence checker.
 Removing a modeled argument counts as protection only when the candidate schema
 also rejects unknown arguments; in an open schema the same name remains
 caller-visible without its modeled policy, so the change is an authority
-increase. Enforced bound chains compare independently controlled strength
-before raw count: caller-controlled bounds cannot replace a trusted or
-immutable bound and be reported as stronger.
+increase. Enforced bound chains retain exact control identity: adding an exact
+independently controlled bound is protection, removing one is weakening, and
+replacing an author-written bound with a different claim remains review rather
+than being ordered by mutability label or raw count. A mutability change on the
+same retained enforced bound is ordered explicitly (`immutable` is stronger
+than `trusted_party`, which is stronger than `caller`), and exact duplicate
+bounds are rejected rather than counted twice.
 Schema changes outside the modeled vocabulary are surfaced through the
 unmodeled-schema fingerprint as `REVIEW`; any change it cannot order safely
 requires independent review rather than an assumption that no reported
@@ -583,6 +610,14 @@ The project is one importable module with five cooperating pieces:
   text. NFKC normalization and recursive script detection reject a locked JSON
   string or key containing more than one of the tracked Latin, Greek, and
   Cyrillic scripts.
+  Every NFKC call has a pre-normalization work ceiling. A longer non-ASCII tool
+  result is still retained for exact and raw-substring taint. A bounded,
+  per-code-point compatibility skeleton also preserves ASCII email and URI
+  disguises without normalizing the hostile whole string, so unrelated ASCII
+  destinations are not blocked merely because long Unicode appeared earlier.
+  Non-ASCII destinations remain fail-closed while that full canonical index is
+  incomplete; if even the bounded ASCII skeleton cannot be completed, ASCII
+  destination promotion fails closed too.
   The ledger is bounded and fail-closed: capacity exhaustion saturates the
   session instead of evicting old evidence, so callers must create a fresh
   session and must not retry the tool call that already produced the result.
@@ -735,10 +770,10 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. v0.10.0-beta.6 is the current public beta
-for the local schema scanner, control evidence, Authority Diff, and Tool
-Authority Atlas. v0.10.0-beta.8 is an unpublished runtime-integration release
-candidate under independent audit; beta.7 was withheld and is not reused.
+v0.9.0 is the latest stable release. This source tree describes
+v0.10.0-beta.8 for the local schema scanner, control evidence, Authority Diff,
+Tool Authority Atlas, and runtime-integration boundary; beta.7 was withheld
+and is not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

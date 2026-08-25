@@ -200,6 +200,39 @@ def test_case_6_documents_control_flow_influence_among_approved_choices():
     assert outbox[0]["to"] == "dana@company.com"
 
 
+@pytest.mark.parametrize(
+    "selector_name",
+    [
+        "recipientiD",
+        "messageiD2",
+        "walletkeY",
+        "customeruuiD",
+        "messageI_D",
+        "messageI-D",
+        "walletK_eY",
+    ],
+)
+def test_pathological_selector_casing_never_reaches_the_executor(selector_name):
+    calls = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "write_selection",
+            [Param(selector_name, "integer")],
+            fn=lambda **arguments: calls.append(arguments) or {"ok": True},
+            risk=Risk.WRITE,
+        )
+    )
+
+    execution = GuardedToolRunner(registry).run(
+        {"name": "write_selection", "input": {selector_name: 7}}
+    )
+
+    assert not execution.invoked and not execution.executed
+    assert "locked sink" in execution.decision.reason
+    assert calls == []
+
+
 def test_confirmation_is_fail_closed_before_financial_execution():
     transfers = []
 
@@ -2046,6 +2079,275 @@ def test_ledger_capacity_overflow_is_atomic_and_saturates_the_session(
     assert set(ledger._canon_blobs) == before[3]
     assert ledger._utf8_bytes == before[4]
     assert ledger.is_tainted("any later value fails closed")
+
+
+def test_duplicate_result_leaves_are_normalized_only_once(monkeypatch):
+    ledger = ProvenanceLedger()
+    adversarial = "\u0315\u0300" * (authority.MAX_NFKC_INPUT_CHARS // 2)
+    original_normalize = authority.unicodedata.normalize
+    normalization_calls = []
+
+    def counted_normalize(form, value):
+        normalization_calls.append((form, value))
+        return original_normalize(form, value)
+
+    monkeypatch.setattr(
+        authority,
+        "unicodedata",
+        types.SimpleNamespace(
+            normalize=counted_normalize,
+            name=authority.unicodedata.name,
+        ),
+    )
+
+    ledger.record_result([adversarial] * 300)
+    ledger.record_result([adversarial] * 300)
+
+    assert not ledger.saturated
+    assert len(normalization_calls) == 1
+
+
+def test_distinct_result_nfkc_work_exhaustion_is_atomic_and_saturates(
+    monkeypatch,
+):
+    ledger = ProvenanceLedger()
+    monkeypatch.setattr(authority, "MAX_NFKC_OPERATION_CHARS", 8)
+
+    with pytest.raises(ValueError, match="start a new session"):
+        ledger.record_result(["éaaa", "öbbb", "üccc"])
+
+    assert ledger.saturated
+    assert ledger._tainted == set()
+    assert ledger._blobs == set()
+    assert ledger._canon_blobs == set()
+
+
+def test_overlong_unicode_result_keeps_raw_taint_without_nfkc(monkeypatch):
+    ledger = ProvenanceLedger()
+    overlong = "א" * (authority.MAX_NFKC_INPUT_CHARS + 1)
+    normalization_calls = []
+    original_normalize = authority.unicodedata.normalize
+
+    def forbidden_normalize(form, value):
+        if len(value) > authority.MAX_NFKC_INPUT_CHARS:
+            normalization_calls.append((form, value))
+            raise AssertionError("NFKC must not run beyond its work ceiling")
+        return original_normalize(form, value)
+
+    monkeypatch.setattr(
+        authority,
+        "unicodedata",
+        types.SimpleNamespace(
+            normalize=forbidden_normalize,
+            name=authority.unicodedata.name,
+        ),
+    )
+
+    ledger.record_result({"payload": overlong})
+
+    assert not ledger.saturated
+    assert ("string", overlong) in ledger._tainted
+    assert overlong in ledger._blobs
+    assert ledger._canon_blobs == {"\x00"}
+    assert ledger._normalization_incomplete is True
+    assert ledger._ascii_normalization_incomplete is False
+    assert normalization_calls == []
+    assert ledger.is_tainted(overlong)
+    assert not ledger.is_tainted("https://approved.example/path")
+    assert ledger.is_tainted("https://例え.テスト/path")
+    assert not ledger.is_tainted("ordinary short text")
+
+
+def test_ascii_skeleton_matches_full_canonical_on_compatibility_samples():
+    samples = [
+        "ｈｔｔｐｓ：／／ｅｖｉｌ．ｅｘａｍｐｌｅ／ｐａｔｈ",
+        "ⓗⓣⓣⓟⓢ://ⓔⓥⓘⓛ.ⓔⓧⓐⓜⓟⓛⓔ/ⓟⓐⓣⓗ",
+        "ﬀoo＠example．com",
+        "\u3000https://evil.example/path\u202f",
+    ]
+
+    for sample in samples:
+        canonical = authority._canonical(sample)
+        assert canonical.isascii()
+        assert authority._canonical_ascii_skeleton(sample) == canonical
+
+
+def test_overlong_unicode_ascii_skeleton_retains_disguised_destination():
+    ledger = ProvenanceLedger()
+    disguised = (
+        "ｈｔｔｐｓ：／／ｅｖｉｌ．ｅｘａｍｐｌｅ／ｐａｔｈ "
+        "attacker [at] evil [dot] com "
+        "other { a\tt } bad { d\to\tt } example"
+    )
+    overlong = "א" * (authority.MAX_NFKC_INPUT_CHARS + 1) + disguised
+
+    ledger.record_result({"payload": overlong})
+
+    assert ledger._normalization_incomplete is True
+    assert ledger._ascii_normalization_incomplete is False
+    assert ledger.is_tainted("https://evil.example/path")
+    assert ledger.is_tainted("attacker@evil.com")
+    assert ledger.is_tainted("other@bad.example")
+    assert not ledger.is_tainted("https://approved.example/path")
+
+
+def test_ascii_skeleton_output_cap_fails_closed_without_ledger_growth(
+    monkeypatch,
+):
+    monkeypatch.setattr(authority, "MAX_CANONICAL_SKELETON_CHARS", 8)
+    ledger = ProvenanceLedger()
+    overlong = (
+        "א" * (authority.MAX_NFKC_INPUT_CHARS + 1)
+        + "ｈｔｔｐｓ：／／ｅｖｉｌ．ｅｘａｍｐｌｅ／ｐａｔｈ"
+    )
+
+    ledger.record_result({"payload": overlong})
+
+    assert not ledger.saturated
+    assert ledger._ascii_normalization_incomplete is True
+    assert ledger.is_tainted("https://approved.example/path")
+
+
+def test_long_ascii_result_remains_supported_without_nfkc(monkeypatch):
+    ledger = ProvenanceLedger()
+    long_ascii = "plain text " * (authority.MAX_NFKC_INPUT_CHARS // 5)
+
+    def forbidden_normalize(*args):
+        raise AssertionError("ASCII must not enter Unicode normalization")
+
+    monkeypatch.setattr(
+        authority,
+        "unicodedata",
+        types.SimpleNamespace(
+            normalize=forbidden_normalize,
+            name=authority.unicodedata.name,
+        ),
+    )
+
+    ledger.record_result({"payload": long_ascii})
+
+    assert not ledger.saturated
+    assert ledger.is_tainted(long_ascii)
+
+
+def test_runner_denies_overlong_locked_value_before_nfkc_or_invocation(
+    monkeypatch,
+):
+    calls = []
+    overlong = "a" + "\u0315\u0300" * (
+        authority.MAX_NFKC_INPUT_CHARS // 2 + 1
+    )
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_destination",
+            [Param("destination", "string", sink=True)],
+            fn=lambda destination: calls.append(destination) or {"ok": True},
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    normalization_calls = []
+    original_normalize = authority.unicodedata.normalize
+
+    def forbidden_normalize(form, value):
+        if len(value) > authority.MAX_NFKC_INPUT_CHARS:
+            normalization_calls.append((form, value))
+            raise AssertionError("NFKC must not run beyond its work ceiling")
+        return original_normalize(form, value)
+
+    monkeypatch.setattr(
+        authority,
+        "unicodedata",
+        types.SimpleNamespace(
+            normalize=forbidden_normalize,
+            name=authority.unicodedata.name,
+        ),
+    )
+
+    execution = runner.run(
+        {"name": "set_destination", "input": {"destination": overlong}},
+        trusted_args={"destination": overlong},
+    )
+
+    assert not execution.invoked and not execution.executed
+    assert "locked sink" in execution.decision.reason
+    assert calls == []
+    assert normalization_calls == []
+
+
+def test_runner_overlong_result_preserves_execution_but_blocks_risky_promotion(
+    monkeypatch,
+):
+    calls = []
+    overlong = (
+        "א" * (authority.MAX_NFKC_INPUT_CHARS + 1)
+        + "ｈｔｔｐｓ：／／ｅｖｉｌ．ｅｘａｍｐｌｅ／ｐａｔｈ"
+    )
+    registry = Registry()
+    registry.add(
+        Tool(
+            "read_value",
+            [],
+            fn=lambda: calls.append("invoked") or overlong,
+            risk=Risk.READ_ONLY,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+    normalization_calls = []
+    original_normalize = authority.unicodedata.normalize
+
+    def forbidden_normalize(form, value):
+        if len(value) > authority.MAX_NFKC_INPUT_CHARS:
+            normalization_calls.append((form, value))
+            raise AssertionError("NFKC must not run beyond its work ceiling")
+        return original_normalize(form, value)
+
+    monkeypatch.setattr(
+        authority,
+        "unicodedata",
+        types.SimpleNamespace(
+            normalize=forbidden_normalize,
+            name=authority.unicodedata.name,
+        ),
+    )
+
+    first = runner.run({"name": "read_value", "input": {}})
+    assert first.invoked and first.executed
+    assert first.contract_violation is None
+    assert first.result == overlong
+    assert calls == ["invoked"]
+    assert normalization_calls == []
+
+    writes = []
+    write_registry = Registry()
+    write_registry.add(
+        Tool(
+            "send_message",
+            [Param("to", "string", sink=True)],
+            fn=lambda to: writes.append(to) or {"ok": True},
+            risk=Risk.WRITE,
+        )
+    )
+    allowed = GuardedToolRunner(write_registry, ledger=runner.ledger).run(
+        {
+            "name": "send_message",
+            "input": {"to": "https://approved.example/path"},
+        },
+        trusted_args={"to": "https://approved.example/path"},
+    )
+    assert allowed.invoked and allowed.executed
+
+    blocked = GuardedToolRunner(write_registry, ledger=runner.ledger).run(
+        {
+            "name": "send_message",
+            "input": {"to": "https://evil.example/path"},
+        },
+        trusted_args={"to": "https://evil.example/path"},
+    )
+    assert not blocked.invoked and not blocked.executed
+    assert "locked sink" in blocked.decision.reason
+    assert writes == ["https://approved.example/path"]
 
 
 def test_runner_reports_ledger_capacity_after_invocation_and_never_retries(

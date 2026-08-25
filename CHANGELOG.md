@@ -76,6 +76,9 @@ tag or GitHub release was created, and the version is intentionally not reused.
   `recipient1` cannot become broadly caller-authorable. Flatcase suffixes fail
   closed without relying on a finite entity-prefix list; `sink=False` remains
   the explicit release valve for an ordinary word that shares a suffix.
+  Also compare an alphanumeric-only identifier view so separator-split suffixes
+  such as `messageI_D`, `messageI-D`, and `walletK_eY` cannot bypass the same
+  selector boundary.
   Implement tokenization as a bounded linear pass rather than a backtracking
   uppercase-name expression.
 - Normalize valid string-valued policy/risk enum entries consistently in the
@@ -130,6 +133,18 @@ tag or GitHub release was created, and the version is intentionally not reused.
   evicted, overflow saturates the session, the already-invoked call reports
   `ledger_capacity_exceeded` with an explicit no-retry instruction, and later
   calls require a fresh ledger.
+- Put a pre-normalization work ceiling on every NFKC path. Long non-ASCII tool
+  results retain exact/raw taint and build a bounded per-code-point ASCII
+  compatibility skeleton, preserving disguised ASCII email/URI containment
+  without blocking unrelated ASCII destinations; non-ASCII destinations remain
+  fail-closed while whole-string canonicalization is incomplete. Convert
+  bracketed `(at)`/`[at]` and `(dot)`/`[dot]` separators before disguise
+  stripping so the documented lexical transform is actually enforced.
+  Share a cumulative 32,768-character NFKC budget across each policy
+  inference, gate, ledger publication or lookup, cache repeated identifier and
+  result decisions, and reject data-authored locked sinks before traversing
+  their nested Unicode values. Bound the partial ASCII skeleton's output as
+  well as its distinct code points, so long Unicode cannot amplify memory.
 - Canonicalize a rejected runtime enum candidate once rather than once per
   declared member. Skip ledger-history containment scans when no exact trusted
   candidate could promote provenance, and share a deterministic 16-MiB
@@ -163,6 +178,26 @@ tag or GitHub release was created, and the version is intentionally not reused.
   extension payloads cannot consume unbounded work
   before rejection; verify the source distribution before extraction in
   CI/release jobs, and refuse unexpected local or pre-existing release assets.
+- Parse source archives through one bounded verifier/extractor that accepts only
+  the build backend's local `mtime` PAX field, rejects global PAX, size/path
+  overrides and sparse metadata before allocation, and validates every portable
+  path before writing. Require the exact source manifest and byte payloads from
+  the trusted checkout, permitting only a fixed, independently validated set of
+  generated setuptools metadata; the extracted verifier, build configuration,
+  tests, and smoke script therefore cannot become their own root of trust.
+  Require exactly one gzip member, drain the complete stream, validate its
+  CRC/trailer, and reject non-zero bytes after the tar end marker before
+  trusting the archive. Reject Windows device aliases including `CONIN$`, `CONOUT$`,
+  `CLOCK$`, and superscript COM/LPT forms. Derive an exact wheel allowlist from
+  project metadata;
+  validate every `RECORD` row, entry point, top-level marker, compression method
+  and payload; and require wheel modules, license and core metadata to match the
+  verified source distribution.
+- Validate sdist and wheel core metadata against the trusted `pyproject.toml`,
+  including Metadata-Version, name, version, Requires-Python, runtime
+  dependencies, optional dependencies, and extras. Require the supported
+  `Wheel-Version: 1.0`; matching attacker-edited PKG-INFO/METADATA copies are no
+  longer sufficient.
 - Isolate both composite-action Python entry points with `-I` and remove
   `PYTHONPATH`/`PYTHONHOME`, so consumer-workspace `pip.py`,
   `verb_authority.py`, or a planted console script cannot turn a real widening
@@ -225,22 +260,32 @@ tag or GitHub release was created, and the version is intentionally not reused.
   coverage.
 - Recompute author-supplied control fingerprints before comparison and require
   duplicated risk, schema-closure, argument-policy, and review fields to agree
-  across their report locations. Treat removal of a modeled argument from an
-  open schema as an authority increase because the unknown name remains
-  caller-visible. Order enforced bound chains by independently controlled
-  strength before count, so multiple caller-controlled bounds cannot replace
-  one trusted or immutable bound and appear stronger.
+  across their report locations. Reject duplicate declared bounds, require
+  exact identity before an enforced bound counts as retained, and order a
+  structured mutability change only when that same bound remains. Treat
+  removal of a modeled argument from an open schema as an authority increase
+  because the unknown name remains
+  caller-visible; moving it behind dynamic `patternProperties` cannot appear as
+  protection merely because `additionalProperties` is false.
+  Treat an exposed-to-declared-unexposed transition as an authority increase
+  when the candidate schema remains open, as review when closure is uncertain,
+  and as protection only after unknown arguments are demonstrably closed. Mark
+  an unexposed declaration on an open schema as review debt in the scanner.
 - Escape active Markdown link/image syntax and neutralize bare-URL autolinks,
-  mentions, and issue-reference markers in schema-controlled cells as well as
-  terminal and bidirectional controls.
+  mentions, issue-reference markers, GitHub `GH-NNN` shorthand, and raw commit
+  identifiers in schema-controlled cells as well as terminal and bidirectional
+  controls. Insert a zero-width non-joiner inside GitHub reference tokens;
+  entity-encoding the punctuation alone is insufficient after GFM decoding.
 - Add scanner-specific aggregate budgets for JSON nodes/material, tool
   definitions, exposed and unexposed arguments, enum members, and
   report-expanding control collections. Reject oversized files before parsing,
   enforce the same ceilings across every public scanner entry point, recheck
   generated reports, and bound loaded reports before Authority Diff indexes
   them. Load CLI schema paths lazily under that same aggregate budget so a long
-  path list cannot be decoded into memory before rejection; CLI over-limit
-  failures exit 2 without a traceback.
+  path list cannot be decoded into memory before rejection. Additionally cap
+  one CLI invocation at 500 input documents and 16 MiB of raw UTF-8 across
+  schemas, controls and stdin, including CRLF bytes before newline translation;
+  CLI over-limit failures exit 2 without a traceback.
 
 ### Documentation
 

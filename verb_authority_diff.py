@@ -8,6 +8,7 @@ networking code is used.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import unicodedata
@@ -1115,6 +1116,24 @@ def _ranked_change(
 def _bounds_classification(
     before: list[dict[str, Any]], after: list[dict[str, Any]]
 ) -> str:
+    def has_exact_duplicates(bounds: list[dict[str, Any]]) -> bool:
+        canonical = [
+            json.dumps(
+                bound,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for bound in bounds
+        ]
+        return len(canonical) != len(set(canonical))
+
+    # Older reports could contain duplicate author declarations. Repeating the
+    # same assertion does not add protection, so any drift involving such a
+    # report remains explicit review debt rather than an ordered improvement.
+    if has_exact_duplicates(before) or has_exact_duplicates(after):
+        return "review"
+
     before_status = [
         bound.get("operational_status", "not_stated") for bound in before
     ]
@@ -1124,54 +1143,241 @@ def _bounds_classification(
     if "not_stated" in before_status or "not_stated" in after_status:
         return "review"
 
-    before_enforced = [
-        bound
-        for bound, status in zip(before, before_status)
-        if status == "enforced"
-    ]
-    after_enforced = [
-        bound
-        for bound, status in zip(after, after_status)
-        if status == "enforced"
-    ]
-    strength = {"trusted_party": 1, "immutable": 2}
-    before_protective = sorted(
-        strength[bound["bounds_mutability"]]
-        for bound in before_enforced
-        if bound.get("bounds_mutability") in strength
-    )
-    after_protective = sorted(
-        strength[bound["bounds_mutability"]]
-        for bound in after_enforced
-        if bound.get("bounds_mutability") in strength
-    )
+    mutability_rank = {"caller": 0, "trusted_party": 1, "immutable": 2}
 
-    def dominates(candidate: list[int], baseline: list[int]) -> bool:
-        """Whether candidate can match every fixed baseline bound in strength."""
+    def structured_strengths(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> dict[str, list[int]]:
+        groups: dict[str, list[int]] = {}
+        for bound, status in zip(bounds, statuses):
+            identity = dict(bound)
+            identity.pop("bounds_mutability", None)
+            identity.pop("operational_status", None)
+            key = json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            strength = (
+                mutability_rank.get(bound.get("bounds_mutability"), -1)
+                if status == "enforced"
+                else -1
+            )
+            groups.setdefault(key, []).append(strength)
+        for values in groups.values():
+            values.sort()
+        return groups
 
-        if len(candidate) < len(baseline):
-            return False
+    before_strengths = structured_strengths(before, before_status)
+    after_strengths = structured_strengths(after, after_status)
+
+    def dominates_protective_baseline(
+        candidate: list[int], baseline: list[int]
+    ) -> bool:
+        required = [strength for strength in baseline if strength >= 1]
+        available = list(candidate)
         candidate_index = 0
-        for required_strength in baseline:
+        for required_strength in required:
             while (
-                candidate_index < len(candidate)
-                and candidate[candidate_index] < required_strength
+                candidate_index < len(available)
+                and available[candidate_index] < required_strength
             ):
                 candidate_index += 1
-            if candidate_index == len(candidate):
+            if candidate_index == len(available):
                 return False
             candidate_index += 1
         return True
 
-    after_dominates = dominates(after_protective, before_protective)
-    before_dominates = dominates(before_protective, after_protective)
-    if before_dominates and not after_dominates:
+    # A different new bound cannot erase a known weakening of the same
+    # source/enforcement identity. Opaque replacement identities remain review.
+    for identity in before_strengths.keys() & after_strengths.keys():
+        if not dominates_protective_baseline(
+            after_strengths[identity], before_strengths[identity]
+        ):
+            return "authority_increase"
+
+    def canonical_protective(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> Counter[str]:
+        return Counter(
+            json.dumps(
+                bound,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for bound, status in zip(bounds, statuses)
+            if status == "enforced"
+            and bound.get("bounds_mutability") in {"trusted_party", "immutable"}
+        )
+
+    before_protective = canonical_protective(before, before_status)
+    after_protective = canonical_protective(after, after_status)
+
+    def canonical_nonprotective(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> Counter[str]:
+        return Counter(
+            json.dumps(
+                bound,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for bound, status in zip(bounds, statuses)
+            if not (
+                status == "enforced"
+                and bound.get("bounds_mutability")
+                in {"trusted_party", "immutable"}
+            )
+        )
+
+    before_nonprotective = canonical_nonprotective(before, before_status)
+    after_nonprotective = canonical_nonprotective(after, after_status)
+
+    def canonical_bound(bound: dict[str, Any]) -> str:
+        return json.dumps(
+            bound,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def structured_entries(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> dict[str, list[tuple[int, int, str]]]:
+        groups: dict[str, list[tuple[int, int, str]]] = {}
+        for bound, status in zip(bounds, statuses):
+            identity = dict(bound)
+            identity.pop("bounds_mutability", None)
+            identity.pop("operational_status", None)
+            identity_key = canonical_bound(identity)
+            declared_strength = mutability_rank.get(
+                bound.get("bounds_mutability"),
+                -1,
+            )
+            effective_strength = (
+                declared_strength
+                if status == "enforced"
+                else -1
+            )
+            groups.setdefault(identity_key, []).append(
+                (effective_strength, declared_strength, canonical_bound(bound))
+            )
+        return groups
+
+    before_entries = structured_entries(before, before_status)
+    after_entries = structured_entries(after, after_status)
+    unexplained_before_nonprotective = before_nonprotective.copy()
+    unexplained_after_nonprotective = after_nonprotective.copy()
+    for identity in before_entries.keys() & after_entries.keys():
+        before_identity = before_entries[identity]
+        after_identity = after_entries[identity]
+        if len(before_identity) != 1 or len(after_identity) != 1:
+            continue
+        (
+            before_strength,
+            before_declared_strength,
+            before_canonical,
+        ) = before_identity[0]
+        (
+            after_strength,
+            after_declared_strength,
+            after_canonical,
+        ) = after_identity[0]
+        if (
+            after_strength >= 1
+            and after_strength > before_strength
+            and after_declared_strength >= before_declared_strength
+        ):
+            unexplained_before_nonprotective.subtract([before_canonical])
+            unexplained_after_nonprotective.subtract([after_canonical])
+    unexplained_before_nonprotective += Counter()
+    unexplained_after_nonprotective += Counter()
+
+    def canonical_non_enforced(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> Counter[str]:
+        return Counter(
+            json.dumps(
+                bound,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for bound, status in zip(bounds, statuses)
+            if status != "enforced"
+        )
+
+    before_non_enforced = canonical_non_enforced(before, before_status)
+    after_non_enforced = canonical_non_enforced(after, after_status)
+    before_retained = before_protective <= after_protective
+    after_retained = after_protective <= before_protective
+    if after_retained and not before_retained:
         return "authority_increase"
-    if after_dominates and not before_dominates:
-        return "protection_increase"
-    # Caller-controlled bounds are not fixed authority controls. Adding or
-    # removing only those bounds is visible drift, but cannot establish either
-    # a protection increase or a weakening without semantic evidence.
+    if before_retained and not after_retained:
+        if (
+            unexplained_before_nonprotective
+            == unexplained_after_nonprotective
+        ):
+            return "protection_increase"
+        return "review"
+
+    # Mutability is structured evidence, unlike an author-written source or
+    # enforcement description. If the exact same enforced bounds remain and
+    # only that field changes, order the change explicitly. New/replaced
+    # opaque claims still fall through to review and cannot mask a weakening.
+    def identity_groups(
+        bounds: list[dict[str, Any]], statuses: list[str]
+    ) -> dict[str, list[int]]:
+        groups: dict[str, list[int]] = {}
+        for bound, status in zip(bounds, statuses):
+            if status != "enforced":
+                continue
+            mutability = bound.get("bounds_mutability")
+            if mutability not in mutability_rank:
+                continue
+            identity = dict(bound)
+            identity.pop("bounds_mutability", None)
+            key = json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            groups.setdefault(key, []).append(mutability_rank[mutability])
+        for values in groups.values():
+            values.sort()
+        return groups
+
+    before_groups = identity_groups(before, before_status)
+    after_groups = identity_groups(after, after_status)
+    if before_groups.keys() == after_groups.keys() and all(
+        len(before_groups[key]) == len(after_groups[key])
+        for key in before_groups
+    ):
+        comparisons = [
+            after_rank - before_rank
+            for key in before_groups
+            for before_rank, after_rank in zip(
+                before_groups[key], after_groups[key]
+            )
+        ]
+        if comparisons and all(delta <= 0 for delta in comparisons) and any(
+            delta < 0 for delta in comparisons
+        ):
+            return "authority_increase"
+        if comparisons and all(delta >= 0 for delta in comparisons) and any(
+            delta > 0 for delta in comparisons
+        ):
+            if before_non_enforced == after_non_enforced:
+                return "protection_increase"
+            return "review"
+    # Replacing one declared control with another is not ordered merely by its
+    # mutability label or by the number of bounds. Only exact retained enforced
+    # controls establish addition/removal; replacements and caller/specification
+    # drift remain explicit review debt.
     return "review"
 
 
@@ -1626,6 +1832,12 @@ def diff_reports(
             if before_closed is True and after_closed is False:
                 classification = "authority_increase"
                 message = "The schema no longer rejects unknown arguments."
+            elif after_tool["schema_review_required"] is True:
+                classification = "review"
+                message = (
+                    "The schema appears to reject unknown arguments but still "
+                    "requires unresolved authority review."
+                )
             else:
                 classification = "protection_increase"
                 message = "The schema now rejects unknown arguments."
@@ -1724,7 +1936,19 @@ def diff_reports(
                 continue
             if after_argument is None:
                 if before_argument["schema_exposure"] == "exposed":
-                    if after_tool["schema_closes_unknown_arguments"] is True:
+                    if after_tool["schema_closes_unknown_arguments"] is False:
+                        classification = "authority_increase"
+                        message = (
+                            "A modeled argument disappeared, but its name remains "
+                            "caller-visible through the open or dynamic schema."
+                        )
+                    elif after_tool["schema_review_required"] is True:
+                        classification = "review"
+                        message = (
+                            "A modeled argument disappeared into a schema that "
+                            "still requires unresolved authority review."
+                        )
+                    elif after_tool["schema_closes_unknown_arguments"] is True:
                         classification = "protection_increase"
                         message = "A caller-visible argument was removed."
                     else:
@@ -1768,8 +1992,27 @@ def diff_reports(
                     classification = "authority_increase"
                     message = "A previously unexposed argument became caller-visible."
                 else:
-                    classification = "protection_increase"
-                    message = "A caller-visible argument became unexposed."
+                    if after_tool["schema_closes_unknown_arguments"] is False:
+                        classification = "authority_increase"
+                        message = (
+                            "The declaration calls this argument unexposed, but "
+                            "the open or dynamic schema still admits its name."
+                        )
+                    elif after_tool["schema_review_required"] is True:
+                        classification = "review"
+                        message = (
+                            "The argument became declared-unexposed inside a "
+                            "schema with unresolved authority review."
+                        )
+                    elif after_tool["schema_closes_unknown_arguments"] is True:
+                        classification = "protection_increase"
+                        message = "A caller-visible argument became unexposed."
+                    else:
+                        classification = "authority_increase"
+                        message = (
+                            "The argument's modeled policy disappeared without "
+                            "proof that its name is no longer caller-visible."
+                        )
                 changes.append(
                     _change(
                         classification,

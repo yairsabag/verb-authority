@@ -27,7 +27,7 @@ python -m benchmarks.export_agentdojo_schemas agentdojo \
   --output-dir /tmp/agentdojo-schemas
 
 for suite in workspace travel banking slack; do
-  python -m verb_authority scan "/tmp/agentdojo-schemas/${suite}.json" \
+  env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan "/tmp/agentdojo-schemas/${suite}.json" \
     --format json --output "/tmp/${suite}-authority-report.json"
 done
 ```

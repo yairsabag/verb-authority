@@ -1008,6 +1008,90 @@ def test_server_fixed_argument_becoming_exposed_is_an_authority_increase():
     assert exposure["after"] == "exposed"
 
 
+@pytest.mark.parametrize(
+    ("after_schema_extra", "classification"),
+    [
+        ({"additionalProperties": True}, "authority_increase"),
+        ({"additionalProperties": False}, "protection_increase"),
+        (
+            {
+                "additionalProperties": False,
+                "$ref": "#/$defs/unresolved",
+            },
+            "review",
+        ),
+    ],
+)
+def test_exposed_to_declared_unexposed_respects_candidate_schema_closure(
+    after_schema_extra,
+    classification,
+):
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                    "additionalProperties": True,
+                },
+            }
+        ]
+    }
+    before_controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "arguments": {
+                    "recipient": {
+                        "authority": "locked",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+    after_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    **after_schema_extra,
+                },
+            }
+        ]
+    }
+    after_controls = {
+        "version": 1,
+        "tools": {
+            "send_message": {
+                "unexposed_arguments": {
+                    "recipient": {
+                        "exposure": "server_fixed",
+                        "enforced_by": "authenticated session",
+                        "evidence": "declared",
+                    }
+                }
+            }
+        },
+    }
+
+    before = scan_documents(
+        [before_document], control_declarations=before_controls
+    )
+    after = scan_documents([after_document], control_declarations=after_controls)
+    diff = diff_reports(before, after)
+    exposure = next(
+        change
+        for change in diff["changes"]
+        if change["kind"] == "argument_exposure_changed"
+    )
+
+    assert exposure["classification"] == classification
+
+
 def test_enforced_bound_becoming_caller_controlled_is_flagged():
     before = _avp9_report()
     after = copy.deepcopy(before)
@@ -1143,6 +1227,321 @@ def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound(
         )
         == 2
     )
+
+
+@pytest.mark.parametrize("duplicate_side", ["before", "after"])
+def test_legacy_duplicate_exact_bounds_require_review(duplicate_side):
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    report = before if duplicate_side == "before" else after
+    bid = next(
+        argument
+        for argument in report["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    bid["bounds"].append(copy.deepcopy(bid["bounds"][0]))
+    _refresh_control_fingerprint(report)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["reviews"] == 1
+    assert diff["summary"]["protection_increases"] == 0
+    assert diff["summary"]["authority_increases"] == 0
+
+
+def test_protective_addition_with_nonprotective_drift_requires_review():
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "absolute ceiling",
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": "constant check",
+        }
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    after_bid["bounds"].extend(
+        [
+            {
+                "source": "server budget",
+                "bounds_mutability": "trusted_party",
+                "operational_status": "enforced",
+                "enforcement": "server check",
+            },
+            {
+                "source": "request budget",
+                "bounds_mutability": "caller",
+                "operational_status": "enforced",
+                "enforcement": "request check",
+            },
+        ]
+    )
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["protection_increases"] == 0
+
+
+def test_protective_addition_with_unchanged_nonprotective_bounds_is_protection():
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "absolute ceiling",
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": "constant check",
+        },
+        {
+            "source": "request budget",
+            "bounds_mutability": "caller",
+            "operational_status": "enforced",
+            "enforcement": "request check",
+        },
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    after_bid["bounds"].append(
+        {
+            "source": "server budget",
+            "bounds_mutability": "trusted_party",
+            "operational_status": "enforced",
+            "enforcement": "server check",
+        }
+    )
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "protection_increase"
+
+
+def test_structured_mutability_upgrade_cannot_mask_specified_bound_drift():
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "server ceiling",
+            "bounds_mutability": "trusted_party",
+            "operational_status": "enforced",
+            "enforcement": "server check",
+        },
+        {
+            "source": "future contract ceiling",
+            "bounds_mutability": "caller",
+            "operational_status": "specified",
+            "enforcement": "contract revision",
+        },
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    after_bid["bounds"][0]["bounds_mutability"] = "immutable"
+    after_bid["bounds"][1]["source"] = "different future ceiling"
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["protection_increases"] == 0
+
+
+def test_specified_activation_with_mutability_downgrade_requires_review():
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "contract ceiling",
+            "bounds_mutability": "immutable",
+            "operational_status": "specified",
+            "enforcement": "contract check",
+        }
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    after_bid["bounds"][0]["operational_status"] = "enforced"
+    after_bid["bounds"][0]["bounds_mutability"] = "trusted_party"
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["protection_increases"] == 0
+
+
+@pytest.mark.parametrize("downgrade", ["mutability", "operational_status"])
+def test_unrelated_protective_addition_cannot_mask_known_bound_downgrade(
+    downgrade,
+):
+    before = _avp9_report()
+    before_bid = next(
+        argument
+        for argument in before["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    before_bid["bounds"] = [
+        {
+            "source": "absolute ceiling",
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": "constant check",
+        }
+    ]
+    _refresh_control_fingerprint(before)
+
+    after = copy.deepcopy(before)
+    after_bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    if downgrade == "mutability":
+        after_bid["bounds"][0]["bounds_mutability"] = "trusted_party"
+    else:
+        after_bid["bounds"][0]["operational_status"] = "specified"
+    after_bid["bounds"].append(
+        {
+            "source": "different immutable budget",
+            "bounds_mutability": "immutable",
+            "operational_status": "enforced",
+            "enforcement": "separate constant check",
+        }
+    )
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "authority_increase"
+    assert diff["summary"]["authority_increases"] == 1
+
+
+def test_enforced_protective_bound_replacement_requires_review_and_fails_ci(
+    tmp_path,
+):
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    bid = next(
+        argument
+        for argument in after["declared_controls"]["tools"][0]["arguments"]
+        if argument["name"] == "bidWei"
+    )
+    bid["bounds"][0]["source"] = "replacement ceiling 1000000000"
+    bid["bounds"][0]["enforcement"] = "replacement maximum check"
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == "review"
+    assert diff["summary"]["protection_increases"] == 0
+
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(json.dumps(before), encoding="utf-8")
+    after_path.write_text(json.dumps(after), encoding="utf-8")
+    assert main(
+        [
+            str(before_path),
+            str(after_path),
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+            "--fail-on-increase",
+            "--fail-on-review",
+        ]
+    ) == 2
+
+
+@pytest.mark.parametrize(
+    ("before_mutability", "after_mutability", "classification"),
+    [
+        ("immutable", "trusted_party", "authority_increase"),
+        ("trusted_party", "immutable", "protection_increase"),
+    ],
+)
+def test_same_enforced_bound_orders_structured_mutability_changes(
+    before_mutability,
+    after_mutability,
+    classification,
+):
+    before = _avp9_report()
+    after = copy.deepcopy(before)
+    for report, mutability in (
+        (before, before_mutability),
+        (after, after_mutability),
+    ):
+        bid = next(
+            argument
+            for argument in report["declared_controls"]["tools"][0]["arguments"]
+            if argument["name"] == "bidWei"
+        )
+        bid["bounds"][0]["bounds_mutability"] = mutability
+        _refresh_control_fingerprint(report)
+
+    diff = diff_reports(before, after)
+    bound_change = next(
+        change for change in diff["changes"] if change["kind"] == "bounds_changed"
+    )
+    assert bound_change["classification"] == classification
 
 
 def test_new_tool_and_removed_confirmation_fail_the_ci_threshold():
@@ -1290,7 +1689,8 @@ def test_new_unresolved_schema_composition_requires_diff_review():
             {
                 "name": "send_message",
                 "inputSchema": {
-                    "properties": {"body": {"type": "string"}}
+                    "type": "object",
+                    "properties": {"body": {"type": "string"}},
                 },
             }
         ]
@@ -1316,6 +1716,83 @@ def test_new_unresolved_schema_composition_requires_diff_review():
     assert change["classification"] == "review"
     assert change["before"] is False
     assert change["after"] is True
+
+
+def test_pattern_property_replacement_cannot_look_like_argument_protection(
+    tmp_path,
+):
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    after_document = copy.deepcopy(before_document)
+    after_schema = after_document["tools"][0]["inputSchema"]
+    after_schema["properties"] = {}
+    after_schema["patternProperties"] = {"^recipient$": True}
+
+    before = scan_documents([before_document])
+    after = scan_documents([after_document])
+    assert after["tools"][0]["schema_closes_unknown_arguments"] is False
+    assert after["tools"][0]["schema_review_required"] is True
+
+    diff = diff_reports(before, after)
+    removed = next(
+        change for change in diff["changes"] if change["kind"] == "argument_removed"
+    )
+    assert removed["classification"] == "authority_increase"
+    assert removed["classification"] != "protection_increase"
+
+    before_path = tmp_path / "before-schema.json"
+    after_path = tmp_path / "after-schema.json"
+    output_path = tmp_path / "diff.json"
+    before_path.write_text(json.dumps(before_document), encoding="utf-8")
+    after_path.write_text(json.dumps(after_document), encoding="utf-8")
+    assert main(
+        [
+            str(before_path),
+            str(after_path),
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+            "--fail-on-increase",
+        ]
+    ) == 2
+
+
+def test_open_schema_argument_removed_into_pattern_is_authority_increase():
+    before_document = {
+        "tools": [
+            {
+                "name": "send_message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"recipient": {"type": "string"}},
+                },
+            }
+        ]
+    }
+    after_document = copy.deepcopy(before_document)
+    after_schema = after_document["tools"][0]["inputSchema"]
+    after_schema["properties"] = {}
+    after_schema["patternProperties"] = {"^recipient$": True}
+
+    diff = diff_reports(
+        scan_documents([before_document]), scan_documents([after_document])
+    )
+
+    removed = next(
+        change for change in diff["changes"] if change["kind"] == "argument_removed"
+    )
+    assert removed["classification"] == "authority_increase"
 
 
 def test_optional_schema_review_fields_preserve_legacy_v3_compatibility():
