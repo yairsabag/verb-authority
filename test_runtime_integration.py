@@ -2,6 +2,7 @@
 
 import asyncio
 import functools
+import gc
 import inspect
 import json
 import threading
@@ -266,6 +267,104 @@ def test_public_frozen_policy_view_is_not_the_enforced_policy_object():
     assert captured[0].risk_assessment.source == "tool_name"
 
 
+def test_public_policy_mapping_containers_do_not_alias_enforced_policy():
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_destination",
+            [Param("destination", sink=True)],
+            fn=lambda destination: events.append(destination),
+            risk=Risk.WRITE,
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    public_outer = next(
+        value
+        for value in gc.get_referents(runner.policy_set.policy)
+        if type(value) is dict
+    )
+    enforced_outer = next(
+        value
+        for value in gc.get_referents(runner._bundle.policy_set.policy)
+        if type(value) is dict
+    )
+    public_inner = next(
+        value
+        for value in gc.get_referents(public_outer["set_destination"])
+        if type(value) is dict
+    )
+    enforced_inner = next(
+        value
+        for value in gc.get_referents(enforced_outer["set_destination"])
+        if type(value) is dict
+    )
+    public_risk = next(
+        value
+        for value in gc.get_referents(runner.policy_set.risk)
+        if type(value) is dict
+    )
+    enforced_risk = next(
+        value
+        for value in gc.get_referents(runner._bundle.policy_set.risk)
+        if type(value) is dict
+    )
+
+    assert public_outer is not enforced_outer
+    assert public_inner is not enforced_inner
+    assert public_risk is not enforced_risk
+
+    public_inner["destination"] = Policy.TYPED_BOUNDED
+    public_risk["set_destination"] = Risk.READ_ONLY
+    result = runner.run(
+        {
+            "name": "set_destination",
+            "input": {"destination": "attacker-authored"},
+        }
+    )
+
+    assert not result.decision.allow
+    assert not result.executed
+    assert not result.invoked
+    assert events == []
+
+
+def test_confirmation_request_risk_evidence_is_a_fresh_copy():
+    registry = _unknown_risk_registry()
+    runner = GuardedToolRunner(registry)
+    first_requests = []
+
+    def mutate_then_deny(request):
+        first_requests.append(request)
+        object.__setattr__(request.risk_assessment, "source", "forged")
+        object.__setattr__(request.risk_assessment, "review_required", False)
+        return False
+
+    first = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=mutate_then_deny,
+    )
+    second_requests = []
+    second = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=lambda request: second_requests.append(request) or False,
+    )
+    enforced = runner._bundle.policy_set.risk_inference["evaluate"]
+
+    assert not first.executed and not second.executed
+    assert first_requests[0].risk_assessment is not enforced
+    assert second_requests[0].risk_assessment is not enforced
+    assert (
+        second_requests[0].risk_assessment
+        is not first_requests[0].risk_assessment
+    )
+    assert enforced.source == "tool_name"
+    assert enforced.review_required is True
+    assert second_requests[0].risk_assessment.source == "tool_name"
+    assert second_requests[0].risk_assessment.review_required is True
+
+
 def test_frozen_policy_validation_shares_tool_name_normalization_budget(
     monkeypatch,
 ):
@@ -293,6 +392,206 @@ def test_frozen_policy_validation_shares_tool_name_normalization_budget(
         authority.MAX_NFKC_OPERATION_CHARS
         // authority.MAX_IDENTIFIER_INFERENCE_CHARS
     )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        Policy.TYPED_BOUNDED,
+        json.loads('"typed_bounded"'),
+        Policy.OUTBOUND_PAYLOAD,
+    ],
+)
+def test_registry_binding_commits_resource_inference_iteration_order(
+    monkeypatch,
+    replacement,
+):
+    target_tool = "write_value"
+    target_param = "ｖａｌｕｅ"
+    burner = "é" * len(target_param)
+    monkeypatch.setattr(
+        authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target_param),
+    )
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(burner, [], fn=lambda: None, risk=Risk.READ_ONLY)
+    )
+    registry.add(
+        Tool(
+            target_tool,
+            [Param(target_param)],
+            fn=lambda **arguments: events.append(arguments),
+            risk=Risk.WRITE,
+        )
+    )
+    stale = build_policy(registry)
+    existing_runner = GuardedToolRunner(registry, stale)
+
+    assert stale.policy[target_tool][target_param] is Policy.TRUSTED_FIXED
+    assert (target_tool, target_param) in stale.review
+
+    target = registry.tools.pop(target_tool)
+    remaining = list(registry.tools.items())
+    registry.tools.clear()
+    registry.tools[target_tool] = target
+    registry.tools.update(remaining)
+    current = build_policy(registry)
+
+    assert stale.registry_version == current.registry_version == registry.version
+    assert stale.registry_binding != current.registry_binding
+
+    reordered_policy = build_policy(registry)
+    reordered_policy.policy[target_tool][target_param] = replacement
+    reverse_runner = GuardedToolRunner(registry, reordered_policy)
+
+    for field in (
+        "policy",
+        "risk",
+        "review",
+        "confirm",
+        "risk_inference",
+        "risk_review",
+        "risk_conflicts",
+    ):
+        setattr(stale, field, getattr(current, field))
+    stale.policy[target_tool][target_param] = replacement
+
+    direct = authority.gate(
+        registry,
+        stale,
+        target_tool,
+        {target_param: "attacker-authored"},
+        {target_param: "data"},
+    )
+    dispatched = dispatch(
+        registry,
+        stale,
+        {
+            "name": target_tool,
+            "input": {target_param: "attacker-authored"},
+        },
+    )
+    drifted = existing_runner.run(
+        {
+            "name": target_tool,
+            "input": {target_param: "attacker-authored"},
+        }
+    )
+
+    assert not direct.allow
+    assert not dispatched.allow
+    assert not drifted.decision.allow
+    assert not drifted.invoked
+    assert "registration diverged" in direct.reason
+    assert "registration diverged" in dispatched.reason
+    assert "registry changed" in drifted.decision.reason
+    with pytest.raises(ValueError, match="different registry registration"):
+        GuardedToolRunner(registry, stale)
+
+    burner_registration = registry.tools.pop(burner)
+    remaining = list(registry.tools.items())
+    registry.tools.clear()
+    registry.tools[burner] = burner_registration
+    registry.tools.update(remaining)
+    reverse_drift = reverse_runner.run(
+        {
+            "name": target_tool,
+            "input": {target_param: "attacker-authored"},
+        }
+    )
+    assert not reverse_drift.decision.allow
+    assert not reverse_drift.invoked
+    assert "registry changed" in reverse_drift.decision.reason
+    assert events == []
+
+
+def test_registry_reorder_cannot_remove_resource_limit_confirmation(
+    monkeypatch,
+):
+    target = "ｒｅａｄ"
+    burner = "é" * len(target)
+    monkeypatch.setattr(
+        authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target),
+    )
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(burner, [], fn=lambda: None, risk=Risk.READ_ONLY)
+    )
+    registry.add(
+        Tool(
+            target,
+            [],
+            fn=lambda: events.append("invoked"),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    stale = build_policy(registry)
+    existing_runner = GuardedToolRunner(registry, stale)
+
+    assert stale.risk[target] is Risk.UNKNOWN
+    assert target in stale.risk_review
+    assert target in stale.confirm
+
+    target_registration = registry.tools.pop(target)
+    remaining = list(registry.tools.items())
+    registry.tools.clear()
+    registry.tools[target] = target_registration
+    registry.tools.update(remaining)
+    current = build_policy(registry)
+
+    assert current.risk[target] is Risk.READ_ONLY
+    assert target not in current.risk_review
+    assert target not in current.confirm
+    assert stale.registry_version == current.registry_version == registry.version
+    assert stale.registry_binding != current.registry_binding
+
+    reverse_runner = GuardedToolRunner(registry, current)
+
+    for field in (
+        "policy",
+        "risk",
+        "review",
+        "confirm",
+        "risk_inference",
+        "risk_review",
+        "risk_conflicts",
+    ):
+        setattr(stale, field, getattr(current, field))
+
+    direct = authority.gate(registry, stale, target, {}, {})
+    dispatched = dispatch(
+        registry,
+        stale,
+        {"name": target, "input": {}},
+    )
+    drifted = existing_runner.run({"name": target, "input": {}})
+
+    assert not direct.allow
+    assert not dispatched.allow
+    assert not drifted.decision.allow
+    assert not drifted.invoked
+    assert "registration diverged" in direct.reason
+    assert "registration diverged" in dispatched.reason
+    assert "registry changed" in drifted.decision.reason
+    with pytest.raises(ValueError, match="different registry registration"):
+        GuardedToolRunner(registry, stale)
+
+    burner_registration = registry.tools.pop(burner)
+    remaining = list(registry.tools.items())
+    registry.tools.clear()
+    registry.tools[burner] = burner_registration
+    registry.tools.update(remaining)
+    reverse_drift = reverse_runner.run({"name": target, "input": {}})
+    assert not reverse_drift.decision.allow
+    assert not reverse_drift.invoked
+    assert "registry changed" in reverse_drift.decision.reason
+    assert events == []
 
 
 @pytest.mark.parametrize("supply_policy", [False, True])

@@ -451,6 +451,26 @@ def _rewrite_raw_tar_member_format(
     return bytes(header)
 
 
+def _rewrite_raw_tar_member_size(
+    sdist: Path,
+    member_name: str,
+    size_field: bytes,
+) -> bytes:
+    """Replace one raw size field and restore only its USTAR checksum."""
+
+    assert len(size_field) == 12
+    payload = bytearray(gzip.decompress(sdist.read_bytes()))
+    member_offset = payload.index(member_name.encode("utf-8") + b"\0")
+    assert member_offset % tarfile.BLOCKSIZE == 0
+    header = bytearray(payload[member_offset : member_offset + tarfile.BLOCKSIZE])
+    header[124:136] = size_field
+    header[148:156] = b" " * 8
+    header[148:156] = f"{sum(header):06o}\0 ".encode("ascii")
+    payload[member_offset : member_offset + tarfile.BLOCKSIZE] = header
+    _gzip_sdist_payload(sdist, bytes(payload))
+    return bytes(header)
+
+
 def _rewrite_sdist(
     sdist: Path,
     *,
@@ -1026,6 +1046,66 @@ def test_sdist_rejects_base256_size_without_stopping_header_preflight(tmp_path):
         verify_artifacts(project_path, wheel.parent)
 
 
+@pytest.mark.parametrize(
+    ("position", "encoding"),
+    (
+        ("first", "leading-space"),
+        ("later", "double-nul"),
+        ("later", "no-terminator"),
+    ),
+)
+def test_sdist_rejects_noncanonical_nonzero_size_fields(
+    tmp_path,
+    position,
+    encoding,
+):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    with tarfile.open(sdist, "r:gz") as archive:
+        files = [member for member in archive.getmembers() if member.size > 0]
+    member = files[0] if position == "first" else files[-1]
+    payload = gzip.decompress(sdist.read_bytes())
+    member_offset = payload.index(member.name.encode("utf-8") + b"\0")
+    original = payload[member_offset + 124 : member_offset + 136]
+    assert len(original) == 12
+    assert original[-1:] == b"\0"
+    assert all(character in b"01234567" for character in original[:-1])
+
+    if encoding == "leading-space":
+        mutant = b" " + original[1:]
+    elif encoding == "double-nul":
+        mutant = original[:-2] + b"\0\0"
+    else:
+        mutant = original[:-1] + b"0"
+    _rewrite_raw_tar_member_size(sdist, member.name, mutant)
+
+    with pytest.raises(VerificationError, match="non-canonical tar size"):
+        verify_artifacts(project_path, wheel.parent)
+
+
+@pytest.mark.parametrize(
+    "mutant",
+    (b"0" * 12, b" " * 12, b"0" * 10 + b"\0\0"),
+    ids=("no-terminator", "all-space", "double-nul"),
+)
+def test_sdist_rejects_noncanonical_zero_size_fields(tmp_path, mutant):
+    project_path = _write_project(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = _write_wheel(dist)
+    zero_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/empty-directory"
+    sdist = _write_sdist(
+        dist,
+        extra_member_name=zero_member,
+        extra_member_type=tarfile.DIRTYPE,
+    )
+    # TarInfo encodes directory headers with one trailing slash even though
+    # getmembers() reports the normalized name without it.
+    _rewrite_raw_tar_member_size(sdist, zero_member + "/", mutant)
+
+    with pytest.raises(VerificationError, match="non-canonical tar size"):
+        verify_artifacts(project_path, wheel.parent)
+
+
 def test_sdist_malformed_pax_integer_fails_without_raw_value_error(tmp_path):
     project_path = _write_project(tmp_path)
     dist = tmp_path / "dist"
@@ -1333,16 +1413,20 @@ def test_release_publish_job_has_only_the_minimal_write_boundary():
     assert "--clobber" not in publish
     assert "--method POST" in publish
     assert "--input \"$candidate\"" in publish
-    assert (
-        "[(.id | tostring), .tag_name, (.draft | tostring)] | @tsv"
-        in publish
+    release_record_query = (
+        "[(.id | tostring), .tag_name, (.draft | tostring), "
+        "(.prerelease | tostring)] | @tsv"
     )
+    assert publish.count(release_record_query) == 2
+    assert "'%s\\t%s\\tfalse\\ttrue'" in publish
+    assert publish.count('test "$release_record" = "$expected_release"') == 2
     assert "(.size | tostring), .digest, .state" in publish
     assert "comm -23 \"$existing_assets\" \"$expected_assets\"" in publish
     assert "grep -Fqx -- \"$expected_asset\" \"$existing_assets\"" in publish
     assert "grep -Fqx -- \"$expected_asset\" \"$recovered_assets\"" in publish
     assert "continue" in publish
     assert 'cmp -s "$expected_assets" "$actual_assets"' in publish
+    assert publish.count('"repos/$GH_REPO/releases/$RELEASE_ID"') == 2
     assert publish.count('"repos/$GH_REPO/commits/tags/$RELEASE_TAG"') == 2
     assert publish.count('test "$current_tag_commit" = "$SOURCE_COMMIT"') == 2
 

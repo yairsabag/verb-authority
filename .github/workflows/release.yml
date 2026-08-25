@@ -619,8 +619,9 @@ jobs:
           )
           release_record=$(gh api "${api_headers[@]}" \
             "repos/$GH_REPO/releases/$RELEASE_ID" \
-            --jq '[(.id | tostring), .tag_name, (.draft | tostring)] | @tsv')
-          printf -v expected_release '%s\t%s\tfalse' "$RELEASE_ID" "$RELEASE_TAG"
+            --jq '[(.id | tostring), .tag_name, (.draft | tostring), (.prerelease | tostring)] | @tsv')
+          printf -v expected_release '%s\t%s\tfalse\ttrue' \
+            "$RELEASE_ID" "$RELEASE_TAG"
           test "$release_record" = "$expected_release"
 
           expected_checksum=$(mktemp)
@@ -690,6 +691,10 @@ jobs:
             --jq '.[] | [.name, (.size | tostring), .digest, .state] | @tsv' \
             | LC_ALL=C sort > "$actual_assets"
           cmp -s "$expected_assets" "$actual_assets"
+          release_record=$(gh api "${api_headers[@]}" \
+            "repos/$GH_REPO/releases/$RELEASE_ID" \
+            --jq '[(.id | tostring), .tag_name, (.draft | tostring), (.prerelease | tostring)] | @tsv')
+          test "$release_record" = "$expected_release"
           current_tag_commit=$(gh api "${api_headers[@]}" \
             "repos/$GH_REPO/commits/tags/$RELEASE_TAG" --jq '.sha')
           test "$current_tag_commit" = "$SOURCE_COMMIT"

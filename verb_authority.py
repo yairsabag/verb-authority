@@ -3097,8 +3097,12 @@ def _private_callable_binding(
 
 def _registry_material(registry: _FrozenRegistry) -> list[dict[str, Any]]:
     material = [{"source_tools_id": registry.source_tools_id}]
-    for name in sorted(registry.tools):
-        tool = registry.tools[name]
+    # Policy inference shares one bounded Unicode-normalization budget across
+    # the registry and therefore consumes tools in registration order.  That
+    # order is security-relevant material: sorting here would let an in-place
+    # dictionary reorder change which identifiers exhaust the budget without
+    # changing the registry binding used to reject stale policies.
+    for name, tool in registry.tools.items():
         material.append(
             {
                 "name": name,
@@ -3302,12 +3306,24 @@ def _confirmation_request(
             "ledger_version": ledger_version,
         }
     )
+    assessment = bundle.policy_set.risk_inference[tool_name]
     return ConfirmationRequest(
         decision=decision,
         tool_name=tool_name,
         arguments_json=arguments_json,
         risk=effective_risk,
-        risk_assessment=bundle.policy_set.risk_inference[tool_name],
+        # A confirmation callback receives evidence for display, not the
+        # authoritative object retained by the registration bundle.  Frozen
+        # dataclasses can still be mutated deliberately via object.__setattr__
+        # in the same process, so copy the value for every request.
+        risk_assessment=RiskAssessment(
+            risk=assessment.risk,
+            source=assessment.source,
+            confidence=assessment.confidence,
+            mutability=assessment.mutability,
+            matched_tokens=tuple(assessment.matched_tokens),
+            review_required=assessment.review_required,
+        ),
         declared_risk=tool.risk,
         risk_conflict=tool_name in bundle.policy_set.risk_conflicts,
         registration_id=bundle.registration_id,
@@ -3450,6 +3466,13 @@ class GuardedToolRunner:
         # object the runner enforces. Even deliberate same-process mutation of
         # this view cannot alter the authoritative bundle.
         enforced_policy = self._bundle.policy_set
+        inspection_policy = MappingProxyType(
+            {
+                name: MappingProxyType(dict(parameters))
+                for name, parameters in enforced_policy.policy.items()
+            }
+        )
+        inspection_risk = MappingProxyType(dict(enforced_policy.risk))
         inspection_assessments = MappingProxyType(
             {
                 name: RiskAssessment(
@@ -3464,8 +3487,8 @@ class GuardedToolRunner:
             }
         )
         self.policy_set = _FrozenPolicySet(
-            policy=enforced_policy.policy,
-            risk=enforced_policy.risk,
+            policy=inspection_policy,
+            risk=inspection_risk,
             review=enforced_policy.review,
             confirm=enforced_policy.confirm,
             risk_inference=inspection_assessments,

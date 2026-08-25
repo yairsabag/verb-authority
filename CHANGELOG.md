@@ -58,7 +58,14 @@ tag or GitHub release was created, and the version is intentionally not reused.
   made stricter. Require exact built-in
   policy queues, exact plain-string queue entries, and a valid initial and
   current live-policy snapshot before execution; expose a separate slotted
-  inspection view rather than the frozen policy object enforced by the runner.
+  inspection view whose policy/risk mapping containers are copied rather than
+  aliased to the frozen policy object enforced by the runner. Give every
+  confirmation request its own risk-evidence value so callback-side mutation
+  cannot poison later requests or retained registration evidence. Commit exact
+  registry iteration order to the registration binding because bounded policy
+  inference consumes one shared normalization budget in that order; an
+  in-place dictionary reorder is therefore detected as configuration drift
+  before it can reclassify a resource-limit lock or remove confirmation.
   Ledger stores are
   private exact built-ins, omitted from `repr`, and bound against replacement.
   Callable globals,
@@ -207,9 +214,11 @@ tag or GitHub release was created, and the version is intentionally not reused.
   closed. A full rebuild may produce different archive bytes and intentionally
   requires manual cleanup rather than mixing attempts.
 - Pin every nonzero raw source-archive header to the exact USTAR magic/version
-  and canonical octal size grammar before `tarfile` parses any member. Reject
-  V7, GNU, arbitrary-magic, and base-256 alternatives that different
-  mainstream extractors can interpret with incompatible name/prefix rules.
+  and canonical octal size grammar before `tarfile` parses any member. Require
+  exactly eleven octal digits plus one NUL, rejecting leading spaces,
+  all-space fields, multiple terminators, unterminated fields, and base-256.
+  Reject V7, GNU, and arbitrary-magic alternatives that different mainstream
+  extractors can interpret with incompatible name/prefix rules.
 - Parse source archives through one bounded verifier/extractor that accepts only
   the build backend's local `mtime` PAX field, rejects global PAX, size/path
   overrides and sparse metadata before allocation, and validates every portable
@@ -252,8 +261,9 @@ tag or GitHub release was created, and the version is intentionally not reused.
   publisher alone receives `contents: write` and executes no project code. Pass
   distributions only by immutable Actions artifact ID with digest validation,
   bind upload and postflight checks to the numeric release event ID and current
-  tag commit, and compare the remote asset names, sizes, SHA-256 digests, and
-  states before accepting publication.
+  tag commit, require the beta release to remain a non-draft prerelease both
+  before and after upload, and compare the remote asset names, sizes, SHA-256
+  digests, and states before accepting publication.
 - Include the research landscape, installed-wheel audit smoke, and release
   identity verifier in the source distribution.
 

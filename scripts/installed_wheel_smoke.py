@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import gc
 import importlib.metadata
 import inspect
 import io
@@ -3342,6 +3343,76 @@ def _daybreak_release_candidate_regressions() -> None:
         "installed public policy view aliases the enforced confirmation state",
     )
 
+    object.__setattr__(captured[0].risk_assessment, "source", "forged")
+    object.__setattr__(
+        captured[0].risk_assessment,
+        "review_required",
+        False,
+    )
+    later_requests = []
+    later = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=lambda request: later_requests.append(request) or False,
+    )
+    _check(
+        not later.executed
+        and later_requests[0].risk_assessment.source == "tool_name"
+        and later_requests[0].risk_assessment.review_required is True
+        and runner._bundle.policy_set.risk_inference["evaluate"].source
+        == "tool_name",
+        "installed confirmation request aliases retained risk evidence",
+    )
+
+    inspection_events = []
+    inspection_registry = Registry()
+    inspection_registry.add(
+        Tool(
+            "set_destination",
+            [Param("destination", sink=True)],
+            fn=lambda destination: inspection_events.append(destination),
+            risk=Risk.WRITE,
+        )
+    )
+    inspection_runner = GuardedToolRunner(inspection_registry)
+    public_outer = next(
+        value
+        for value in gc.get_referents(inspection_runner.policy_set.policy)
+        if type(value) is dict
+    )
+    enforced_outer = next(
+        value
+        for value in gc.get_referents(
+            inspection_runner._bundle.policy_set.policy
+        )
+        if type(value) is dict
+    )
+    public_inner = next(
+        value
+        for value in gc.get_referents(public_outer["set_destination"])
+        if type(value) is dict
+    )
+    enforced_inner = next(
+        value
+        for value in gc.get_referents(enforced_outer["set_destination"])
+        if type(value) is dict
+    )
+    public_inner["destination"] = Policy.TYPED_BOUNDED
+    inspection_result = inspection_runner.run(
+        {
+            "name": "set_destination",
+            "input": {"destination": "attacker-authored"},
+        }
+    )
+    _check(
+        public_outer is not enforced_outer
+        and public_inner is not enforced_inner
+        and not inspection_result.decision.allow
+        and not inspection_result.executed
+        and not inspection_result.invoked
+        and not inspection_events,
+        "installed public policy mapping aliases enforced policy storage",
+    )
+
     original_limit = verb_authority.MAX_NFKC_OPERATION_CHARS
     original_unicode = verb_authority.unicodedata
     normalization_calls = []
@@ -3494,6 +3565,157 @@ def _daybreak_release_candidate_regressions() -> None:
             raise AssertionError(
                 "installed runner accepted an inference-limit policy override"
             )
+
+        def reorder_first(registry, target):
+            selected = registry.tools.pop(target)
+            remaining = list(registry.tools.items())
+            registry.tools.clear()
+            registry.tools[target] = selected
+            registry.tools.update(remaining)
+
+        def replace_derived_state(destination, source):
+            for field in (
+                "policy",
+                "risk",
+                "review",
+                "confirm",
+                "risk_inference",
+                "risk_review",
+                "risk_conflicts",
+            ):
+                setattr(destination, field, getattr(source, field))
+
+        reorder_events = []
+        reorder_registry = Registry()
+        reorder_registry.add(
+            Tool("é" * 7, [], fn=lambda: None, risk=Risk.READ_ONLY)
+        )
+        reorder_param = "ｖａｌｕｅ"
+        reorder_registry.add(
+            Tool(
+                "write_value",
+                [Param(reorder_param)],
+                fn=lambda **values: reorder_events.append(values),
+                risk=Risk.WRITE,
+            )
+        )
+        stale_reorder_policy = build_policy(reorder_registry)
+        existing_reorder_runner = GuardedToolRunner(
+            reorder_registry,
+            stale_reorder_policy,
+        )
+        _check(
+            stale_reorder_policy.policy["write_value"][reorder_param]
+            is Policy.TRUSTED_FIXED
+            and ("write_value", reorder_param)
+            in stale_reorder_policy.review,
+            "installed reorder control did not begin resource-limited",
+        )
+        reorder_first(reorder_registry, "write_value")
+        current_reorder_policy = build_policy(reorder_registry)
+        _check(
+            stale_reorder_policy.registry_version
+            == current_reorder_policy.registry_version
+            == reorder_registry.version
+            and stale_reorder_policy.registry_binding
+            != current_reorder_policy.registry_binding,
+            "installed registry binding ignored inference iteration order",
+        )
+        replace_derived_state(stale_reorder_policy, current_reorder_policy)
+        stale_reorder_policy.policy["write_value"][reorder_param] = (
+            Policy.TYPED_BOUNDED
+        )
+        reordered_direct = verb_authority.gate(
+            reorder_registry,
+            stale_reorder_policy,
+            "write_value",
+            {reorder_param: "attacker-authored"},
+            {reorder_param: "data"},
+        )
+        reordered_dispatch = dispatch(
+            reorder_registry,
+            stale_reorder_policy,
+            {
+                "name": "write_value",
+                "input": {reorder_param: "attacker-authored"},
+            },
+        )
+        reordered_existing = existing_reorder_runner.run(
+            {
+                "name": "write_value",
+                "input": {reorder_param: "attacker-authored"},
+            }
+        )
+        _check(
+            not reordered_direct.allow
+            and not reordered_dispatch.allow
+            and not reordered_existing.decision.allow
+            and not reordered_existing.invoked
+            and not reorder_events,
+            "installed registry reorder released a resource-limit lock",
+        )
+        try:
+            GuardedToolRunner(reorder_registry, stale_reorder_policy)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "installed runner accepted a policy bound before reordering"
+            )
+
+        risk_reorder_events = []
+        risk_reorder_registry = Registry()
+        risk_reorder_registry.add(
+            Tool("ö" * 7, [], fn=lambda: None, risk=Risk.READ_ONLY)
+        )
+        risk_reorder_target = "ｒｅａｄ"
+        risk_reorder_registry.add(
+            Tool(
+                risk_reorder_target,
+                [],
+                fn=lambda: risk_reorder_events.append("invoked"),
+                risk=Risk.READ_ONLY,
+            )
+        )
+        stale_risk_policy = build_policy(risk_reorder_registry)
+        existing_risk_runner = GuardedToolRunner(
+            risk_reorder_registry,
+            stale_risk_policy,
+        )
+        _check(
+            stale_risk_policy.risk[risk_reorder_target] is Risk.UNKNOWN
+            and risk_reorder_target in stale_risk_policy.risk_review
+            and risk_reorder_target in stale_risk_policy.confirm,
+            "installed risk reorder control did not begin fail-closed",
+        )
+        reorder_first(risk_reorder_registry, risk_reorder_target)
+        current_risk_policy = build_policy(risk_reorder_registry)
+        _check(
+            current_risk_policy.risk[risk_reorder_target] is Risk.READ_ONLY
+            and risk_reorder_target not in current_risk_policy.risk_review
+            and risk_reorder_target not in current_risk_policy.confirm
+            and stale_risk_policy.registry_binding
+            != current_risk_policy.registry_binding,
+            "installed risk reorder control did not change inference state",
+        )
+        replace_derived_state(stale_risk_policy, current_risk_policy)
+        risk_reordered_direct = verb_authority.gate(
+            risk_reorder_registry,
+            stale_risk_policy,
+            risk_reorder_target,
+            {},
+            {},
+        )
+        risk_reordered_existing = existing_risk_runner.run(
+            {"name": risk_reorder_target, "input": {}}
+        )
+        _check(
+            not risk_reordered_direct.allow
+            and not risk_reordered_existing.decision.allow
+            and not risk_reordered_existing.invoked
+            and not risk_reorder_events,
+            "installed registry reorder removed required confirmation",
+        )
     finally:
         verb_authority.MAX_NFKC_OPERATION_CHARS = original_limit
         verb_authority.unicodedata = original_unicode

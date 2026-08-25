@@ -240,18 +240,19 @@ def _validate_single_gzip_member(sdist_path: Path) -> None:
 def _tar_octal_size(field: bytes) -> int:
     """Parse the canonical POSIX-octal size field used by release sdists."""
 
-    if len(field) != 12 or field[:1] >= b"\x80":
+    # The supported setuptools/tarfile builder emits exactly eleven octal
+    # digits followed by one NUL.  Accepting leading spaces, multiple
+    # terminators, an all-space field, or twelve unterminated digits would
+    # broaden the raw grammar before TarInfo parses the same bytes.
+    if (
+        len(field) != 12
+        or field[-1:] != b"\0"
+        or any(character not in b"01234567" for character in field[:-1])
+    ):
         raise VerificationError(
             "source distribution contains a non-canonical tar size"
         )
-    value = field.rstrip(b"\0 ").lstrip(b" ")
-    if not value:
-        return 0
-    if any(character not in b"01234567" for character in value):
-        raise VerificationError(
-            "source distribution contains a non-canonical tar size"
-        )
-    return int(value, 8)
+    return int(field[:-1], 8)
 
 
 def _validate_tar_header_profiles(sdist_path: Path) -> None:
