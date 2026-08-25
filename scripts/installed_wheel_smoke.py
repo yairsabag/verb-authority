@@ -3832,7 +3832,7 @@ def _daybreak_release_candidate_regressions() -> None:
 
 
 def _schema_review_diff_fail_closed() -> None:
-    """Pin schema-review removal and legacy omission in the installed CLI."""
+    """Pin report observation, raw-only enforcement, and mandatory fields."""
 
     document = {
         "tools": [
@@ -3888,6 +3888,29 @@ def _schema_review_diff_fail_closed() -> None:
                 "diff",
                 str(before_path),
                 str(false_path),
+            ],
+            cwd=root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        _check(
+            false_result.returncode == 0
+            and "[REVIEW]" in false_result.stdout
+            and "Traceback" not in false_result.stderr,
+            "installed report observation lost cleared schema-review debt",
+        )
+
+        threshold_result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "verb_authority",
+                "diff",
+                str(before_path),
+                str(before_path),
                 "--fail-on-increase",
                 "--fail-on-review",
             ],
@@ -3898,10 +3921,12 @@ def _schema_review_diff_fail_closed() -> None:
             text=True,
         )
         _check(
-            false_result.returncode == 2
-            and "[REVIEW]" in false_result.stdout
-            and "Traceback" not in false_result.stderr,
-            "installed CLI did not fail closed on cleared schema review",
+            threshold_result.returncode == 2
+            and "failure thresholds require raw schema inputs"
+            in threshold_result.stderr
+            and not threshold_result.stdout
+            and "Traceback" not in threshold_result.stderr,
+            "installed threshold accepted an imported report",
         )
 
         omitted_result = subprocess.run(
@@ -3913,8 +3938,6 @@ def _schema_review_diff_fail_closed() -> None:
                 "diff",
                 str(before_path),
                 str(omitted_path),
-                "--fail-on-increase",
-                "--fail-on-review",
             ],
             cwd=root,
             env=environment,

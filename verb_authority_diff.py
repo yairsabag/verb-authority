@@ -672,6 +672,7 @@ def _validate_declared_controls(
                     f"non-constrained declared argument has bounds: "
                     f"{name}.{argument_name}"
                 )
+            bound_keys: set[tuple[str, str, str, str | None]] = set()
             for index, bound in enumerate(
                 bounds,
                 start=1,
@@ -680,6 +681,17 @@ def _validate_declared_controls(
                     bound,
                     field=f"declared bound {index} for {name}.{argument_name}",
                 )
+                bound_key = (
+                    bound["source"],
+                    bound["bounds_mutability"],
+                    bound["operational_status"],
+                    bound.get("enforcement"),
+                )
+                if bound_key in bound_keys:
+                    raise DiffError(
+                        f"duplicate declared bound for {name}.{argument_name}"
+                    )
+                bound_keys.add(bound_key)
             if "note" in argument:
                 _require_scanner_normalized_text(
                     argument["note"],
@@ -1178,6 +1190,25 @@ def load_report_or_schema(
     return _validate_report(report, label=label)
 
 
+def load_raw_schema(
+    path: str,
+    *,
+    controls_path: str | None = None,
+    label: str = "input",
+) -> dict[str, Any]:
+    """Load and locally scan one raw schema for an enforcement decision."""
+
+    document = load_json_path(path)
+    if _is_report_shaped(document):
+        raise DiffError(
+            f"{label} is report-shaped; failure thresholds require raw "
+            "schema inputs that Authority Diff rescans locally"
+        )
+    controls = load_json_path(controls_path) if controls_path is not None else None
+    report = scan_documents([document], control_declarations=controls)
+    return _validate_report(report, label=label)
+
+
 def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     indexed: dict[str, dict[str, Any]] = {}
     for raw_tool in report["tools"]:
@@ -1345,24 +1376,6 @@ def _ranked_change(
 def _bounds_classification(
     before: list[dict[str, Any]], after: list[dict[str, Any]]
 ) -> str:
-    def has_exact_duplicates(bounds: list[dict[str, Any]]) -> bool:
-        canonical = [
-            json.dumps(
-                bound,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            for bound in bounds
-        ]
-        return len(canonical) != len(set(canonical))
-
-    # Older reports could contain duplicate author declarations. Repeating the
-    # same assertion does not add protection, so any drift involving such a
-    # report remains explicit review debt rather than an ordered improvement.
-    if has_exact_duplicates(before) or has_exact_duplicates(after):
-        return "review"
-
     before_status = [
         bound.get("operational_status", "not_stated") for bound in before
     ]
@@ -1932,7 +1945,11 @@ def _compare_unexposed_argument(
 def diff_reports(
     before_report: dict[str, Any], after_report: dict[str, Any]
 ) -> dict[str, Any]:
-    """Return a deterministic, machine-readable authority diff."""
+    """Return a deterministic, machine-readable advisory authority diff.
+
+    Callers that enforce the result must derive reports from trusted raw inputs
+    or authenticate them independently. Structural coherence is not provenance.
+    """
 
     before_report = _validate_report(before_report, label="before report")
     after_report = _validate_report(after_report, label="after report")
@@ -2392,8 +2409,14 @@ def main(argv: list[str] | None = None) -> int:
             "and surface authority drift."
         )
     )
-    parser.add_argument("before", help="baseline schema export or JSON report")
-    parser.add_argument("after", help="candidate schema export or JSON report")
+    parser.add_argument(
+        "before",
+        help="baseline raw schema, or JSON report without a failure threshold",
+    )
+    parser.add_argument(
+        "after",
+        help="candidate raw schema, or JSON report without a failure threshold",
+    )
     parser.add_argument(
         "--before-controls", help="control declarations for a raw baseline schema"
     )
@@ -2407,22 +2430,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fail-on-increase",
         action="store_true",
-        help="exit with status 2 when caller authority increases",
+        help=(
+            "exit with status 2 when caller authority increases; both inputs "
+            "must be raw schemas"
+        ),
     )
     parser.add_argument(
         "--fail-on-review",
         action="store_true",
-        help="exit with status 2 when a change requires review",
+        help=(
+            "exit with status 2 when a change requires review; both inputs "
+            "must be raw schemas"
+        ),
     )
     args = parser.parse_args(argv)
+    enforcement_requested = args.fail_on_increase or args.fail_on_review
+    input_loader = load_raw_schema if enforcement_requested else load_report_or_schema
 
     try:
-        before = load_report_or_schema(
+        before = input_loader(
             args.before,
             controls_path=args.before_controls,
             label="before input",
         )
-        after = load_report_or_schema(
+        after = input_loader(
             args.after,
             controls_path=args.after_controls,
             label="after input",

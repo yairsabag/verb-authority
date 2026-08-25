@@ -59,8 +59,11 @@ dependencies and keeps the existing `verb_authority.py` module and import API.
 
 The [beta.8 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
-three files, verify them with `sha256sum --check SHA256SUMS` on Linux or
-`shasum -a 256 -c SHA256SUMS` on macOS before installing the wheel.
+three files, use `sha256sum --check SHA256SUMS` on Linux or
+`shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
+against the manifest before installing. The manifest cannot authenticate
+itself; for an adversarial distribution path, compare it or the two payload
+hashes through an independent trusted channel.
 
 The `verb-authority`, `verb-authority-scan`, and `verb-authority-diff` console
 shortcuts are convenient in a trusted interpreter environment, but a console
@@ -546,13 +549,14 @@ Example output:
   schema_exposure: unexposed -> exposed
 ```
 
-The command also accepts two non-redacted JSON reports. Diff output format v2
-is paired with scanner report format v3. Earlier report v2 omitted constraint
-values and cannot be migrated without inventing evidence; rescan the original
-raw schema with the v3 scanner before comparing it. When implementation
-controls are part of the comparison, pass the sidecars with
-`--before-controls` and `--after-controls`. Control evidence remains visibly
-author-supplied; a diff does not turn a declaration into verified enforcement.
+Without a failure threshold, the command also accepts two non-redacted JSON
+reports for observational comparison. Diff output format v2 is paired with
+scanner report format v3. Earlier report v2 omitted constraint values and
+cannot be migrated without inventing evidence; rescan the original raw schema
+with the v3 scanner before comparing it. When implementation controls are part
+of a raw-schema comparison, pass the sidecars with `--before-controls` and
+`--after-controls`. Control evidence remains visibly author-supplied; a diff
+does not turn a declaration into verified enforcement.
 Malformed or legacy report-shaped input is rejected as a report and is never
 reinterpreted as a raw tool schema.
 Intermediate, unpublished v3 reports that predate the mandatory
@@ -564,6 +568,13 @@ They must also preserve scanner-normalized declaration text and canonical
 declaration order, and remain within the scanner's aggregate limits for tools,
 arguments, enum members, effects, and bounds. A report outside those emitter
 boundaries is rejected instead of being treated as a scanner-produced report.
+
+Imported-report comparison is advisory: report coherence and unkeyed hashes do
+not authenticate the schema from which a report came. If either CLI threshold
+is present, both inputs must therefore be raw schemas; report-shaped input is
+rejected before output, and Authority Diff scans both raw inputs locally.
+`diff_reports()` callers have the same responsibility to derive reports from
+trusted raw inputs or authenticate them independently.
 
 The two CLI thresholds are independent. `--fail-on-increase` returns status 2
 only for authority increases; review-only and protection increases remain
@@ -589,11 +600,17 @@ the baseline and candidate schemas in your workflow:
     after: tools-pr.json
 ```
 
-The action fails the step on an authority increase by default. Set
-`fail_on_increase: "false"` for an observation-only rollout. Starting with
-beta.8, its separate `fail_on_review` input also defaults to `"true"`, so an
-unmodeled or ambiguously ordered schema change fails closed instead of passing
-because it is not an authority increase. Set either boolean independently:
+The workflow must obtain the baseline schema from a protected revision or
+artifact, not from candidate-controlled replacement data, and the candidate
+export must correspond to the implementation that will run. Raw-only
+thresholds remove unauthenticated derived reports from the gate; they do not
+prove either of those surrounding CI bindings.
+
+The action fails the step on an authority increase and review debt by default.
+Set both `fail_on_increase: "false"` and `fail_on_review: "false"` for an
+observation-only rollout. Starting with beta.8, the two thresholds are
+independent, so an unmodeled or ambiguously ordered schema change fails closed
+instead of passing because it is not an authority increase:
 
 ```yaml
 with:

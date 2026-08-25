@@ -1373,6 +1373,25 @@ def test_release_candidate_is_reverified_on_a_fresh_read_only_runner():
     assert "verified_artifact_digest:" in verify
 
 
+def test_ci_threshold_paths_rescan_raw_schemas_and_action_says_so():
+    repository = Path(__file__).resolve().parent
+    action = (repository / "action.yml").read_text(encoding="utf-8")
+    assert action.count("requires both inputs to be raw schemas") == 2
+    assert "schema export or Verb Authority JSON report" not in action
+
+    for workflow_name in ("ci.yml", "release.yml"):
+        workflow = (
+            repository / ".github" / "workflows" / workflow_name
+        ).read_text(encoding="utf-8")
+        assert (
+            "verb-authority diff authority-report.json authority-report.json \\\n"
+            "            --fail-on"
+        ) not in workflow
+        assert "verb-authority-diff authority-report.json authority-report.json" in (
+            workflow
+        )
+
+
 def test_release_publish_job_has_only_the_minimal_write_boundary():
     repository = Path(__file__).resolve().parent
     text = (repository / ".github/workflows/release.yml").read_text(

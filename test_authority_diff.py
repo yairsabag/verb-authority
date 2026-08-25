@@ -1193,17 +1193,8 @@ def test_every_report_summary_counter_is_recomputed(summary_field):
         diff_reports(report, copy.deepcopy(report))
 
 
-@pytest.mark.parametrize(
-    "thresholds",
-    (
-        (),
-        ("--fail-on-increase",),
-        ("--fail-on-review",),
-        ("--fail-on-increase", "--fail-on-review"),
-    ),
-)
-def test_avp9_risk_only_forgery_exits_two_before_ci_thresholds(
-    tmp_path, capsys, thresholds
+def test_avp9_risk_only_forgery_is_rejected_in_observation_mode(
+    tmp_path, capsys
 ):
     before = _avp9_report()
     after = copy.deepcopy(before)
@@ -1218,7 +1209,6 @@ def test_avp9_risk_only_forgery_exits_two_before_ci_thresholds(
             [
                 str(before_path),
                 str(after_path),
-                *thresholds,
             ]
         )
 
@@ -2005,9 +1995,7 @@ def test_specified_bound_mutability_change_requires_review_but_does_not_fail():
     assert diff["summary"]["authority_increases"] == 0
 
 
-def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound(
-    tmp_path,
-):
+def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound():
     before = _avp9_report()
     before_bid = next(
         argument
@@ -2054,12 +2042,34 @@ def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound(
     assert diff["summary"]["authority_increases"] == 1
     assert diff["summary"]["protection_increases"] == 0
 
+
+@pytest.mark.parametrize(
+    "thresholds",
+    (
+        ("--fail-on-increase",),
+        ("--fail-on-review",),
+        ("--fail-on-increase", "--fail-on-review"),
+    ),
+)
+@pytest.mark.parametrize("report_side", ("before", "after"))
+def test_failure_thresholds_require_locally_rescanned_raw_schemas(
+    tmp_path, capsys, thresholds, report_side
+):
+    raw = _constraint_document(100, 40, ["safe"])
+    report = scan_documents([raw])
     before_path = tmp_path / "before.json"
     after_path = tmp_path / "after.json"
     output_path = tmp_path / "diff.json"
-    before_path.write_text(json.dumps(before), encoding="utf-8")
-    after_path.write_text(json.dumps(after), encoding="utf-8")
-    assert (
+    before_path.write_text(
+        json.dumps(report if report_side == "before" else raw),
+        encoding="utf-8",
+    )
+    after_path.write_text(
+        json.dumps(report if report_side == "after" else raw),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
         main(
             [
                 str(before_path),
@@ -2068,16 +2078,20 @@ def test_more_caller_controlled_bounds_cannot_replace_one_immutable_bound(
                 "json",
                 "--output",
                 str(output_path),
-                "--fail-on-increase",
-                "--fail-on-review",
+                *thresholds,
             ]
         )
-        == 2
-    )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "report-shaped" in error
+    assert "failure thresholds require raw schema inputs" in error
+    assert "Traceback" not in error
+    assert not output_path.exists()
 
 
 @pytest.mark.parametrize("duplicate_side", ["before", "after"])
-def test_legacy_duplicate_exact_bounds_require_review(duplicate_side):
+def test_imported_v3_rejects_duplicate_exact_bounds(duplicate_side):
     before = _avp9_report()
     after = copy.deepcopy(before)
     report = before if duplicate_side == "before" else after
@@ -2089,14 +2103,8 @@ def test_legacy_duplicate_exact_bounds_require_review(duplicate_side):
     bid["bounds"].append(copy.deepcopy(bid["bounds"][0]))
     _refresh_control_fingerprint(report)
 
-    diff = diff_reports(before, after)
-    bound_change = next(
-        change for change in diff["changes"] if change["kind"] == "bounds_changed"
-    )
-    assert bound_change["classification"] == "review"
-    assert diff["summary"]["reviews"] == 1
-    assert diff["summary"]["protection_increases"] == 0
-    assert diff["summary"]["authority_increases"] == 0
+    with pytest.raises(DiffError, match="duplicate declared bound"):
+        diff_reports(before, after)
 
 
 def test_protective_addition_with_nonprotective_drift_requires_review():
@@ -2318,9 +2326,7 @@ def test_unrelated_protective_addition_cannot_mask_known_bound_downgrade(
     assert diff["summary"]["authority_increases"] == 1
 
 
-def test_enforced_protective_bound_replacement_requires_review_and_fails_ci(
-    tmp_path,
-):
+def test_enforced_protective_bound_replacement_requires_review():
     before = _avp9_report()
     after = copy.deepcopy(before)
     bid = next(
@@ -2338,24 +2344,6 @@ def test_enforced_protective_bound_replacement_requires_review_and_fails_ci(
     )
     assert bound_change["classification"] == "review"
     assert diff["summary"]["protection_increases"] == 0
-
-    before_path = tmp_path / "before.json"
-    after_path = tmp_path / "after.json"
-    output_path = tmp_path / "diff.json"
-    before_path.write_text(json.dumps(before), encoding="utf-8")
-    after_path.write_text(json.dumps(after), encoding="utf-8")
-    assert main(
-        [
-            str(before_path),
-            str(after_path),
-            "--format",
-            "json",
-            "--output",
-            str(output_path),
-            "--fail-on-increase",
-            "--fail-on-review",
-        ]
-    ) == 2
 
 
 @pytest.mark.parametrize(
@@ -2594,21 +2582,19 @@ def test_clearing_schema_review_requirement_still_requires_review(tmp_path):
     output_path = tmp_path / "diff.json"
     before_path.write_text(json.dumps(before), encoding="utf-8")
     after_path.write_text(json.dumps(after), encoding="utf-8")
-    assert (
-        main(
-            [
-                str(before_path),
-                str(after_path),
-                "--format",
-                "json",
-                "--output",
-                str(output_path),
-                "--fail-on-increase",
-                "--fail-on-review",
-            ]
-        )
-        == 2
-    )
+    assert main(
+        [
+            str(before_path),
+            str(after_path),
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+    rendered = json.loads(output_path.read_text(encoding="utf-8"))
+    assert rendered["summary"]["reviews"] == 1
+    assert rendered["summary"]["protection_increases"] == 0
 
 
 def test_pattern_property_replacement_cannot_look_like_argument_protection(
@@ -2726,8 +2712,6 @@ def test_v3_schema_review_fields_are_mandatory_and_require_rescan(
             [
                 str(before_path),
                 str(after_path),
-                "--fail-on-increase",
-                "--fail-on-review",
             ]
         )
 

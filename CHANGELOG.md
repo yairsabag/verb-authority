@@ -356,11 +356,17 @@ tag or GitHub release was created, and the version is intentionally not reused.
   whitespace-padded, or duplicate effects; reject zero-tool v3 reports that the
   scanner cannot emit. Require scanner-normalized declaration text, canonical
   declaration ordering (including numeric redacted placeholders), and the
-  scanner's aggregate cardinality ceilings when importing reports. Detach the
-  confirmation request's compatibility `Decision`
+  scanner's aggregate cardinality ceilings when importing reports. Reject
+  duplicate declared bounds instead of carrying a legacy-v3 review path.
+  Detach the confirmation request's compatibility `Decision`
   from the decision returned on callback denial. Remove the inaccurate
   `Typing :: Typed` classifier while the distribution remains a set of top-level
   modules, which PEP 561 cannot mark as an inline-typed package.
+- Restrict `--fail-on-increase`, `--fail-on-review`, and the composite
+  action's enforcement path to raw schemas that Authority Diff scans locally.
+  Keep imported-report comparison observational only because coherent,
+  unkeyed report fingerprints are content commitments rather than provenance;
+  update CI and release smoke tests to exercise raw inputs at every threshold.
 - Escape active Markdown link/image syntax and neutralize bare-URL autolinks,
   mentions, issue-reference markers, GitHub `GH-NNN` shorthand, and raw commit
   identifiers in schema-controlled cells as well as terminal and bidirectional

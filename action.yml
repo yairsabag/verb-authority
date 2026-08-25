@@ -8,10 +8,10 @@ branding:
 
 inputs:
   before:
-    description: Baseline tool-schema export or Verb Authority JSON report.
+    description: Raw baseline tool-schema export; enforcement rescans it locally.
     required: true
   after:
-    description: Candidate tool-schema export or Verb Authority JSON report.
+    description: Raw candidate tool-schema export; enforcement rescans it locally.
     required: true
   before_controls:
     description: Optional control declarations for a raw baseline schema.
@@ -22,11 +22,11 @@ inputs:
     required: false
     default: ""
   fail_on_increase:
-    description: Fail the step when caller authority increases.
+    description: Fail on increased authority; requires both inputs to be raw schemas.
     required: false
     default: "true"
   fail_on_review:
-    description: Fail the step when a change requires human review.
+    description: Fail on review debt; requires both inputs to be raw schemas.
     required: false
     default: "true"
 

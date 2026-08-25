@@ -254,7 +254,8 @@ jobs:
             verb-authority-scan "$SDIST_ROOT/atlas/public_mcp_schemas.json" \
             --format json --output authority-report.json
           env -u PYTHONPATH -u PYTHONHOME \
-            verb-authority diff authority-report.json authority-report.json \
+            verb-authority diff "$SDIST_ROOT/atlas/public_mcp_schemas.json" \
+            "$SDIST_ROOT/atlas/public_mcp_schemas.json" \
             --fail-on-increase
           env -u PYTHONPATH -u PYTHONHOME \
             verb-authority-diff authority-report.json authority-report.json \
@@ -277,8 +278,8 @@ jobs:
       - name: Smoke-test local composite action
         uses: ./
         with:
-          before: ${{ runner.temp }}/authority-report.json
-          after: ${{ runner.temp }}/authority-report.json
+          before: ${{ github.workspace }}/atlas/public_mcp_schemas.json
+          after: ${{ github.workspace }}/atlas/public_mcp_schemas.json
           fail_on_increase: "true"
           fail_on_review: "true"
 

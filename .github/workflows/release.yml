@@ -254,7 +254,11 @@ jobs:
             --controls "$SDIST_ROOT/fixtures/avp9_nexus_financial_controls.json" \
             --format json --output authority-report.json
           env -u PYTHONPATH -u PYTHONHOME \
-            verb-authority diff authority-report.json authority-report.json \
+            verb-authority diff \
+            "$SDIST_ROOT/fixtures/avp9_nexus_financial_tool.json" \
+            "$SDIST_ROOT/fixtures/avp9_nexus_financial_tool.json" \
+            --before-controls "$SDIST_ROOT/fixtures/avp9_nexus_financial_controls.json" \
+            --after-controls "$SDIST_ROOT/fixtures/avp9_nexus_financial_controls.json" \
             --fail-on-increase
           env -u PYTHONPATH -u PYTHONHOME \
             verb-authority-diff authority-report.json authority-report.json \
