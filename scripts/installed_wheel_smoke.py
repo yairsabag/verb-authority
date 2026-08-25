@@ -3192,6 +3192,154 @@ def _daybreak_external_audit_regressions() -> None:
         )
 
 
+def _daybreak_release_candidate_regressions() -> None:
+    """Pin the final beta.8 pre-release findings in the installed wheel."""
+
+    invalid_direct_tool = {
+        "tools": [
+            {
+                "type": "functoin",
+                "name": "set_limit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"amount": {"type": "number"}},
+                },
+            }
+        ]
+    }
+    try:
+        scan_documents([invalid_direct_tool])
+    except verb_authority_scan.SchemaError:
+        pass
+    else:
+        raise AssertionError(
+            "installed scanner accepted a non-function direct discriminator"
+        )
+
+    with TemporaryDirectory(prefix="verb-authority-wheel-discriminator-") as directory:
+        invalid_path = Path(directory) / "invalid-direct-tool.json"
+        invalid_path.write_text(json.dumps(invalid_direct_tool), encoding="utf-8")
+        try:
+            verb_authority_diff.load_report_or_schema(
+                str(invalid_path),
+                label="candidate",
+            )
+        except verb_authority_scan.SchemaError:
+            pass
+        else:
+            raise AssertionError(
+                "installed raw Diff loader erased a non-function discriminator"
+            )
+
+    for declared_unknown in (Risk.UNKNOWN, "unknown"):
+        registry = Registry()
+        registry.add(Tool("evaluate", [], risk=declared_unknown))
+        policy = build_policy(registry)
+        _check(
+            policy.risk["evaluate"] is Risk.UNKNOWN
+            and policy.risk_review == ["evaluate"]
+            and policy.confirm == ["evaluate"]
+            and policy.risk_conflicts == [],
+            "installed explicit UNKNOWN escaped review or confirmation",
+        )
+
+        frozen_registry = Registry()
+        frozen_registry.add(
+            Tool(
+                "evaluate",
+                [],
+                fn=lambda: None,
+                risk=declared_unknown,
+            )
+        )
+        runner = GuardedToolRunner(
+            frozen_registry,
+            build_policy(frozen_registry),
+        )
+        _check(
+            runner.policy_set.risk["evaluate"] is Risk.UNKNOWN
+            and runner.policy_set.risk_review == ("evaluate",)
+            and runner.policy_set.confirm == ("evaluate",)
+            and runner.policy_set.risk_conflicts == (),
+            "installed frozen policy resolved an explicit UNKNOWN declaration",
+        )
+
+    original_limit = verb_authority.MAX_NFKC_OPERATION_CHARS
+    original_unicode = verb_authority.unicodedata
+    normalization_calls = []
+
+    def counted_normalize(form, value):
+        normalization_calls.append(len(value))
+        return original_unicode.normalize(form, value)
+
+    try:
+        verb_authority.MAX_NFKC_OPERATION_CHARS = 7
+        verb_authority.unicodedata = types.SimpleNamespace(
+            normalize=counted_normalize,
+            name=original_unicode.name,
+        )
+        tool_name = "é" * 4
+        param_name = "ö" * 4
+        registry = Registry()
+        registry.add(
+            Tool(
+                tool_name,
+                [Param(param_name, "string", max_len=64)],
+                risk=Risk.WRITE,
+            )
+        )
+        policy = build_policy(registry)
+        _check(
+            normalization_calls == [4]
+            and policy.policy[tool_name][param_name] is Policy.TRUSTED_FIXED
+            and (tool_name, param_name) in policy.review,
+            "installed build_policy did not share one Unicode work budget",
+        )
+
+        frozen_registry = verb_authority._freeze_registry(
+            registry,
+            validate_callable=False,
+        )
+        normalization_calls.clear()
+        verb_authority._freeze_policy_set(policy, frozen_registry)
+        _check(
+            normalization_calls == [4],
+            "installed frozen-policy validation reset the tool-name work budget",
+        )
+
+        normalization_calls.clear()
+        report = scan_documents(
+            [
+                {
+                    "tools": [
+                        {
+                            "name": tool_name,
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    param_name: {
+                                        "type": "string",
+                                        "maxLength": 64,
+                                    }
+                                },
+                            },
+                        }
+                    ]
+                }
+            ]
+        )
+        argument = report["tools"][0]["arguments"][0]
+        _check(
+            normalization_calls == [4]
+            and argument["policy"] == Policy.TRUSTED_FIXED.value
+            and argument["review_required"] is True,
+            "installed scanner did not share the tool/parameter Unicode budget",
+        )
+    finally:
+        verb_authority.MAX_NFKC_OPERATION_CHARS = original_limit
+        verb_authority.unicodedata = original_unicode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the installed Verb Authority wheel outside its checkout."
@@ -3234,6 +3382,7 @@ def main() -> int:
         _daybreak_scanner_diff_regressions,
         _daybreak_followup_regressions,
         _daybreak_external_audit_regressions,
+        _daybreak_release_candidate_regressions,
     )
     for check in checks:
         check()
