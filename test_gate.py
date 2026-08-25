@@ -812,6 +812,110 @@ def test_tool_name_normalization_shares_the_policy_operation_budget(monkeypatch)
     )
 
 
+def _identifier_budget_burners(total_chars, *, start=0x600):
+    names = []
+    remaining = total_chars
+    index = 0
+    while remaining:
+        length = min(authority.MAX_IDENTIFIER_INFERENCE_CHARS, remaining)
+        assert length >= 1
+        names.append(chr(start + index) + ("é" * (length - 1)))
+        remaining -= length
+        index += 1
+    return names
+
+
+def _registry_with_budget_burners(names):
+    registry = Registry()
+    for name in names:
+        registry.add(Tool(name, [], risk=Risk.READ_ONLY))
+    return registry
+
+
+def test_nfkc_max_plus_one_keeps_incomplete_risk_unknown_and_confirmed():
+    target = "ｄｅｌｅｔｅ_records"
+    exact_burners = _identifier_budget_burners(
+        authority.MAX_NFKC_OPERATION_CHARS - len(target)
+    )
+    over_burners = _identifier_budget_burners(
+        authority.MAX_NFKC_OPERATION_CHARS - len(target) + 1,
+        start=0x700,
+    )
+
+    exact_registry = _registry_with_budget_burners(exact_burners)
+    exact_registry.add(Tool(target, [], risk=Risk.READ_ONLY))
+    exact_policy = build_policy(exact_registry)
+    assert exact_policy.risk_inference[target].risk is Risk.DESTRUCTIVE
+    assert exact_policy.risk_inference[target].source == "tool_name"
+    assert target in exact_policy.risk_conflicts
+
+    over_registry = _registry_with_budget_burners(over_burners)
+    over_registry.add(Tool(target, [], risk=Risk.READ_ONLY))
+    over_policy = build_policy(over_registry)
+
+    assert over_policy.risk_inference[target].risk is Risk.UNKNOWN
+    assert over_policy.risk_inference[target].source == "inference_limit"
+    assert over_policy.risk[target] is Risk.UNKNOWN
+    assert target in over_policy.risk_review
+    assert target in over_policy.confirm
+    decision = gate(over_registry, over_policy, target, {}, {})
+    assert decision.allow
+    assert decision.needs_confirm
+
+
+def test_nfkc_max_plus_one_keeps_read_only_parameter_locked_for_review():
+    target = "ｒｅｃｉｐｉｅｎｔ"
+    exact_registry = _registry_with_budget_burners(
+        _identifier_budget_burners(
+            authority.MAX_NFKC_OPERATION_CHARS - len(target),
+            start=0x800,
+        )
+    )
+    exact_registry.add(
+        Tool("catalog", [Param(target, "string")], risk=Risk.READ_ONLY)
+    )
+    exact_policy = build_policy(exact_registry)
+    assert exact_policy.policy["catalog"][target] is Policy.TRUSTED_FIXED
+    assert ("catalog", target) not in exact_policy.review
+
+    over_registry = _registry_with_budget_burners(
+        _identifier_budget_burners(
+            authority.MAX_NFKC_OPERATION_CHARS - len(target) + 1,
+            start=0x900,
+        )
+    )
+    over_registry.add(
+        Tool("catalog", [Param(target, "string")], risk=Risk.READ_ONLY)
+    )
+    over_policy = build_policy(over_registry)
+
+    assert over_policy.policy["catalog"][target] is Policy.TRUSTED_FIXED
+    assert ("catalog", target) in over_policy.review
+    decision = gate(
+        over_registry,
+        over_policy,
+        "catalog",
+        {target: "attacker-authored"},
+        {target: "data"},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_overlong_identifier_cannot_auto_relax_on_read_only_tool():
+    name = "ｒｅｃｉｐｉｅｎｔ" + (
+        "é" * (authority.MAX_IDENTIFIER_INFERENCE_CHARS + 1 - 9)
+    )
+    assert len(name) == authority.MAX_IDENTIFIER_INFERENCE_CHARS + 1
+    registry = Registry()
+    registry.add(Tool("catalog", [Param(name)], risk=Risk.READ_ONLY))
+
+    policy = build_policy(registry)
+
+    assert policy.policy["catalog"][name] is Policy.TRUSTED_FIXED
+    assert ("catalog", name) in policy.review
+
+
 def test_lower_risk_declaration_keeps_confirmation_on_name_conflict():
     registry = Registry()
     registry.add(

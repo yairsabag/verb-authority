@@ -422,6 +422,35 @@ def _insert_raw_tar_before_member(
     )
 
 
+def _rewrite_raw_tar_member_format(
+    sdist: Path,
+    member_name: str,
+    magic_version: bytes,
+) -> bytes:
+    """Split one path across name/prefix and replace its format marker."""
+
+    assert len(magic_version) == 8
+    payload = bytearray(gzip.decompress(sdist.read_bytes()))
+    member_offset = payload.index(member_name.encode("utf-8") + b"\0")
+    assert member_offset % tarfile.BLOCKSIZE == 0
+    header = bytearray(payload[member_offset : member_offset + tarfile.BLOCKSIZE])
+    prefix, name = member_name.rsplit("/", 1)
+    encoded_name = name.encode("utf-8")
+    encoded_prefix = prefix.encode("utf-8")
+    assert len(encoded_name) <= 100
+    assert len(encoded_prefix) <= 155
+    header[0:100] = b"\0" * 100
+    header[0 : len(encoded_name)] = encoded_name
+    header[257:265] = magic_version
+    header[345:500] = b"\0" * 155
+    header[345 : 345 + len(encoded_prefix)] = encoded_prefix
+    header[148:156] = b" " * 8
+    header[148:156] = f"{sum(header):06o}\0 ".encode("ascii")
+    payload[member_offset : member_offset + tarfile.BLOCKSIZE] = header
+    _gzip_sdist_payload(sdist, bytes(payload))
+    return bytes(header)
+
+
 def _rewrite_sdist(
     sdist: Path,
     *,
@@ -724,7 +753,9 @@ def test_sdist_rejects_truncated_extended_sparse_header_before_parser(tmp_path):
     sparse = tarfile.TarInfo(f"{ARTIFACT_NAME}-{PROJECT_VERSION}/sparse")
     sparse.type = tarfile.GNUTYPE_SPARSE
     sparse.size = 0
-    header = bytearray(sparse.tobuf(format=tarfile.GNU_FORMAT))
+    # Keep the raw container in the supported USTAR profile so this test still
+    # reaches the independent GNU sparse type rejection.
+    header = bytearray(sparse.tobuf(format=tarfile.USTAR_FORMAT))
     header[482] = 1
     header[483:495] = tarfile.itn(0, 12, tarfile.GNU_FORMAT)
     header[148:156] = b"        "
@@ -934,6 +965,65 @@ def test_sdist_still_accepts_local_pax_mtime_header(tmp_path):
     )
 
     assert verify_artifacts(project_path, wheel.parent) == (wheel, sdist)
+
+
+@pytest.mark.parametrize(
+    "magic_version",
+    (
+        b"\0" * 8,
+        b"ustar  \0",
+        b"notustar",
+    ),
+    ids=("v7", "gnu", "arbitrary"),
+)
+def test_sdist_rejects_non_ustar_split_path_before_tarfile_parsing(
+    tmp_path,
+    magic_version,
+):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    exact_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/LICENSE"
+    raw_header = _rewrite_raw_tar_member_format(
+        sdist,
+        exact_member,
+        magic_version,
+    )
+
+    # CPython joins the raw name and prefix even when the marker selects V7,
+    # GNU, or no known format. Format-sensitive extractors can instead treat
+    # the prefix bytes as non-path metadata and expose raw "LICENSE" outside
+    # the claimed root, so post-processed member-name checks are too late.
+    assert raw_header[0:100].rstrip(b"\0") == b"LICENSE"
+    assert raw_header[345:500].rstrip(b"\0") == (
+        f"{ARTIFACT_NAME}-{PROJECT_VERSION}".encode("ascii")
+    )
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert exact_member in {member.name for member in archive.getmembers()}
+
+    with pytest.raises(VerificationError, match="non-USTAR raw header"):
+        verify_artifacts(project_path, wheel.parent)
+
+
+def test_sdist_rejects_base256_size_without_stopping_header_preflight(tmp_path):
+    project_path, wheel, sdist = _write_valid_release(tmp_path)
+    exact_member = f"{ARTIFACT_NAME}-{PROJECT_VERSION}/LICENSE"
+    payload = bytearray(gzip.decompress(sdist.read_bytes()))
+    member_offset = payload.index(exact_member.encode("utf-8") + b"\0")
+    header = bytearray(payload[member_offset : member_offset + tarfile.BLOCKSIZE])
+    size = int(header[124:136].rstrip(b"\0 ").lstrip(b" ") or b"0", 8)
+    base256_size = bytearray(size.to_bytes(12, "big"))
+    base256_size[0] |= 0x80
+    header[124:136] = base256_size
+    header[148:156] = b" " * 8
+    header[148:156] = f"{sum(header):06o}\0 ".encode("ascii")
+    payload[member_offset : member_offset + tarfile.BLOCKSIZE] = header
+    _gzip_sdist_payload(sdist, bytes(payload))
+
+    # CPython accepts base-256 tar integers. The release grammar does not, and
+    # the raw preflight must fail rather than return before later headers.
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert exact_member in {member.name for member in archive.getmembers()}
+    with pytest.raises(VerificationError, match="non-canonical tar size"):
+        verify_artifacts(project_path, wheel.parent)
 
 
 def test_sdist_malformed_pax_integer_fails_without_raw_value_error(tmp_path):

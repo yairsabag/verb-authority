@@ -565,6 +565,158 @@ def test_scanner_shares_and_caches_identifier_nfkc_work(monkeypatch):
     )
 
 
+def _scanner_identifier_budget_burners(total_chars, *, start):
+    names = []
+    remaining = total_chars
+    index = 0
+    while remaining:
+        length = min(
+            verb_authority.MAX_IDENTIFIER_INFERENCE_CHARS,
+            remaining,
+        )
+        names.append(chr(start + index) + ("é" * (length - 1)))
+        remaining -= length
+        index += 1
+    return names
+
+
+def test_scanner_nfkc_max_plus_one_surfaces_incomplete_risk_fail_closed():
+    target = "ｄｅｌｅｔｅ_records"
+    burner_names = _scanner_identifier_budget_burners(
+        verb_authority.MAX_NFKC_OPERATION_CHARS - len(target) + 1,
+        start=0xA00,
+    )
+    tools = [
+        {
+            "name": name,
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        for name in burner_names
+    ]
+    tools.append(
+        {
+            "name": target,
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+    )
+    controls = {
+        "version": 1,
+        "tools": {
+            target: {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "attested",
+                    "effects": ["reads records"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents(
+        [{"tools": tools}],
+        control_declarations=controls,
+    )
+    scanned = report["tools"][-1]
+
+    assert scanned["risk"] == "unknown"
+    assert scanned["risk_source"] == "safe_default"
+    assert scanned["risk_evidence"] is None
+    assert scanned["inferred_risk"] == "unknown"
+    assert scanned["risk_inference"]["source"] == "inference_limit"
+    assert scanned["risk_review_required"] is True
+    assert scanned["needs_confirmation"] is True
+
+
+def test_scanner_nfkc_max_plus_one_keeps_read_only_sink_locked():
+    target = "ｒｅｃｉｐｉｅｎｔ"
+    burner_names = _scanner_identifier_budget_burners(
+        verb_authority.MAX_NFKC_OPERATION_CHARS - len(target) + 1,
+        start=0xB00,
+    )
+    tools = [
+        {
+            "name": name,
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        for name in burner_names
+    ]
+    tools.append(
+        {
+            "name": "catalog",
+            "inputSchema": {
+                "type": "object",
+                "properties": {target: {"type": "string"}},
+                "additionalProperties": False,
+            },
+        }
+    )
+    controls = {
+        "version": 1,
+        "tools": {
+            "catalog": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "attested",
+                    "effects": ["reads catalog"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents(
+        [{"tools": tools}],
+        control_declarations=controls,
+    )
+    argument = report["tools"][-1]["arguments"][0]
+
+    assert argument["policy"] == "trusted_fixed"
+    assert argument["confidence"] == "uncertain"
+    assert argument["review_required"] is True
+    assert argument["reason"] == (
+        "identifier inference incomplete; kept locked for review"
+    )
+    assert report["summary"]["data_fillable_parameters"] == 0
+
+
+def test_scanner_read_only_reason_uses_the_effective_relaxed_policy():
+    document = {
+        "tools": [
+            {
+                "name": "catalog",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"foo": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "catalog": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "attested",
+                    "effects": ["reads catalog"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents(
+        [document],
+        control_declarations=controls,
+    )
+    argument = report["tools"][0]["arguments"][0]
+
+    assert argument["policy"] == "typed_bounded"
+    assert argument["review_required"] is False
+    assert argument["reason"] == (
+        "ambiguous argument auto-relaxed for read-only tool"
+    )
+
+
 def test_scanner_rejects_compact_programmatic_schema_dag():
     shared = {"type": "string", "allOf": [{"maxLength": 20}]}
     document = {

@@ -99,6 +99,173 @@ def test_frozen_policy_keeps_explicit_unknown_in_review_and_confirmation():
     assert runner.policy_set.risk_conflicts == ()
 
 
+class _StatefulPolicyName(str):
+    __hash__ = str.__hash__
+
+    def __new__(cls, value):
+        instance = super().__new__(cls, value)
+        instance.comparisons = 0
+        return instance
+
+    def __eq__(self, other):
+        self.comparisons += 1
+        return self.comparisons <= 2 and str.__eq__(self, other)
+
+
+def _unknown_risk_registry(events=None):
+    registry = Registry()
+
+    def evaluate():
+        if events is not None:
+            events.append("invoked")
+        return {"ok": True}
+
+    registry.add(Tool("evaluate", [], fn=evaluate, risk=Risk.UNKNOWN))
+    return registry
+
+
+def test_policy_queue_string_subclass_is_rejected_before_comparison():
+    registry = _unknown_risk_registry()
+    policy = build_policy(registry)
+    forged = _StatefulPolicyName("evaluate")
+    policy.confirm = [forged]
+
+    live = authority.gate(registry, policy, "evaluate", {}, {})
+    dispatched = dispatch(registry, policy, {"name": "evaluate", "input": {}})
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+
+    assert not live.allow
+    assert not dispatched.allow
+    with pytest.raises(TypeError, match="exact plain strings"):
+        authority._freeze_policy_set(policy, frozen_registry)
+    with pytest.raises(TypeError, match="exact plain strings"):
+        GuardedToolRunner(registry, policy)
+    assert forged.comparisons == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("review", "confirm", "risk_review", "risk_conflicts"),
+)
+@pytest.mark.parametrize("replacement", [(), None])
+def test_policy_queues_require_exact_builtin_lists(field, replacement):
+    registry = _unknown_risk_registry()
+    policy = build_policy(registry)
+    setattr(policy, field, replacement)
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+
+    with pytest.raises(TypeError, match="exact built-in lists"):
+        authority._freeze_policy_set(policy, frozen_registry)
+
+
+def test_policy_queue_subclass_is_rejected_without_iteration():
+    class ExplodingList(list):
+        def __iter__(self):
+            raise AssertionError("queue subclass must not be iterated")
+
+    registry = _unknown_risk_registry()
+    policy = build_policy(registry)
+    policy.confirm = ExplodingList(policy.confirm)
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+
+    with pytest.raises(TypeError, match="exact built-in lists"):
+        authority._freeze_policy_set(policy, frozen_registry)
+
+
+def test_parameter_review_entries_require_exact_plain_string_tuples():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "write_value",
+            [Param("query", "string")],
+            risk=Risk.WRITE,
+        )
+    )
+    policy = build_policy(registry)
+    policy.review = [["write_value", "query"]]
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+
+    with pytest.raises(TypeError, match="plain-string pairs"):
+        authority._freeze_policy_set(policy, frozen_registry)
+
+
+def test_exact_extra_confirmation_remains_supported_and_enforced():
+    registry = Registry()
+    registry.add(Tool("read_catalog", [], fn=lambda: None, risk=Risk.READ_ONLY))
+    policy = build_policy(registry)
+    policy.confirm.append("read_catalog")
+
+    runner = GuardedToolRunner(registry, policy)
+    result = runner.run({"name": "read_catalog", "input": {}})
+
+    assert result.decision.allow
+    assert result.decision.needs_confirm
+    assert not result.executed
+
+
+def test_runner_rejects_missing_initial_or_later_live_policy_snapshot(
+    monkeypatch,
+):
+    registry = _unknown_risk_registry()
+    policy = build_policy(registry)
+    original = authority._live_policy_state
+
+    monkeypatch.setattr(authority, "_live_policy_state", lambda *_args: None)
+    with pytest.raises(ValueError, match="could not be snapshotted"):
+        GuardedToolRunner(registry, policy)
+
+    monkeypatch.setattr(authority, "_live_policy_state", original)
+    runner = GuardedToolRunner(registry, policy)
+    monkeypatch.setattr(authority, "_live_policy_state", lambda *_args: None)
+    result = runner.run({"name": "evaluate", "input": {}})
+
+    assert not result.decision.allow
+    assert not result.executed
+    assert not result.invoked
+
+
+def test_public_frozen_policy_view_is_not_the_enforced_policy_object():
+    events = []
+    registry = _unknown_risk_registry(events)
+    runner = GuardedToolRunner(registry, build_policy(registry))
+
+    assert not hasattr(runner.policy_set, "__dict__")
+    assert (
+        runner.policy_set.risk_inference["evaluate"]
+        is not runner._bundle.policy_set.risk_inference["evaluate"]
+    )
+    object.__setattr__(runner.policy_set, "confirm", ())
+    object.__setattr__(
+        runner.policy_set.risk_inference["evaluate"],
+        "source",
+        "forged",
+    )
+    captured = []
+    result = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=lambda request: captured.append(request) or False,
+    )
+
+    assert result.decision.allow
+    assert result.decision.needs_confirm
+    assert not result.executed
+    assert not result.invoked
+    assert events == []
+    assert captured[0].risk_assessment.source == "tool_name"
+
+
 def test_frozen_policy_validation_shares_tool_name_normalization_budget(
     monkeypatch,
 ):
@@ -126,6 +293,117 @@ def test_frozen_policy_validation_shares_tool_name_normalization_budget(
         authority.MAX_NFKC_OPERATION_CHARS
         // authority.MAX_IDENTIFIER_INFERENCE_CHARS
     )
+
+
+@pytest.mark.parametrize("supply_policy", [False, True])
+def test_runner_keeps_incomplete_risk_confirmed(monkeypatch, supply_policy):
+    target = "ｄｅｌｅｔｅ_records"
+    monkeypatch.setattr(
+        authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target) - 1,
+    )
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            target,
+            [],
+            fn=lambda: events.append("invoked"),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    policy = build_policy(registry) if supply_policy else None
+
+    runner = GuardedToolRunner(registry, policy)
+    result = runner.run({"name": target, "input": {}})
+
+    assert runner.policy_set.risk[target] is Risk.UNKNOWN
+    assert runner.policy_set.risk_inference[target].source == "inference_limit"
+    assert target in runner.policy_set.risk_review
+    assert target in runner.policy_set.confirm
+    assert result.decision.allow
+    assert result.decision.needs_confirm
+    assert not result.executed
+    assert not result.invoked
+    assert events == []
+
+
+def test_runner_keeps_incomplete_read_only_parameter_locked(monkeypatch):
+    target = "ｒｅｃｉｐｉｅｎｔ"
+    monkeypatch.setattr(
+        authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target) - 1,
+    )
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "catalog",
+            [Param(target, "string")],
+            fn=lambda **arguments: events.append(arguments),
+            risk=Risk.READ_ONLY,
+        )
+    )
+
+    runner = GuardedToolRunner(registry, build_policy(registry))
+    result = runner.run(
+        {"name": "catalog", "input": {target: "attacker-authored"}}
+    )
+
+    assert runner.policy_set.policy["catalog"][target] is Policy.TRUSTED_FIXED
+    assert ("catalog", target) in runner.policy_set.review
+    assert not result.decision.allow
+    assert not result.executed
+    assert not result.invoked
+    assert events == []
+
+
+def test_incomplete_parameter_review_cannot_be_overridden(monkeypatch):
+    target = "ｒｅｃｉｐｉｅｎｔ"
+    monkeypatch.setattr(
+        authority,
+        "MAX_NFKC_OPERATION_CHARS",
+        len(target) - 1,
+    )
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "catalog",
+            [Param(target, "string")],
+            fn=lambda **arguments: events.append(arguments),
+            risk=Risk.READ_ONLY,
+        )
+    )
+    policy = build_policy(registry)
+    policy.policy["catalog"][target] = Policy.TYPED_BOUNDED
+
+    live = authority.gate(
+        registry,
+        policy,
+        "catalog",
+        {target: "attacker-authored"},
+        {target: "data"},
+    )
+    dispatched = dispatch(
+        registry,
+        policy,
+        {"name": "catalog", "input": {target: "attacker-authored"}},
+    )
+    frozen_registry = authority._freeze_registry(
+        registry,
+        validate_callable=False,
+    )
+
+    assert not live.allow
+    assert not dispatched.allow
+    with pytest.raises(ValueError, match="overridable entries"):
+        authority._freeze_policy_set(policy, frozen_registry)
+    with pytest.raises(ValueError, match="overridable entries"):
+        GuardedToolRunner(registry, policy)
+    assert events == []
 
 
 def test_resolver_returns_canonical_value_and_evidence():

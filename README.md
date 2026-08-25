@@ -177,7 +177,10 @@ Visible mutation of registered `Tool`/`Param`/policy material or replacement
 of the function object/code denies the action and requires rebuilding the
 runner. Derived risk, risk evidence, conflicts, and required confirmations
 cannot be weakened in a caller-supplied `PolicySet`; a parameter policy can be
-overridden only when that parameter appears in the derived review queue.
+overridden only when that parameter appears in the derived review queue and
+its bounded identifier inference completed. A review caused by an inference
+resource limit remains locked; intentionally releasing it requires an explicit
+`sink=False` declaration in the schema/registration and a rebuilt policy.
 Required confirmation may be made stricter. The ledger's private stores and
 lock are exact built-ins, are excluded from its representation, and replacement
 of one after runner construction is detected. Direct in-process mutation of

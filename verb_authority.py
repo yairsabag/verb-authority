@@ -394,7 +394,20 @@ def infer_risk(
     tool_name: str,
     _context: _PolicyInferenceContext | None = None,
 ) -> RiskAssessment:
-    tokens = _tool_name_tokens(tool_name, _context)
+    context = _context or _PolicyInferenceContext()
+    tokens = _tool_name_tokens(tool_name, context)
+    if context.inference_incomplete_for(tool_name):
+        # Resource exhaustion is not lexical evidence that the declaration is
+        # safe. Keep it distinct from an ordinary unmatched name so callers
+        # can fail closed instead of accepting a lower declared tier.
+        return RiskAssessment(
+            risk=Risk.UNKNOWN,
+            source="inference_limit",
+            confidence=RiskConfidence.UNCERTAIN,
+            mutability="caller",
+            matched_tokens=(),
+            review_required=True,
+        )
     for risk, candidates in _RISK_TOKENS:
         matched = tuple(token for token in tokens if token in candidates)
         if matched:
@@ -611,12 +624,14 @@ class _PolicyInferenceContext:
         "compact_identifier_segments",
         "identifier_tokens",
         "normalization_budget",
+        "normalization_exhausted_identifiers",
         "normalized_identifiers",
     )
 
     def __init__(self) -> None:
         self.normalization_budget = _NFKCWorkBudget()
         self.normalized_identifiers: dict[str, str | None] = {}
+        self.normalization_exhausted_identifiers: set[str] = set()
         self.identifier_tokens: dict[str, tuple[str, ...]] = {}
         self.compact_identifier_segments: dict[str, tuple[str, ...]] = {}
 
@@ -637,9 +652,19 @@ class _PolicyInferenceContext:
             try:
                 normalized = _bounded_nfkc(name, self.normalization_budget)
             except _NFKCWorkLimitExceeded:
+                self.normalization_exhausted_identifiers.add(name)
                 normalized = None
         self.normalized_identifiers[name] = normalized
         return normalized
+
+    def inference_incomplete_for(self, name: Any) -> bool:
+        """Whether bounded identifier analysis could not be completed."""
+
+        return (
+            type(name) is not str
+            or len(name) > MAX_IDENTIFIER_INFERENCE_CHARS
+            or name in self.normalization_exhausted_identifiers
+        )
 
 
 def _identifier_tokens(
@@ -937,6 +962,12 @@ def infer_policy(
         ):
             return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
         return Policy.TYPED_BOUNDED, Confidence.HIGH
+    # Make aggregate normalization refusal an explicit conservative result.
+    # The ordinary uncertain fallback may be relaxed for a declared read-only
+    # tool; this resource-limit state must never take that route.
+    context.normalize_identifier(p.name)
+    if context.inference_incomplete_for(p.name):
+        return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
     # --- no declaration: fall back to conservative name-based inference ---
     # Authority-bearing names win before broad type or payload rules.  A
     # numeric account identifier is still an account selector, and names such
@@ -985,17 +1016,22 @@ def build_policy(
     for name, tool in reg.tools.items():
         inferred = infer_risk(name, inference_context)
         declared = _normalize_declared_risk(tool.risk)
+        inference_incomplete = inference_context.inference_incomplete_for(name)
         conflict = declared is not None and inferred.risk is not Risk.UNKNOWN and declared is not inferred.risk
         # A caller-mutable name cannot establish runtime behavior. Keep the
         # effective tier unknown until the application makes a declaration.
         # A declaration that conflicts with the lexical evidence is not yet a
         # resolved tier either: preserve both claims for review and keep the
         # effective result at the same fail-safe UNKNOWN boundary.
-        r = Risk.UNKNOWN if declared is None or conflict else declared
+        r = (
+            Risk.UNKNOWN
+            if declared is None or conflict or inference_incomplete
+            else declared
+        )
 
         risk_inference[name] = inferred
         risk[name] = r
-        if declared is None or conflict:
+        if declared is None or conflict or inference_incomplete:
             risk_review.append(name)
         if conflict:
             risk_conflicts.append(name)
@@ -1008,7 +1044,10 @@ def build_policy(
         for p in tool.params:
             pol, conf = infer_policy(p, inference_context)
             if conf is Confidence.UNCERTAIN:
-                if r is Risk.READ_ONLY:
+                if (
+                    r is Risk.READ_ONLY
+                    and not inference_context.inference_incomplete_for(p.name)
+                ):
                     pol = Policy.TYPED_BOUNDED        # safe to auto-relax: no side effects
                 else:
                     review.append((name, p.name))    # keep locked + surface for review
@@ -2507,7 +2546,7 @@ class _FrozenRegistry:
     source_tools_id: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FrozenPolicySet:
     policy: Any
     risk: Any
@@ -2797,12 +2836,26 @@ def _freeze_policy_set(
     registry: _FrozenRegistry,
 ) -> _FrozenPolicySet:
     tool_names = set(registry.tools)
-    if type(policy_set.policy) is not dict or set(policy_set.policy) != tool_names:
+    canonical_tool_names = {name: name for name in registry.tools}
+    canonical_param_names = {
+        name: {param.name: param.name for param in tool.params}
+        for name, tool in registry.tools.items()
+    }
+    if (
+        type(policy_set.policy) is not dict
+        or not all(type(name) is str for name in policy_set.policy)
+        or set(policy_set.policy) != tool_names
+    ):
         raise ValueError("policy tools must exactly match the frozen registry")
-    if type(policy_set.risk) is not dict or set(policy_set.risk) != tool_names:
+    if (
+        type(policy_set.risk) is not dict
+        or not all(type(name) is str for name in policy_set.risk)
+        or set(policy_set.risk) != tool_names
+    ):
         raise ValueError("risk tools must exactly match the frozen registry")
     if (
         type(policy_set.risk_inference) is not dict
+        or not all(type(name) is str for name in policy_set.risk_inference)
         or set(policy_set.risk_inference) != tool_names
     ):
         raise ValueError("risk evidence must exactly match the frozen registry")
@@ -2811,23 +2864,32 @@ def _freeze_policy_set(
     expected_risks: dict[str, Risk] = {}
     expected_assessments: dict[str, RiskAssessment] = {}
     expected_review: list[tuple[str, str]] = []
+    # Review is also the beta override surface, but a resource-limit review is
+    # visibility only. Releasing that lock requires an explicit sink=False
+    # declaration and a policy rebuild, not mutation of derived material.
+    expected_overridable_review: set[tuple[str, str]] = set()
     expected_confirm: list[str] = []
     expected_risk_review: list[str] = []
     expected_risk_conflicts: list[str] = []
     inference_context = _PolicyInferenceContext()
     for tool_name, tool in registry.tools.items():
         inferred = infer_risk(tool_name, inference_context)
+        inference_incomplete = inference_context.inference_incomplete_for(
+            tool_name
+        )
         conflict = (
             tool.risk is not None
             and inferred.risk is not Risk.UNKNOWN
             and tool.risk is not inferred.risk
         )
         effective_risk = (
-            Risk.UNKNOWN if tool.risk is None or conflict else tool.risk
+            Risk.UNKNOWN
+            if tool.risk is None or conflict or inference_incomplete
+            else tool.risk
         )
         expected_risks[tool_name] = effective_risk
         expected_assessments[tool_name] = inferred
-        if tool.risk is None or conflict:
+        if tool.risk is None or conflict or inference_incomplete:
             expected_risk_review.append(tool_name)
         if conflict:
             expected_risk_conflicts.append(tool_name)
@@ -2842,21 +2904,34 @@ def _freeze_policy_set(
                 param,
                 inference_context,
             )
+            param_inference_incomplete = (
+                inference_context.inference_incomplete_for(param.name)
+            )
             if confidence is Confidence.UNCERTAIN:
-                if effective_risk is Risk.READ_ONLY:
+                if (
+                    effective_risk is Risk.READ_ONLY
+                    and not param_inference_incomplete
+                ):
                     inferred_policy = Policy.TYPED_BOUNDED
                 else:
                     expected_review.append((tool_name, param.name))
+                    if not param_inference_incomplete:
+                        expected_overridable_review.add(
+                            (tool_name, param.name)
+                        )
             expected_policies[tool_name][param.name] = inferred_policy
 
-    expected_review_set = set(expected_review)
     policies: dict[str, Any] = {}
     risks: dict[str, Risk] = {}
     assessments: dict[str, RiskAssessment] = {}
     for tool_name, tool in registry.tools.items():
         raw_params = policy_set.policy[tool_name]
         expected_params = {param.name for param in tool.params}
-        if type(raw_params) is not dict or set(raw_params) != expected_params:
+        if (
+            type(raw_params) is not dict
+            or not all(type(name) is str for name in raw_params)
+            or set(raw_params) != expected_params
+        ):
             raise ValueError(
                 f"policy params for '{tool_name}' must match its registration"
             )
@@ -2866,13 +2941,13 @@ def _freeze_policy_set(
         }
         for param_name, actual_policy in normalized_params.items():
             if (
-                (tool_name, param_name) not in expected_review_set
+                (tool_name, param_name) not in expected_overridable_review
                 and actual_policy
                 is not expected_policies[tool_name][param_name]
             ):
                 raise ValueError(
                     "parameter policy may differ from inference only for "
-                    "entries in the derived review queue"
+                    "overridable entries in the derived review queue"
                 )
         policies[tool_name] = MappingProxyType(normalized_params)
         risk_value = policy_set.risk[tool_name]
@@ -2901,19 +2976,63 @@ def _freeze_policy_set(
             review_required=assessment.review_required,
         )
 
-    review = tuple(tuple(item) for item in policy_set.review)
+    queue_values = (
+        policy_set.review,
+        policy_set.confirm,
+        policy_set.risk_review,
+        policy_set.risk_conflicts,
+    )
+    if not all(type(value) is list for value in queue_values):
+        raise TypeError("policy queues must be exact built-in lists")
     if not all(
-        len(item) == 2
-        and item[0] in tool_names
-        and item[1] in policies[item[0]]
-        for item in review
+        type(item) is tuple
+        and len(item) == 2
+        and all(type(name) is str for name in item)
+        for item in policy_set.review
+    ):
+        raise TypeError(
+            "parameter review entries must be exact plain-string pairs"
+        )
+    if not all(
+        type(name) is str
+        for queue in (
+            policy_set.confirm,
+            policy_set.risk_review,
+            policy_set.risk_conflicts,
+        )
+        for name in queue
+    ):
+        raise TypeError("risk queue entries must be exact plain strings")
+    if not all(
+        item[0] in canonical_tool_names
+        and item[1] in canonical_param_names[item[0]]
+        for item in policy_set.review
     ):
         raise ValueError("parameter review entries must match the frozen policy")
-    confirm = tuple(policy_set.confirm)
-    risk_review = tuple(policy_set.risk_review)
-    risk_conflicts = tuple(policy_set.risk_conflicts)
-    if not all(name in tool_names for name in confirm + risk_review + risk_conflicts):
+    review = tuple(
+        (
+            canonical_tool_names[tool_name],
+            canonical_param_names[tool_name][param_name],
+        )
+        for tool_name, param_name in policy_set.review
+    )
+    if not all(
+        name in canonical_tool_names
+        for queue in (
+            policy_set.confirm,
+            policy_set.risk_review,
+            policy_set.risk_conflicts,
+        )
+        for name in queue
+    ):
         raise ValueError("risk lists must reference frozen registered tools")
+    confirm = tuple(canonical_tool_names[name] for name in policy_set.confirm)
+    risk_review = tuple(
+        canonical_tool_names[name] for name in policy_set.risk_review
+    )
+    risk_conflicts = tuple(
+        canonical_tool_names[name] for name in policy_set.risk_conflicts
+    )
     if review != tuple(expected_review):
         raise ValueError("parameter review queue must match the derived policy")
     if risks != expected_risks:
@@ -3327,13 +3446,47 @@ class GuardedToolRunner:
         # execution; all approved work remains bound to _session_ledger.
         self.ledger = self._session_ledger
         self._bundle = _make_registration_bundle(registry, policy_set)
-        self.policy_set = self._bundle.policy_set
-        self._source_policy = policy_set
-        self._source_policy_state = (
-            None
-            if policy_set is None
-            else _live_policy_state(policy_set, self._bundle.registry)
+        # Preserve the public inspection surface without exposing the exact
+        # object the runner enforces. Even deliberate same-process mutation of
+        # this view cannot alter the authoritative bundle.
+        enforced_policy = self._bundle.policy_set
+        inspection_assessments = MappingProxyType(
+            {
+                name: RiskAssessment(
+                    risk=assessment.risk,
+                    source=assessment.source,
+                    confidence=assessment.confidence,
+                    mutability=assessment.mutability,
+                    matched_tokens=assessment.matched_tokens,
+                    review_required=assessment.review_required,
+                )
+                for name, assessment in enforced_policy.risk_inference.items()
+            }
         )
+        self.policy_set = _FrozenPolicySet(
+            policy=enforced_policy.policy,
+            risk=enforced_policy.risk,
+            review=enforced_policy.review,
+            confirm=enforced_policy.confirm,
+            risk_inference=inspection_assessments,
+            risk_review=enforced_policy.risk_review,
+            risk_conflicts=enforced_policy.risk_conflicts,
+            registry_binding=enforced_policy.registry_binding,
+            registry_version=enforced_policy.registry_version,
+        )
+        self._source_policy = policy_set
+        if policy_set is None:
+            self._source_policy_state = None
+        else:
+            self._source_policy_state = _live_policy_state(
+                policy_set,
+                self._bundle.registry,
+            )
+            if self._source_policy_state is None:
+                raise ValueError(
+                    "policy state could not be snapshotted; rebuild it from "
+                    "the registry"
+                )
 
     def _configuration_drift(self) -> Decision | None:
         if self.ledger is not self._session_ledger:
@@ -3360,11 +3513,19 @@ class GuardedToolRunner:
             )
         if _live_registry_state(self.registry) != self._bundle.source_state:
             return Decision(False, "registry changed; rebuild the guarded runner")
-        if self._source_policy is not None and _live_policy_state(
-            self._source_policy,
-            self._bundle.registry,
-        ) != self._source_policy_state:
-            return Decision(False, "policy changed; rebuild the guarded runner")
+        if self._source_policy is not None:
+            current_policy_state = _live_policy_state(
+                self._source_policy,
+                self._bundle.registry,
+            )
+            if (
+                current_policy_state is None
+                or current_policy_state != self._source_policy_state
+            ):
+                return Decision(
+                    False,
+                    "policy changed; rebuild the guarded runner",
+                )
         return None
 
     def _invoke_locked(

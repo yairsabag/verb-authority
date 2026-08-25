@@ -52,8 +52,14 @@ tag or GitHub release was created, and the version is intentionally not reused.
   and confirmation-time ledger drift deny execution instead of applying a
   stale decision; configuration drift requires a new runner. Derived risk,
   evidence, conflict, and minimum-confirmation state cannot be weakened in a
-  caller-supplied `PolicySet`; only derived parameter-review entries may be
-  overridden, while confirmation may be made stricter. Ledger stores are
+  caller-supplied `PolicySet`; only derived parameter-review entries whose
+  bounded inference completed may be overridden, while a resource-limit review
+  requires an explicit schema declaration and rebuild. Confirmation may be
+  made stricter. Require exact built-in
+  policy queues, exact plain-string queue entries, and a valid initial and
+  current live-policy snapshot before execution; expose a separate slotted
+  inspection view rather than the frozen policy object enforced by the runner.
+  Ledger stores are
   private exact built-ins, omitted from `repr`, and bound against replacement.
   Callable globals,
   closure contents, and bound-instance state remain trusted application state,
@@ -155,8 +161,12 @@ tag or GitHub release was created, and the version is intentionally not reused.
   stripping so the documented lexical transform is actually enforced.
   Share a cumulative 32,768-character NFKC budget across each policy
   inference, gate, ledger publication or lookup, cache repeated identifier and
-  result decisions, and reject data-authored locked sinks before traversing
-  their nested Unicode values. Bound the partial ASCII skeleton's output as
+  result decisions, and keep an identifier whose bounded inference could not
+  complete distinct from an ordinary lexical miss. Such a tool remains
+  effective `unknown` with review and confirmation, while such an undeclared
+  parameter remains `trusted_fixed` with review even on a declared read-only
+  tool. Reject data-authored locked sinks before traversing their nested
+  Unicode values. Bound the partial ASCII skeleton's output as
   well as its distinct code points, so long Unicode cannot amplify memory.
 - Canonicalize a rejected runtime enum candidate once rather than once per
   declared member. Skip ledger-history containment scans when no exact trusted
@@ -196,6 +206,10 @@ tag or GitHub release was created, and the version is intentionally not reused.
   verified release assets; any conflicting or additional remote asset fails
   closed. A full rebuild may produce different archive bytes and intentionally
   requires manual cleanup rather than mixing attempts.
+- Pin every nonzero raw source-archive header to the exact USTAR magic/version
+  and canonical octal size grammar before `tarfile` parses any member. Reject
+  V7, GNU, arbitrary-magic, and base-256 alternatives that different
+  mainstream extractors can interpret with incompatible name/prefix rules.
 - Parse source archives through one bounded verifier/extractor that accepts only
   the build backend's local `mtime` PAX field, rejects global PAX, size/path
   overrides and sparse metadata before allocation, and validates every portable

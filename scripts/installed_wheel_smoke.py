@@ -3264,6 +3264,84 @@ def _daybreak_release_candidate_regressions() -> None:
             "installed frozen policy resolved an explicit UNKNOWN declaration",
         )
 
+    class StatefulPolicyName(str):
+        __hash__ = str.__hash__
+
+        def __new__(cls, value):
+            instance = super().__new__(cls, value)
+            instance.comparisons = 0
+            return instance
+
+        def __eq__(self, other):
+            self.comparisons += 1
+            return self.comparisons <= 2 and str.__eq__(self, other)
+
+    registry = Registry()
+    registry.add(Tool("evaluate", [], risk=Risk.UNKNOWN))
+    forged_policy = build_policy(registry)
+    forged_name = StatefulPolicyName("evaluate")
+    forged_policy.confirm = [forged_name]
+    forged_decision = verb_authority.gate(
+        registry,
+        forged_policy,
+        "evaluate",
+        {},
+        {},
+    )
+    _check(
+        not forged_decision.allow and forged_name.comparisons == 0,
+        "installed gate compared a polymorphic confirmation entry",
+    )
+    try:
+        GuardedToolRunner(registry, forged_policy)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError(
+            "installed runner accepted a polymorphic confirmation entry"
+        )
+
+    events = []
+    registry = Registry()
+    registry.add(
+        Tool(
+            "evaluate",
+            [],
+            fn=lambda: events.append("invoked"),
+            risk=Risk.UNKNOWN,
+        )
+    )
+    runner = GuardedToolRunner(registry, build_policy(registry))
+    _check(
+        not hasattr(runner.policy_set, "__dict__"),
+        "installed public frozen policy view exposes a mutable __dict__",
+    )
+    _check(
+        runner.policy_set.risk_inference["evaluate"]
+        is not runner._bundle.policy_set.risk_inference["evaluate"],
+        "installed public policy view aliases enforced risk evidence",
+    )
+    object.__setattr__(runner.policy_set, "confirm", ())
+    object.__setattr__(
+        runner.policy_set.risk_inference["evaluate"],
+        "source",
+        "forged",
+    )
+    captured = []
+    result = runner.run(
+        {"name": "evaluate", "input": {}},
+        confirm=lambda request: captured.append(request) or False,
+    )
+    _check(
+        result.decision.allow
+        and result.decision.needs_confirm
+        and not result.executed
+        and not result.invoked
+        and not events
+        and captured[0].risk_assessment.source == "tool_name",
+        "installed public policy view aliases the enforced confirmation state",
+    )
+
     original_limit = verb_authority.MAX_NFKC_OPERATION_CHARS
     original_unicode = verb_authority.unicodedata
     normalization_calls = []
@@ -3335,6 +3413,87 @@ def _daybreak_release_candidate_regressions() -> None:
             and argument["review_required"] is True,
             "installed scanner did not share the tool/parameter Unicode budget",
         )
+
+        fullwidth_delete = "ｄｅｌｅｔｅ_records"
+        risk_registry = Registry()
+        risk_events = []
+        risk_registry.add(
+            Tool(
+                fullwidth_delete,
+                [],
+                fn=lambda: risk_events.append("invoked"),
+                risk=Risk.READ_ONLY,
+            )
+        )
+        risk_policy = build_policy(risk_registry)
+        risk_runner = GuardedToolRunner(risk_registry, risk_policy)
+        risk_result = risk_runner.run(
+            {"name": fullwidth_delete, "input": {}}
+        )
+        _check(
+            risk_policy.risk[fullwidth_delete] is Risk.UNKNOWN
+            and risk_policy.risk_inference[fullwidth_delete].source
+            == "inference_limit"
+            and fullwidth_delete in risk_policy.risk_review
+            and fullwidth_delete in risk_policy.confirm
+            and risk_result.decision.needs_confirm
+            and not risk_result.executed
+            and not risk_events,
+            "installed NFKC exhaustion accepted a lower declared risk tier",
+        )
+
+        fullwidth_recipient = "ｒｅｃｉｐｉｅｎｔ"
+        sink_registry = Registry()
+        sink_events = []
+        sink_registry.add(
+            Tool(
+                "catalog",
+                [Param(fullwidth_recipient, "string")],
+                fn=lambda **arguments: sink_events.append(arguments),
+                risk=Risk.READ_ONLY,
+            )
+        )
+        sink_policy = build_policy(sink_registry)
+        sink_runner = GuardedToolRunner(sink_registry, sink_policy)
+        sink_result = sink_runner.run(
+            {
+                "name": "catalog",
+                "input": {fullwidth_recipient: "attacker-authored"},
+            }
+        )
+        _check(
+            sink_policy.policy["catalog"][fullwidth_recipient]
+            is Policy.TRUSTED_FIXED
+            and ("catalog", fullwidth_recipient) in sink_policy.review
+            and not sink_result.decision.allow
+            and not sink_result.executed
+            and not sink_events,
+            "installed NFKC exhaustion unlocked a read-only authority sink",
+        )
+
+        forged_sink_policy = build_policy(sink_registry)
+        forged_sink_policy.policy["catalog"][fullwidth_recipient] = (
+            Policy.TYPED_BOUNDED
+        )
+        forged_sink_decision = verb_authority.gate(
+            sink_registry,
+            forged_sink_policy,
+            "catalog",
+            {fullwidth_recipient: "attacker-authored"},
+            {fullwidth_recipient: "data"},
+        )
+        _check(
+            not forged_sink_decision.allow,
+            "installed inference-limit review accepted a policy override",
+        )
+        try:
+            GuardedToolRunner(sink_registry, forged_sink_policy)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "installed runner accepted an inference-limit policy override"
+            )
     finally:
         verb_authority.MAX_NFKC_OPERATION_CHARS = original_limit
         verb_authority.unicodedata = original_unicode

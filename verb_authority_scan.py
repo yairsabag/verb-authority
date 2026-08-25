@@ -1723,8 +1723,18 @@ def _reason(param: Param, policy: Policy, confidence: Confidence, risk: Risk) ->
         return "declared data-fillable"
     if param.type in {"email", "uri"}:
         return f"{param.type} destination"
-    if confidence is Confidence.UNCERTAIN and risk is Risk.READ_ONLY:
+    if (
+        confidence is Confidence.UNCERTAIN
+        and risk is Risk.READ_ONLY
+        and policy is Policy.TYPED_BOUNDED
+    ):
         return "ambiguous argument auto-relaxed for read-only tool"
+    if (
+        confidence is Confidence.UNCERTAIN
+        and risk is Risk.READ_ONLY
+        and policy is Policy.TRUSTED_FIXED
+    ):
+        return "identifier inference incomplete; kept locked for review"
     if confidence is Confidence.UNCERTAIN:
         return "ambiguous consequential argument; review required"
     if policy is Policy.TRUSTED_FIXED:
@@ -2045,7 +2055,7 @@ def _scan_definitions_bounded(
                 "policy": final_policy.value,
                 "confidence": confidence.value,
                 "review_required": needs_review,
-                "reason": _reason(param, initial_policy, confidence, risk),
+                "reason": _reason(param, final_policy, confidence, risk),
             }
             constraints = _normalized_constraints(
                 properties.get(param.name), redact_values=redact_names
@@ -2069,9 +2079,10 @@ def _scan_definitions_bounded(
             risk_inference["matched_tokens"] = list(inferred_risk.matched_tokens)
 
         risk_conflict = tool_name in policy_set.risk_conflicts
+        inference_incomplete = inferred_risk.source == "inference_limit"
         if risk_conflict:
             risk_source = "conflict_safe_default"
-        elif declared_risk is not None:
+        elif declared_risk is not None and not inference_incomplete:
             risk_source = "control_declaration"
         else:
             risk_source = "safe_default"
@@ -2082,7 +2093,11 @@ def _scan_definitions_bounded(
             "risk_source": risk_source,
             "risk_evidence": (
                 declared_risk["evidence"]
-                if declared_risk is not None and not risk_conflict
+                if (
+                    declared_risk is not None
+                    and not risk_conflict
+                    and not inference_incomplete
+                )
                 else None
             ),
             "inferred_risk": inferred_risk.risk.value,

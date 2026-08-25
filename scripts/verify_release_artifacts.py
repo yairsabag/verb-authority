@@ -81,6 +81,7 @@ _WINDOWS_RESERVED_COMPONENTS = {
 }
 _ALLOWED_PAX_KEYS = {"mtime"}
 _PAX_MTIME_PATTERN = re.compile(r"-?[0-9]{1,20}(?:\.[0-9]{1,20})?")
+_USTAR_MAGIC_VERSION = b"ustar\x0000"
 _SUPPORTED_CORE_METADATA_VERSION = "2.4"
 _SUPPORTED_WHEEL_VERSION = "1.0"
 _GENERATED_SETUP_CFG = b"[egg_info]\ntag_build = \ntag_date = 0\n\n"
@@ -253,8 +254,64 @@ def _tar_octal_size(field: bytes) -> int:
     return int(value, 8)
 
 
+def _validate_tar_header_profiles(sdist_path: Path) -> None:
+    """Reject non-USTAR headers before tarfile parses its first member.
+
+    This preflight deliberately defers truncated payloads to the bounded
+    parser and full framing validator below. Its sole job is to reach every
+    header tarfile could parse and bind its format and size grammar before
+    ``TarInfo.frombuf`` can apply a different one.
+    """
+
+    consumed = 0
+    try:
+        with gzip.open(sdist_path, "rb") as source:
+            while True:
+                header = source.read(tarfile.BLOCKSIZE)
+                consumed += len(header)
+                if consumed > MAX_SDIST_DECOMPRESSED_BYTES:
+                    raise VerificationError(
+                        "source distribution exceeds the decompressed traversal limit"
+                    )
+                if len(header) != tarfile.BLOCKSIZE or not any(header):
+                    return
+                if header[257:265] != _USTAR_MAGIC_VERSION:
+                    raise VerificationError(
+                        "source distribution contains a non-USTAR raw header"
+                    )
+                # Pin the size grammar here too: tarfile accepts base-256
+                # values that this release format does not. Returning on such
+                # a field could let tarfile skip its payload and reach a later
+                # header that this preflight never inspected.
+                size = _tar_octal_size(header[124:136])
+                if size > MAX_SDIST_MEMBER_BYTES:
+                    raise VerificationError(
+                        "source distribution member exceeds the size limit"
+                    )
+                remaining = ((size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE) * (
+                    tarfile.BLOCKSIZE
+                )
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    consumed += len(chunk)
+                    if consumed > MAX_SDIST_DECOMPRESSED_BYTES:
+                        raise VerificationError(
+                            "source distribution exceeds the decompressed "
+                            "traversal limit"
+                        )
+                    if not chunk:
+                        return
+                    remaining -= len(chunk)
+    except VerificationError:
+        raise
+    except (OSError, EOFError, ValueError) as exc:
+        raise VerificationError(
+            f"cannot validate source-distribution tar headers: {exc}"
+        ) from exc
+
+
 def _validate_tar_zero_padding(sdist_path: Path) -> None:
-    """Reject data hidden in per-member padding or the final tar record."""
+    """Validate raw USTAR headers, padding, and the final tar record."""
 
     consumed = 0
 
@@ -300,6 +357,16 @@ def _validate_tar_zero_padding(sdist_path: Path) -> None:
                 if zero_headers:
                     raise VerificationError(
                         "source distribution contains data after a tar end marker"
+                    )
+                # TarInfo.frombuf accepts V7, GNU, and unknown magic/version
+                # profiles and can still join their name/prefix fields using
+                # USTAR semantics. Other extractors select the format from
+                # these bytes and may interpret the same split path
+                # differently. Pin the one archive grammar emitted by the
+                # supported builder before tarfile parses any raw header.
+                if header[257:265] != _USTAR_MAGIC_VERSION:
+                    raise VerificationError(
+                        "source distribution contains a non-USTAR raw header"
                     )
                 size = _tar_octal_size(header[124:136])
                 if size > MAX_SDIST_MEMBER_BYTES:
@@ -3114,6 +3181,7 @@ def _inspect_sdist(
                 "source distribution exceeds the compressed-size limit"
             )
         _validate_single_gzip_member(sdist_path)
+        _validate_tar_header_profiles(sdist_path)
         with (
             gzip.open(sdist_path, "rb") as decompressed_archive,
             tarfile.open(
