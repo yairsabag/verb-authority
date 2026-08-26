@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "note": "Every argument value in every case is individually admitted by the schema/local constraint vocabulary. Authorization differs only at the tuple level.",
+  "cases": [
+    {
+      "id": "A",
+      "label": "allowed_ops_software",
+      "input": {
+        "account": "ops-account",
+        "recipient": "vendor-alpha",
+        "amount": 7500,
+        "purpose": "software-license"
+      },
+      "expected_action_instance_authorization": "ALLOW",
+      "expected_rule": "R1"
+    },
+    {
+      "id": "B",
+      "label": "denied_cross_account_recipient",
+      "input": {
+        "account": "ops-account",
+        "recipient": "vendor-beta",
+        "amount": 7500,
+        "purpose": "software-license"
+      },
+      "expected_action_instance_authorization": "DENY",
+      "expected_rule": null
+    },
+    {
+      "id": "C",
+      "label": "denied_project_over_limit",
+      "input": {
+        "account": "project-account",
+        "recipient": "vendor-beta",
+        "amount": 7500,
+        "purpose": "travel"
+      },
+      "expected_action_instance_authorization": "DENY",
+      "expected_rule": null
+    },
+    {
+      "id": "D",
+      "label": "allowed_project_travel",
+      "input": {
+        "account": "project-account",
+        "recipient": "vendor-beta",
+        "amount": 4000,
+        "purpose": "travel"
+      },
+      "expected_action_instance_authorization": "ALLOW",
+      "expected_rule": "R2"
+    }
+  ]
+}

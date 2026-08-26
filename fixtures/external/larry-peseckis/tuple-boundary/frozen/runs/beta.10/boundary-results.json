@@ -1,0 +1,103 @@
+{
+  "fixture_version": 1,
+  "verb_authority_target": "v0.10.0-beta.10",
+  "question": "Does the evidence stop at per-argument authority rather than imply cross-argument/action-instance authorization?",
+  "cases": [
+    {
+      "id": "A",
+      "label": "allowed_ops_software",
+      "schema_valid": true,
+      "schema_errors": [],
+      "oracle_result": "ALLOW",
+      "oracle_rule": "R1",
+      "expected": "ALLOW",
+      "expected_rule": "R1",
+      "oracle_matches_expected": true
+    },
+    {
+      "id": "B",
+      "label": "denied_cross_account_recipient",
+      "schema_valid": true,
+      "schema_errors": [],
+      "oracle_result": "DENY",
+      "oracle_rule": null,
+      "expected": "DENY",
+      "expected_rule": null,
+      "oracle_matches_expected": true
+    },
+    {
+      "id": "C",
+      "label": "denied_project_over_limit",
+      "schema_valid": true,
+      "schema_errors": [],
+      "oracle_result": "DENY",
+      "oracle_rule": null,
+      "expected": "DENY",
+      "expected_rule": null,
+      "oracle_matches_expected": true
+    },
+    {
+      "id": "D",
+      "label": "allowed_project_travel",
+      "schema_valid": true,
+      "schema_errors": [],
+      "oracle_result": "ALLOW",
+      "oracle_rule": "R2",
+      "expected": "ALLOW",
+      "expected_rule": "R2",
+      "oracle_matches_expected": true
+    }
+  ],
+  "scanner": {
+    "command": [
+      "python.exe",
+      "-m",
+      "verb_authority",
+      "scan",
+      "tools.json",
+      "--controls",
+      "controls.json",
+      "--format",
+      "json",
+      "--output",
+      "authority-report.json"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "",
+    "summary": {
+      "report_version": 3,
+      "generator": "verb-authority",
+      "tool_found": true,
+      "effective_risk": "financial",
+      "risk_source": "control_declaration",
+      "needs_confirmation": true,
+      "inferred_argument_policy": {
+        "account": "trusted_fixed",
+        "recipient": "trusted_fixed",
+        "amount": "typed_bounded",
+        "purpose": "typed_bounded"
+      },
+      "declared_argument_authority": {
+        "account": {
+          "authority": "constrained",
+          "evidence": "declared"
+        },
+        "recipient": {
+          "authority": "constrained",
+          "evidence": "declared"
+        },
+        "amount": {
+          "authority": "constrained",
+          "evidence": "declared"
+        },
+        "purpose": {
+          "authority": "constrained",
+          "evidence": "declared"
+        }
+      },
+      "tuple_authorization_like_keys": []
+    }
+  },
+  "fixture_validation": "PASS"
+}

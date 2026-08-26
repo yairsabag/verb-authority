@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "scope": "EXTERNAL ACTION-INSTANCE ORACLE; intentionally not supplied to Verb Authority",
+  "rules": [
+    {
+      "id": "R1",
+      "account": "ops-account",
+      "recipient": "vendor-alpha",
+      "purpose": "software-license",
+      "max_amount": 10000
+    },
+    {
+      "id": "R2",
+      "account": "project-account",
+      "recipient": "vendor-beta",
+      "purpose": "travel",
+      "max_amount": 5000
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+{
+  "control_declaration_fingerprint_sha256": "cb5860eb52c44b6f6af10a9a770db6780e0bb6b98b28d14268d012779c5b8bd9",
+  "declared_controls": {
+    "attribution": {
+      "name": "synthetic tuple-authority boundary fixture",
+      "source": "independent test fixture for Verb Authority v0.10.0-beta.6"
+    },
+    "tools": [
+      {
+        "arguments": [
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted account allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "account",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted recipient allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "recipient",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "numeric ceiling before payment submission",
+                "operational_status": "enforced",
+                "source": "global payment ceiling of 10000"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "amount",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted purpose allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "purpose",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          }
+        ],
+        "name": "submit_payment",
+        "risk": {
+          "effects": [
+            "initiates_payment",
+            "commits_funds"
+          ],
+          "evidence": "declared",
+          "note": "Synthetic financial tool used only to test the boundary between per-argument authority and action-instance authorization.",
+          "tier": "financial"
+        },
+        "schema_closes_unknown_arguments": true,
+        "unexposed_arguments": []
+      }
+    ],
+    "verification_notice": "Control declarations are supplied by the report author. Their evidence labels and operational statuses are preserved but are not independently verified by this scanner.",
+    "version": 1
+  },
+  "generator": "verb-authority",
+  "privacy": {
+    "control_declarations_included": true,
+    "descriptions_included": false,
+    "examples_or_values_included": false,
+    "names_redacted": false,
+    "network_used": false,
+    "server_executed": false
+  },
+  "report_version": 2,
+  "schema_fingerprint_sha256": "b45cec61a6cc0b735d80d95f07421c936866cd95162a79059ca12eb09662d572",
+  "summary": {
+    "annotation_conflicts": 0,
+    "confirmation_required_tools": 1,
+    "data_fillable_parameters": 4,
+    "parameters": 4,
+    "protected_parameters": 0,
+    "review_required": 0,
+    "risk_conflicts": 0,
+    "risk_review_required_tools": 0,
+    "tools": 1
+  },
+  "tools": [
+    {
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "high",
+          "name": "account",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "type": "enum"
+        },
+        {
+          "confidence": "high",
+          "name": "recipient",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "type": "enum"
+        },
+        {
+          "confidence": "high",
+          "name": "amount",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "type": "number"
+        },
+        {
+          "confidence": "high",
+          "name": "purpose",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "type": "enum"
+        }
+      ],
+      "declared_risk": {
+        "effects": [
+          "initiates_payment",
+          "commits_funds"
+        ],
+        "evidence": "declared",
+        "note": "Synthetic financial tool used only to test the boundary between per-argument authority and action-instance authorization.",
+        "tier": "financial"
+      },
+      "inferred_risk": "financial",
+      "name": "submit_payment",
+      "needs_confirmation": true,
+      "risk": "financial",
+      "risk_conflict": false,
+      "risk_evidence": "declared",
+      "risk_inference": {
+        "confidence": "heuristic",
+        "matched_tokens": [
+          "payment"
+        ],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": false,
+      "risk_source": "control_declaration",
+      "schema_closes_unknown_arguments": true
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "tools": [
+    {
+      "name": "submit_payment",
+      "description": "Signs and submits a payment using an approved account.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "enum": [
+              "ops-account",
+              "project-account"
+            ],
+            "description": "Application-approved source account."
+          },
+          "recipient": {
+            "type": "string",
+            "enum": [
+              "vendor-alpha",
+              "vendor-beta"
+            ],
+            "description": "Application-approved payment recipient."
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000,
+            "description": "Payment amount."
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "software-license",
+              "travel"
+            ],
+            "description": "Application-approved payment purpose."
+          }
+        },
+        "required": [
+          "account",
+          "recipient",
+          "amount",
+          "purpose"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
