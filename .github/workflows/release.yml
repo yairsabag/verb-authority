@@ -202,6 +202,8 @@ jobs:
           test -n "$sdist_root"
           test -f "$sdist_root/LANDSCAPE.md"
           test -f "$sdist_root/docs/assets/social-preview.png"
+          test -f "$sdist_root/pydantic_ai_demo.py"
+          test -f "$sdist_root/scripts/installed_pydantic_smoke.py"
           test -f "$sdist_root/scripts/installed_wheel_smoke.py"
           test -f "$sdist_root/scripts/verify_release_artifacts.py"
           printf 'SDIST_ROOT=%s\n' "$sdist_root" >> "$GITHUB_ENV"
@@ -277,6 +279,24 @@ jobs:
           env -u PYTHONPATH -u PYTHONHOME \
             python -I -m pip check
           test ! -e installed-smoke-shadow.marker
+
+      - name: Install and smoke-test the optional Pydantic AI adapter
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          env -u PYTHONPATH -u PYTHONHOME \
+            python -I -m pip install --force-reinstall "${wheels[0]}[pydantic]"
+          cp "$SDIST_ROOT/scripts/installed_pydantic_smoke.py" \
+            "${{ runner.temp }}/installed_pydantic_smoke.py"
+          expected_version=$(env -u PYTHONPATH -u PYTHONHOME python -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$SDIST_ROOT/pyproject.toml")
+          cd "${{ runner.temp }}"
+          env -u PYTHONPATH -u PYTHONHOME \
+            python -I installed_pydantic_smoke.py \
+            --expected-version "$expected_version" \
+            --forbid-root "${{ github.workspace }}" \
+            --forbid-root "$SDIST_ROOT"
+          env -u PYTHONPATH -u PYTHONHOME python -I -m pip check
 
       - name: Confirm the candidate file set is exact
         run: |

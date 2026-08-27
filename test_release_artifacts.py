@@ -1331,6 +1331,45 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
     assert observed == set(expected)
 
 
+def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
+    repository = Path(__file__).resolve().parent
+    config = release_verifier._project_release_config(
+        repository / "pyproject.toml"
+    )
+    assert config.version == "0.10.0b11"
+    assert config.dependencies == ()
+    assert config.optional_dependencies["pydantic"] == (
+        "pydantic-ai-slim==2.35.0",
+        "pydantic==2.13.4",
+    )
+    assert "verb_authority_pydantic" in config.modules
+    assert (
+        "scripts/installed_pydantic_smoke.py"
+        in config.sdist_source_payloads
+    )
+    assert "pydantic_ai_demo.py" in config.sdist_source_payloads
+
+    ci = (repository / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
+    release = (repository / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'run: python -m pip install "setuptools>=77" ".[dev]"' in ci
+    assert 'run: python -m pip install "setuptools>=77" ".[dev,pydantic]"' in ci
+    assert "python -m pytest -v test_pydantic_ai_integration.py" in ci
+    for workflow, base_smoke_step in (
+        (ci, "Smoke-test installed commands"),
+        (release, "Exercise installed commands outside the checkout"),
+    ):
+        assert "scripts/installed_pydantic_smoke.py" in workflow
+        assert '"${wheels[0]}[pydantic]"' in workflow
+        assert "python -I installed_pydantic_smoke.py" in workflow
+        assert workflow.index(base_smoke_step) < workflow.index(
+            "Install and smoke-test the optional Pydantic AI adapter"
+        )
+
+
 def test_release_candidate_is_reverified_on_a_fresh_read_only_runner():
     repository = Path(__file__).resolve().parent
     text = (repository / ".github/workflows/release.yml").read_text(

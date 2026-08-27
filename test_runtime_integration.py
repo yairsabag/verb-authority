@@ -20,6 +20,7 @@ from verb_authority import (
     Registry,
     ResolutionStatus,
     Risk,
+    SelectorCase,
     Tool,
     TrustedChoice,
     TrustedResolver,
@@ -1161,7 +1162,10 @@ def test_confirmation_is_fail_closed_before_financial_execution():
     registry.add(
         Tool(
             "transfer_funds",
-            [Param("destination", sink=True), Param("amount", "number")],
+            [
+                Param("destination", sink=True),
+                Param("amount", "number", sink=False),
+            ],
             fn=transfer_funds,
             risk=Risk.FINANCIAL,
         )
@@ -1196,7 +1200,10 @@ def test_confirmation_callback_cannot_mutate_the_approved_tool_call():
     registry.add(
         Tool(
             "transfer_funds",
-            [Param("destination", sink=True), Param("amount", "number")],
+            [
+                Param("destination", sink=True),
+                Param("amount", "number", sink=False),
+            ],
             fn=transfer_funds,
             risk=Risk.FINANCIAL,
         )
@@ -1727,7 +1734,10 @@ def test_confirmation_is_bound_to_the_private_approved_action_snapshot():
     registry.add(
         Tool(
             "transfer_funds",
-            [Param("destination", sink=True), Param("amount", "number")],
+            [
+                Param("destination", sink=True),
+                Param("amount", "number", sink=False),
+            ],
             fn=lambda destination, amount: executed.append((destination, amount)),
             risk=Risk.FINANCIAL,
         )
@@ -1763,6 +1773,416 @@ def test_confirmation_is_bound_to_the_private_approved_action_snapshot():
     assert request.registration_id
     assert request.executable_id
     assert request.action_id
+
+
+def _browser_tabs_runtime(*, policy_mutator=None):
+    calls = []
+
+    def browser_tabs(**arguments):
+        calls.append(
+            (
+                arguments["action"],
+                arguments.get("index"),
+                arguments.get("url"),
+            )
+        )
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                    sink=False,
+                ),
+                Param("index", "integer", sink=False),
+                Param("url", "uri"),
+            ],
+            fn=browser_tabs,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("new", Risk.WRITE, ["action", "url"]),
+                SelectorCase(
+                    "close",
+                    Risk.DESTRUCTIVE,
+                    ["action", "index"],
+                ),
+                SelectorCase("select", Risk.WRITE, ["action", "index"]),
+            ],
+        )
+    )
+    policy = build_policy(registry)
+    if policy_mutator is not None:
+        policy_mutator(policy)
+    return calls, registry, GuardedToolRunner(registry, policy)
+
+
+def test_runner_rejects_inactive_destination_callable_default():
+    calls = []
+
+    def operate(action, destination="acct-attacker"):
+        calls.append((action, destination))
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [
+                Param("action", "enum", enum=["list", "send"], sink=False),
+                Param("destination", sink=True),
+            ],
+            fn=operate,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("send", Risk.WRITE, ["action", "destination"]),
+            ],
+        )
+    )
+    policy_set = build_policy(registry)
+
+    with pytest.raises(ValueError, match="inactive in some selector cases"):
+        GuardedToolRunner(registry, policy_set)
+
+    direct = dispatch(
+        registry,
+        policy_set,
+        {"name": "operate", "input": {"action": "list"}},
+    )
+
+    assert not direct.allow
+    assert "registered implementation is incompatible" in direct.reason
+    assert calls == []
+
+
+def test_runner_rejects_required_callable_param_inactive_in_a_branch():
+    def operate(action, destination):
+        return {"action": action, "destination": destination}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [
+                Param("action", "enum", enum=["list", "send"], sink=False),
+                Param("destination", sink=True),
+            ],
+            fn=operate,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("send", Risk.WRITE, ["action", "destination"]),
+            ],
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="explicit callable params inactive in some selector cases",
+    ):
+        GuardedToolRunner(registry)
+
+
+def test_branch_kwargs_receives_only_authorized_active_arguments():
+    calls = []
+
+    def operate(**arguments):
+        calls.append(dict(arguments))
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [
+                Param("action", "enum", enum=["list", "send"], sink=False),
+                Param("destination", sink=True),
+            ],
+            fn=operate,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("send", Risk.WRITE, ["action", "destination"]),
+            ],
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    result = runner.run(
+        {"name": "operate", "input": {"action": "list"}},
+    )
+
+    assert result.executed
+    assert calls == [{"action": "list"}]
+
+
+def test_runner_detects_same_shape_callable_default_drift_after_confirmation():
+    calls = []
+
+    def operate(action, destination="acct-initial"):
+        calls.append((action, destination))
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "operate",
+            [
+                Param("action", "enum", enum=["send"], sink=False),
+                Param("destination", sink=True),
+            ],
+            fn=operate,
+            risk=Risk.FINANCIAL,
+            selector="action",
+            selector_cases=[
+                SelectorCase(
+                    "send",
+                    Risk.FINANCIAL,
+                    ["action", "destination"],
+                ),
+            ],
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    def replace_default_then_confirm(request):
+        operate.__defaults__ = ("acct-replaced",)
+        return True
+
+    result = runner.run(
+        {
+            "name": "operate",
+            "input": {"action": "send", "destination": "acct-approved"},
+        },
+        trusted_args={"destination": "acct-approved"},
+        confirm=replace_default_then_confirm,
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+def test_runner_uses_exact_selector_case_risk_and_active_arguments():
+    calls, _, runner = _browser_tabs_runtime()
+    confirmations = []
+
+    listed = runner.run(
+        {"name": "browser_tabs", "input": {"action": "list"}},
+    )
+    opened = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "new", "url": "https://example.test"},
+        },
+        trusted_args={"url": "https://example.test"},
+    )
+    pending_close = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+    )
+    closed = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+        confirm=lambda request: confirmations.append(request) or True,
+    )
+
+    assert listed.executed and not listed.decision.needs_confirm
+    assert opened.executed and not opened.decision.needs_confirm
+    assert pending_close.decision.allow
+    assert pending_close.decision.needs_confirm
+    assert not pending_close.executed
+    assert closed.executed and closed.decision.needs_confirm
+    assert calls == [
+        ("list", None, None),
+        ("new", None, "https://example.test"),
+        ("close", 0, None),
+    ]
+
+    assert len(confirmations) == 1
+    request = confirmations[0]
+    assert request.risk == "destructive"
+    assert request.declared_risk == "write"
+    assert request.selector == "action"
+    assert request.selector_value_json == '"close"'
+    assert request.active_args == ("action", "index")
+    assert json.loads(request.arguments_json) == {"action": "close", "index": 0}
+    assert request.action_id
+
+
+def test_branch_registration_and_action_ids_bind_effective_case_metadata():
+    def capture(*, close_risk):
+        calls, registry, runner = _browser_tabs_runtime()
+        tool = registry.tools["browser_tabs"]
+        assert tool.selector_cases is not None
+        tool.selector_cases[2].risk = close_risk
+        runner = GuardedToolRunner(registry, build_policy(registry))
+        requests = []
+        runner.run(
+            {
+                "name": "browser_tabs",
+                "input": {"action": "close", "index": 0},
+            },
+            confirm=lambda request: requests.append(request) or False,
+        )
+        assert calls == []
+        assert len(requests) == 1
+        return requests[0]
+
+    destructive = capture(close_risk=Risk.DESTRUCTIVE)
+    financial = capture(close_risk=Risk.FINANCIAL)
+
+    assert destructive.risk == "destructive"
+    assert financial.risk == "financial"
+    assert destructive.registration_id != financial.registration_id
+    assert destructive.action_id != financial.action_id
+
+
+def test_confirmation_display_mutation_cannot_rewrite_private_branch_binding():
+    calls, _, runner = _browser_tabs_runtime()
+
+    def forge_display_then_confirm(request):
+        object.__setattr__(request, "risk", "read_only")
+        object.__setattr__(request, "selector", "other")
+        object.__setattr__(request, "selector_value_json", '"list"')
+        object.__setattr__(request, "active_args", ("action",))
+        object.__setattr__(request, "arguments_json", '{"action":"list"}')
+        object.__setattr__(request, "action_id", "forged")
+        return True
+
+    result = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+        confirm=forge_display_then_confirm,
+    )
+
+    assert result.executed
+    assert result.decision.needs_confirm
+    assert "destructive" in result.decision.reason
+    assert calls == [("close", 0, None)]
+
+
+def test_explicit_extra_confirmation_remains_monotonic_for_read_only_branch():
+    calls, _, runner = _browser_tabs_runtime(
+        policy_mutator=lambda policy: policy.confirm.append("browser_tabs")
+    )
+    requests = []
+
+    pending = runner.run(
+        {"name": "browser_tabs", "input": {"action": "list"}},
+        confirm=lambda request: requests.append(request) or False,
+    )
+
+    assert pending.decision.allow and pending.decision.needs_confirm
+    assert not pending.executed
+    assert calls == []
+    assert len(requests) == 1
+    assert requests[0].risk == "read_only"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["selector", "case_value", "case_risk", "active_args", "case_order"],
+)
+def test_runner_detects_every_live_selector_registration_mutation(mutation):
+    calls, registry, runner = _browser_tabs_runtime()
+    tool = registry.tools["browser_tabs"]
+    assert tool.selector_cases is not None
+    close_case = tool.selector_cases[2]
+
+    if mutation == "selector":
+        tool.selector = "index"
+    elif mutation == "case_value":
+        close_case.value = "list"
+    elif mutation == "case_risk":
+        close_case.risk = Risk.READ_ONLY
+    elif mutation == "active_args":
+        close_case.active_args.append("url")
+    else:
+        tool.selector_cases.reverse()
+
+    result = runner.run(
+        {"name": "browser_tabs", "input": {"action": "list"}},
+    )
+
+    assert not result.invoked
+    assert not result.executed
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+def test_selector_registration_mutation_invalidates_a_stale_policy():
+    _, registry, _ = _browser_tabs_runtime()
+    stale = build_policy(registry)
+    tool = registry.tools["browser_tabs"]
+    assert tool.selector_cases is not None
+    tool.selector_cases[2].risk = Risk.READ_ONLY
+
+    with pytest.raises(ValueError, match="different registry registration"):
+        GuardedToolRunner(registry, stale)
+
+
+def test_runner_revalidates_selector_branch_metadata_after_confirmation():
+    calls, registry, runner = _browser_tabs_runtime()
+
+    def weaken_branch_then_confirm(request):
+        tool = registry.tools["browser_tabs"]
+        assert tool.selector_cases is not None
+        tool.selector_cases[2].risk = Risk.READ_ONLY
+        return True
+
+    result = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+        confirm=weaken_branch_then_confirm,
+    )
+
+    assert not result.executed
+    assert not result.invoked
+    assert "registry changed" in result.decision.reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("substitution", ["branch", "arguments"])
+def test_confirmation_cannot_substitute_a_different_branch_or_arguments(
+    substitution,
+):
+    calls, _, runner = _browser_tabs_runtime()
+    proposed = {
+        "name": "browser_tabs",
+        "input": {"action": "close", "index": 0},
+    }
+
+    def substitute_then_confirm(request):
+        if substitution == "branch":
+            proposed["input"] = {"action": "list"}
+        else:
+            proposed["input"]["index"] = 9
+        return True
+
+    result = runner.run(proposed, confirm=substitute_then_confirm)
+
+    assert result.executed
+    assert calls == [("close", 0, None)]
 
 
 def test_runner_revalidates_registry_state_after_confirmation():

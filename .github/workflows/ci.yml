@@ -34,6 +34,27 @@ jobs:
       - name: Run complete test suite
         run: python -m pytest -v
 
+  pydantic-integration:
+    name: Pydantic AI 2.35 adapter
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the optional Pydantic AI integration
+        run: python -m pip install "setuptools>=77" ".[dev,pydantic]"
+
+      - name: Run the Pydantic AI integration contract
+        run: python -m pytest -v test_pydantic_ai_integration.py
+
   package:
     name: Build and smoke-test distribution
     runs-on: ubuntu-latest
@@ -206,6 +227,8 @@ jobs:
           test -n "$sdist_root"
           test -f "$sdist_root/LANDSCAPE.md"
           test -f "$sdist_root/docs/assets/social-preview.png"
+          test -f "$sdist_root/pydantic_ai_demo.py"
+          test -f "$sdist_root/scripts/installed_pydantic_smoke.py"
           test -f "$sdist_root/scripts/installed_wheel_smoke.py"
           test -f "$sdist_root/scripts/verify_release_artifacts.py"
           printf 'SDIST_ROOT=%s\n' "$sdist_root" >> "$GITHUB_ENV"
@@ -274,6 +297,24 @@ jobs:
           env -u PYTHONPATH -u PYTHONHOME \
             python -I -m pip check
           test ! -e installed-smoke-shadow.marker
+
+      - name: Install and smoke-test the optional Pydantic AI adapter
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          env -u PYTHONPATH -u PYTHONHOME \
+            python -I -m pip install --force-reinstall "${wheels[0]}[pydantic]"
+          cp "$SDIST_ROOT/scripts/installed_pydantic_smoke.py" \
+            "${{ runner.temp }}/installed_pydantic_smoke.py"
+          expected_version=$(env -u PYTHONPATH -u PYTHONHOME python -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$SDIST_ROOT/pyproject.toml")
+          cd "${{ runner.temp }}"
+          env -u PYTHONPATH -u PYTHONHOME \
+            python -I installed_pydantic_smoke.py \
+            --expected-version "$expected_version" \
+            --forbid-root "${{ github.workspace }}" \
+            --forbid-root "$SDIST_ROOT"
+          env -u PYTHONPATH -u PYTHONHOME python -I -m pip check
 
       - name: Smoke-test local composite action
         uses: ./

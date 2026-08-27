@@ -4,7 +4,7 @@ import types
 import pytest
 import verb_authority as authority
 from verb_authority import (
-    Policy, Confidence, Risk, Param, Tool, Registry,
+    Policy, Confidence, Risk, Param, SelectorCase, Tool, Registry,
     infer_policy, infer_risk, verb_risk, build_policy, gate, dispatch,
     GuardedToolRunner, ProvenanceLedger, demo,
 )
@@ -18,9 +18,631 @@ def test_email_type_infers_trusted_fixed():
 def test_uri_type_infers_trusted_fixed():
     assert infer_policy(Param("endpoint", "uri"))[0] is Policy.TRUSTED_FIXED
 
-def test_number_type_infers_typed_bounded():
+def test_undeclared_number_type_does_not_establish_data_authorship():
     pol, conf = infer_policy(Param("amount", "number"))
-    assert pol is Policy.TYPED_BOUNDED and conf is Confidence.HIGH
+    assert pol is Policy.TRUSTED_FIXED and conf is Confidence.UNCERTAIN
+
+
+@pytest.mark.parametrize(
+    "param",
+    [
+        Param("action", "enum", enum=["list", "new", "close", "select"]),
+        Param("index", "number"),
+    ],
+)
+def test_undeclared_operation_primitives_stay_locked_for_review(param):
+    policy, confidence = infer_policy(param)
+
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
+
+
+@pytest.mark.parametrize(
+    "declared_risk",
+    [None, Risk.WRITE],
+    ids=["unknown-risk", "write"],
+)
+def test_non_read_only_tool_reviews_action_enum_and_unbounded_index(
+    declared_risk,
+):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                ),
+                Param("index", "number"),
+            ],
+            risk=declared_risk,
+        )
+    )
+
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["browser_tabs"] == {
+        "action": Policy.TRUSTED_FIXED,
+        "index": Policy.TRUSTED_FIXED,
+    }
+    assert ("browser_tabs", "action") in policy_set.review
+    assert ("browser_tabs", "index") in policy_set.review
+
+
+def _browser_tabs_registry(*, action_sink=None):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                    sink=action_sink,
+                ),
+                Param("index", "number"),
+                Param("url", "string"),
+            ],
+            risk=Risk.WRITE,
+        )
+    )
+    return registry
+
+
+def test_browser_tabs_dispatch_blocks_data_authored_action():
+    registry = _browser_tabs_registry()
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {
+            "name": "browser_tabs",
+            "input": {
+                "action": "close",
+                "index": 0,
+                "url": "https://example.test",
+            },
+        },
+    )
+
+    assert not decision.allow
+    assert "param 'action' is a locked sink" in decision.reason
+
+
+def test_browser_tabs_dispatch_blocks_data_index_after_trusted_action():
+    registry = _browser_tabs_registry()
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {
+            "name": "browser_tabs",
+            "input": {
+                "action": "close",
+                "index": 0,
+                "url": "https://example.test",
+            },
+        },
+        trusted_args={
+            "action": "close",
+            "url": "https://example.test",
+        },
+    )
+
+    assert not decision.allow
+    assert "param 'index' is a locked sink" in decision.reason
+
+
+def _branched_browser_tabs_registry(*, fn=None):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                    sink=False,
+                ),
+                Param("index", "integer", sink=False),
+                Param("url", "uri"),
+            ],
+            fn=fn,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("new", Risk.WRITE, ["action", "url"]),
+                SelectorCase(
+                    "close",
+                    Risk.DESTRUCTIVE,
+                    ["action", "index"],
+                ),
+                SelectorCase("select", Risk.WRITE, ["action", "index"]),
+            ],
+        )
+    )
+    return registry
+
+
+def test_exact_selector_cases_resolve_runtime_risk_and_confirmation():
+    registry = _branched_browser_tabs_registry()
+    policy_set = build_policy(registry)
+
+    listed = dispatch(
+        registry,
+        policy_set,
+        {"name": "browser_tabs", "input": {"action": "list"}},
+    )
+    closed = dispatch(
+        registry,
+        policy_set,
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+    )
+    opened = dispatch(
+        registry,
+        policy_set,
+        {
+            "name": "browser_tabs",
+            "input": {
+                "action": "new",
+                "url": "https://example.test",
+            },
+        },
+        trusted_args={"url": "https://example.test"},
+    )
+    selected = dispatch(
+        registry,
+        policy_set,
+        {
+            "name": "browser_tabs",
+            "input": {"action": "select", "index": 1},
+        },
+    )
+
+    assert listed.allow and not listed.needs_confirm
+    assert closed.allow and closed.needs_confirm
+    assert "destructive" in closed.reason
+    assert opened.allow and not opened.needs_confirm
+    assert selected.allow and not selected.needs_confirm
+
+
+def test_exact_case_risk_does_not_fall_back_to_an_undeclared_tool_tier():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose_mode",
+            [Param("mode", "enum", enum=["list", "close"], sink=False)],
+            selector="mode",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["mode"]),
+                SelectorCase("close", Risk.DESTRUCTIVE, ["mode"]),
+            ],
+        )
+    )
+    policy_set = build_policy(registry)
+
+    listed = dispatch(
+        registry,
+        policy_set,
+        {"name": "choose_mode", "input": {"mode": "list"}},
+    )
+    closed = dispatch(
+        registry,
+        policy_set,
+        {"name": "choose_mode", "input": {"mode": "close"}},
+    )
+
+    assert policy_set.risk["choose_mode"] is Risk.UNKNOWN
+    assert listed.allow and not listed.needs_confirm
+    assert closed.allow and closed.needs_confirm
+
+
+def test_selector_cases_do_not_implicitly_release_data_authorship():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose_mode",
+            [Param("mode", "enum", enum=["list"])],
+            risk=Risk.WRITE,
+            selector="mode",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["mode"]),
+            ],
+        )
+    )
+
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "choose_mode", "input": {"mode": "list"}},
+    )
+
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("list_risk", "select_risk"),
+    [
+        (Risk.READ_ONLY, Risk.WRITE),
+        (Risk.READ_ONLY, Risk.READ_ONLY),
+    ],
+    ids=["mixed-risk-cases", "all-read-only-cases"],
+)
+def test_selector_case_risks_never_release_ambiguous_argument_authorship(
+    list_risk,
+    select_risk,
+):
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose_mode",
+            [
+                Param("mode", "enum", enum=["list", "select"]),
+                Param("index", "integer"),
+            ],
+            risk=Risk.READ_ONLY,
+            selector="mode",
+            selector_cases=[
+                SelectorCase("list", list_risk, ["mode"]),
+                SelectorCase("select", select_risk, ["mode", "index"]),
+            ],
+        )
+    )
+
+    policy_set = build_policy(registry)
+    listed = dispatch(
+        registry,
+        policy_set,
+        {"name": "choose_mode", "input": {"mode": "list"}},
+    )
+    selected = dispatch(
+        registry,
+        policy_set,
+        {
+            "name": "choose_mode",
+            "input": {"mode": "select", "index": 0},
+        },
+        trusted_args={"mode": "select"},
+    )
+
+    assert policy_set.policy["choose_mode"] == {
+        "mode": Policy.TRUSTED_FIXED,
+        "index": Policy.TRUSTED_FIXED,
+    }
+    assert ("choose_mode", "mode") in policy_set.review
+    assert ("choose_mode", "index") in policy_set.review
+    assert not listed.allow
+    assert "param 'mode' is a locked sink" in listed.reason
+    assert not selected.allow
+    assert "param 'index' is a locked sink" in selected.reason
+
+
+def test_explicit_non_sink_releases_branch_arguments_independently_of_case_risk():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose_mode",
+            [
+                Param(
+                    "mode",
+                    "enum",
+                    enum=["list", "select"],
+                    sink=False,
+                ),
+                Param("index", "integer", sink=False),
+            ],
+            risk=Risk.READ_ONLY,
+            selector="mode",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["mode"]),
+                SelectorCase("select", Risk.WRITE, ["mode", "index"]),
+            ],
+        )
+    )
+
+    policy_set = build_policy(registry)
+    selected = dispatch(
+        registry,
+        policy_set,
+        {
+            "name": "choose_mode",
+            "input": {"mode": "select", "index": 0},
+        },
+    )
+
+    assert policy_set.policy["choose_mode"] == {
+        "mode": Policy.TYPED_BOUNDED,
+        "index": Policy.TYPED_BOUNDED,
+    }
+    assert selected.allow
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "reason"),
+    [
+        ({}, "selector param 'action' is missing"),
+        ({"action": "unknown"}, "has no exact case"),
+        ({"action": ["list"]}, "is not a JSON scalar"),
+        ({"action": "close"}, "active param 'index' is missing"),
+        (
+            {"action": "list", "index": 0},
+            "param 'index' is inactive for this selector case",
+        ),
+        (
+            {"action": "new", "url": "https://example.test", "index": 0},
+            "param 'index' is inactive for this selector case",
+        ),
+    ],
+)
+def test_exact_selector_cases_fail_closed_on_unmapped_or_wrong_shape(
+    tool_input,
+    reason,
+):
+    registry = _branched_browser_tabs_registry()
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "browser_tabs", "input": tool_input},
+        trusted_args={"url": tool_input.get("url")},
+    )
+
+    assert not decision.allow
+    assert reason in decision.reason
+
+
+def test_selector_values_are_type_exact_in_registration_and_resolution():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "choose_mode",
+            [Param("mode", "enum", enum=[True, 1], sink=False)],
+            risk=Risk.WRITE,
+            selector="mode",
+            selector_cases=[
+                SelectorCase(True, Risk.READ_ONLY, ["mode"]),
+                SelectorCase(1, Risk.DESTRUCTIVE, ["mode"]),
+            ],
+        )
+    )
+    policy_set = build_policy(registry)
+
+    boolean = dispatch(
+        registry,
+        policy_set,
+        {"name": "choose_mode", "input": {"mode": True}},
+    )
+    integer = dispatch(
+        registry,
+        policy_set,
+        {"name": "choose_mode", "input": {"mode": 1}},
+    )
+
+    assert boolean.allow and not boolean.needs_confirm
+    assert integer.allow and integer.needs_confirm
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        Tool(
+            "bad",
+            [Param("action", "string", sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[SelectorCase("list", Risk.READ_ONLY, ["action"])],
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list", "close"], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[SelectorCase("list", Risk.READ_ONLY, ["action"])],
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list"], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("list", Risk.WRITE, ["action"]),
+            ],
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list"], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[SelectorCase("list", Risk.READ_ONLY, ["ghost"])],
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list"], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[SelectorCase("list", Risk.UNKNOWN, ["action"])],
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=[["list"]], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[SelectorCase(["list"], Risk.READ_ONLY, ["action"])],
+        ),
+    ],
+)
+def test_malformed_selector_registration_is_rejected(tool):
+    registry = Registry()
+    registry.add(tool)
+
+    with pytest.raises((TypeError, ValueError)):
+        authority._freeze_registry(registry, validate_callable=False)
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list"], sink=False)],
+            risk=Risk.WRITE,
+            selector="action",
+        ),
+        Tool(
+            "bad",
+            [Param("action", "enum", enum=["list"], sink=False)],
+            risk=Risk.WRITE,
+            selector_cases=[SelectorCase("list", Risk.READ_ONLY, ["action"])],
+        ),
+    ],
+)
+def test_selector_and_cases_must_be_declared_together(tool):
+    registry = Registry()
+    registry.add(tool)
+
+    with pytest.raises(ValueError, match="declared together"):
+        authority._freeze_registry(registry, validate_callable=False)
+
+
+def test_numeric_cap_alone_does_not_establish_data_authorship():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "set_threshold",
+            [Param("limit", "number", cap=10)],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["set_threshold"]["limit"] is Policy.TRUSTED_FIXED
+    assert ("set_threshold", "limit") in policy_set.review
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "set_threshold", "input": {"limit": 5}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_undeclared_boolean_does_not_establish_data_authorship():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "toggle_feature",
+            [Param("enabled", "boolean")],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["toggle_feature"]["enabled"] is Policy.TRUSTED_FIXED
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "toggle_feature", "input": {"enabled": True}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_string_max_length_alone_does_not_establish_data_authorship():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [Param("action", "string", max_len=201)],
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["browser_tabs"]["action"] is Policy.TRUSTED_FIXED
+    assert ("browser_tabs", "action") in policy_set.review
+    decision = dispatch(
+        registry,
+        policy_set,
+        {"name": "browser_tabs", "input": {"action": "close"}},
+    )
+    assert not decision.allow
+    assert "locked sink" in decision.reason
+
+
+def test_explicit_non_sink_releases_action_for_data_authorship():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                    sink=False,
+                )
+            ],
+            risk=Risk.WRITE,
+        )
+    )
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "browser_tabs", "input": {"action": "close"}},
+    )
+
+    assert decision.allow
+    assert not decision.needs_confirm
+
+
+def test_all_trusted_browser_tabs_write_allows_without_confirmation():
+    registry = _browser_tabs_registry()
+    arguments = {
+        "action": "close",
+        "index": 0,
+        "url": "https://example.test",
+    }
+    decision = dispatch(
+        registry,
+        build_policy(registry),
+        {"name": "browser_tabs", "input": arguments},
+        trusted_args=dict(arguments),
+    )
+
+    assert decision.allow
+    assert not decision.needs_confirm
+
+
+def test_explicit_non_sink_keeps_benign_enum_high_confidence_authorable():
+    policy, confidence = infer_policy(
+        Param("format", "enum", enum=["json", "text"], sink=False)
+    )
+
+    assert policy is Policy.TYPED_BOUNDED
+    assert confidence is Confidence.HIGH
+
+
+def test_declared_read_only_tool_auto_relaxes_undeclared_primitive():
+    registry = Registry()
+    registry.add(
+        Tool(
+            "list_tabs",
+            [Param("action", "enum", enum=["list"])],
+            risk=Risk.READ_ONLY,
+        )
+    )
+
+    policy_set = build_policy(registry)
+
+    assert policy_set.policy["list_tabs"]["action"] is Policy.TYPED_BOUNDED
+    assert ("list_tabs", "action") not in policy_set.review
 
 def test_strong_sink_name_infers_trusted_fixed():
     assert infer_policy(Param("recipient_account", "string"))[0] is Policy.TRUSTED_FIXED
@@ -192,11 +814,11 @@ def test_authority_selector_tokenization_locks_common_identifier_styles(name):
     "name",
     ["keyboard", "keynote", "guidance", "uuidification", "identity"],
 )
-def test_selector_tokenization_does_not_match_non_suffix_substrings(name):
+def test_selector_substrings_do_not_create_high_confidence_authority_evidence(name):
     policy, confidence = infer_policy(Param(name, "integer"))
 
-    assert policy is Policy.TYPED_BOUNDED
-    assert confidence is Confidence.HIGH
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
 
 
 @pytest.mark.parametrize("name", ["valid", "grid", "monkey", "liquid", "hockey"])
@@ -313,11 +935,11 @@ def test_plural_authority_sink_tokens_lock_conservatively(name):
         "secretive",
     ],
 )
-def test_authority_sink_tokenization_does_not_match_substrings(name):
+def test_authority_sink_substrings_do_not_create_high_confidence_evidence(name):
     policy, confidence = infer_policy(Param(name, "integer"))
 
-    assert policy is Policy.TYPED_BOUNDED
-    assert confidence is Confidence.HIGH
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
 
 
 @pytest.mark.parametrize(
@@ -415,16 +1037,11 @@ def test_flatcase_compound_sink_suffix_wins_before_authorable_rules(param):
         Param("tokenizercandidate", "integer"),
     ],
 )
-def test_compact_sink_analysis_does_not_lock_ordinary_suffix_words(param):
+def test_compact_sink_analysis_does_not_elevate_ordinary_suffix_words(param):
     policy, confidence = infer_policy(param)
 
-    expected = (
-        Policy.OUTBOUND_PAYLOAD
-        if param.type == "string" and (param.max_len or 0) > 200
-        else Policy.TYPED_BOUNDED
-    )
-    assert policy is expected
-    assert confidence is Confidence.HIGH
+    assert policy is Policy.TRUSTED_FIXED
+    assert confidence is Confidence.UNCERTAIN
 
 
 @pytest.mark.parametrize("name", ["body", "message", "content", "summary"])
@@ -1387,7 +2004,13 @@ def test_typed_bounded_rejects_python_cross_type_and_non_finite_values(
     param_type, value, expected_reason
 ):
     reg = Registry()
-    reg.add(Tool("set_value", [Param("value", param_type)], risk=Risk.WRITE))
+    reg.add(
+        Tool(
+            "set_value",
+            [Param("value", param_type, sink=False)],
+            risk=Risk.WRITE,
+        )
+    )
     ps = build_policy(reg)
 
     d = dispatch(reg, ps, {"name": "set_value", "input": {"value": value}})
@@ -1407,7 +2030,13 @@ def test_typed_bounded_rejects_python_cross_type_and_non_finite_values(
 )
 def test_typed_bounded_accepts_exact_runtime_types(param_type, value):
     reg = Registry()
-    reg.add(Tool("set_value", [Param("value", param_type)], risk=Risk.WRITE))
+    reg.add(
+        Tool(
+            "set_value",
+            [Param("value", param_type, sink=False)],
+            risk=Risk.WRITE,
+        )
+    )
     ps = build_policy(reg)
 
     d = dispatch(reg, ps, {"name": "set_value", "input": {"value": value}})
@@ -1420,7 +2049,7 @@ def test_enum_matching_is_type_strict():
     reg.add(
         Tool(
             "set_value",
-            [Param("value", "enum", enum=[1])],
+            [Param("value", "enum", enum=[1], sink=False)],
             risk=Risk.WRITE,
         )
     )

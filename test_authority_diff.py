@@ -101,6 +101,37 @@ def _constraint_report(maximum, max_length, enum):
     return scan_documents([_constraint_document(maximum, max_length, enum)])
 
 
+def _annotation_report(annotations, *, name="operate", tier=None):
+    document = {
+        "tools": [
+            {
+                "name": name,
+                "annotations": annotations,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = None
+    if tier is not None:
+        controls = {
+            "version": 1,
+            "tools": {
+                name: {
+                    "risk": {
+                        "tier": tier,
+                        "evidence": "observed",
+                        "effects": [f"observed_{tier}_effect"],
+                    }
+                }
+            },
+        }
+    return scan_documents([document], control_declarations=controls)
+
+
 def _single_argument_report(property_schema):
     return scan_documents(
         [
@@ -146,6 +177,84 @@ def _declared_risk_report(tier, *, name="florp"):
         },
     }
     return scan_documents([schema], control_declarations=controls)
+
+
+def _branch_risk_report(*, all_read_only=False):
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "new", "close", "select"],
+                        },
+                        "index": {"type": "number"},
+                        "url": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": "list",
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_tabs"],
+                            },
+                            "arguments": ["action"],
+                        },
+                        {
+                            "value": "new",
+                            "risk": {
+                                "tier": "write",
+                                "evidence": "observed",
+                                "effects": ["opens_tab"],
+                            },
+                            "arguments": ["action", "url"],
+                        },
+                        {
+                            "value": "close",
+                            "risk": {
+                                "tier": "destructive",
+                                "evidence": "observed",
+                                "effects": ["destroys_tab"],
+                            },
+                            "arguments": ["action", "index"],
+                        },
+                        {
+                            "value": "select",
+                            "risk": {
+                                "tier": "write",
+                                "evidence": "observed",
+                                "effects": ["selects_tab"],
+                            },
+                            "arguments": ["action", "index"],
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    if all_read_only:
+        for case in controls["tools"]["browser_tabs"]["branches"]["cases"]:
+            case["risk"]["tier"] = "read_only"
+    return scan_documents([document], control_declarations=controls)
 
 
 def test_identical_reports_have_no_authority_changes():
@@ -406,7 +515,7 @@ def test_removing_schema_constraints_is_an_authority_increase():
     )
 
     assert diff["summary"]["authority_increases"] == 3
-    assert diff["summary"]["reviews"] == 2
+    assert diff["summary"]["reviews"] == 1
     assert any(
         change["kind"] == "type_changed"
         and change["classification"] == "review"
@@ -436,7 +545,15 @@ def test_legacy_v2_reports_require_rescanning_instead_of_lossy_migration():
         diff_reports(legacy, copy.deepcopy(legacy))
 
 
-def test_malformed_v3_constraint_metadata_is_rejected():
+def test_legacy_v3_reports_require_rescanning_without_fallback():
+    legacy = _constraint_report(100, 40, ["safe"])
+    legacy["report_version"] = 3
+
+    with pytest.raises(DiffError, match="legacy report version 3.*rescan"):
+        diff_reports(legacy, copy.deepcopy(legacy))
+
+
+def test_malformed_v4_constraint_metadata_is_rejected():
     report = _constraint_report(100, 40, ["safe"])
     mode = next(
         argument
@@ -446,6 +563,899 @@ def test_malformed_v3_constraint_metadata_is_rejected():
     mode["constraints"]["enum"]["count"] = 2
 
     with pytest.raises(DiffError, match="enum constraint is invalid"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v4_annotation_assessments_are_accepted_when_scanner_coherent():
+    report = _annotation_report(
+        {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+    )
+
+    diff = diff_reports(report, copy.deepcopy(report))
+
+    assert report["report_version"] == 4
+    assert diff["changes"] == []
+
+
+def test_annotation_evidence_change_is_a_semantic_review_even_without_conflict():
+    before = _annotation_report({"readOnlyHint": False})
+    after = _annotation_report({"readOnlyHint": True})
+
+    diff = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] == after[
+        "schema_fingerprint_sha256"
+    ]
+    assert before["tools"][0]["annotation_conflicts"] == []
+    assert after["tools"][0]["annotation_conflicts"] == []
+    assert diff["summary"] == {
+        "changes": 1,
+        "changed_tools": 1,
+        "authority_increases": 0,
+        "reviews": 1,
+        "protection_increases": 0,
+    }
+    assert diff["changes"][0]["kind"] == "annotation_assessments_changed"
+    assert diff["changes"][0]["field"] == "annotation_assessments"
+
+
+@pytest.mark.parametrize(
+    "invalid_assessments",
+    (None, {}, "readOnlyHint", True),
+)
+def test_annotation_assessments_must_be_an_array(invalid_assessments):
+    report = _annotation_report({"readOnlyHint": False})
+    report["tools"][0]["annotation_assessments"] = invalid_assessments
+
+    with pytest.raises(DiffError, match="annotation assessments must be an array"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_each_annotation_assessment_must_be_an_object():
+    report = _annotation_report({"readOnlyHint": False})
+    report["tools"][0]["annotation_assessments"][0] = "unresolved"
+
+    with pytest.raises(
+        DiffError, match=r"annotation assessment\[1\] must be an object"
+    ):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "annotation",
+        "value",
+        "state",
+        "evidence_source",
+        "trust",
+        "comparison_source",
+        "comparison_value",
+    ),
+)
+def test_annotation_assessment_requires_every_v4_field(field):
+    report = _annotation_report({"readOnlyHint": False})
+    report["tools"][0]["annotation_assessments"][0].pop(field)
+
+    with pytest.raises(DiffError, match=rf"missing required fields:.*{field}"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_annotation_assessment_rejects_unknown_fields():
+    report = _annotation_report({"readOnlyHint": False})
+    report["tools"][0]["annotation_assessments"][0]["future"] = "trusted"
+
+    with pytest.raises(DiffError, match="unsupported fields: future"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value", "message"),
+    (
+        ("annotation", "futureHint", "annotation is unsupported"),
+        ("annotation", 1, "annotation must be non-empty text"),
+        ("value", 1, "value must be a boolean"),
+        ("state", "trusted", "state is unsupported"),
+        ("state", 1, "state must be non-empty text"),
+        ("evidence_source", "control_declaration", "evidence_source is unsupported"),
+        ("evidence_source", 1, "evidence_source is unsupported"),
+        ("trust", "verified", "trust is unsupported"),
+        ("trust", 1, "trust is unsupported"),
+        ("comparison_source", "declared_risk", "comparison_source is unsupported"),
+        ("comparison_source", 1, "comparison_source must be non-empty text"),
+        ("comparison_value", [], "is inconsistent"),
+    ),
+)
+def test_annotation_assessment_vocabulary_and_types_are_closed(
+    field, invalid_value, message
+):
+    report = _annotation_report({"readOnlyHint": False})
+    report["tools"][0]["annotation_assessments"][0][field] = invalid_value
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_annotation_assessments_are_unique_and_canonically_ordered():
+    duplicate = _annotation_report(
+        {"readOnlyHint": False, "destructiveHint": True}
+    )
+    duplicate["tools"][0]["annotation_assessments"].append(
+        copy.deepcopy(duplicate["tools"][0]["annotation_assessments"][0])
+    )
+    reordered = _annotation_report(
+        {"readOnlyHint": False, "destructiveHint": True}
+    )
+    reordered["tools"][0]["annotation_assessments"].reverse()
+
+    with pytest.raises(DiffError, match="duplicate annotation assessment"):
+        diff_reports(duplicate, copy.deepcopy(duplicate))
+    with pytest.raises(DiffError, match="not in canonical order"):
+        diff_reports(reordered, copy.deepcopy(reordered))
+
+
+@pytest.mark.parametrize(
+    ("annotations", "field", "forged_value"),
+    (
+        ({"readOnlyHint": False}, "state", "conflict"),
+        ({"readOnlyHint": False}, "comparison_source", "none"),
+        ({"readOnlyHint": False}, "comparison_value", None),
+        (
+            {"readOnlyHint": True, "destructiveHint": True},
+            "state",
+            "unresolved",
+        ),
+    ),
+)
+def test_annotation_assessment_semantic_forgery_is_rejected(
+    annotations, field, forged_value
+):
+    report = _annotation_report(annotations)
+    report["tools"][0]["annotation_assessments"][-1][field] = forged_value
+
+    with pytest.raises(DiffError, match="annotation assessment.*is inconsistent"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_annotation_conflict_summary_must_match_structured_assessments():
+    report = _annotation_report(
+        {"readOnlyHint": False}, name="read_record", tier="read_only"
+    )
+    assert report["tools"][0]["annotation_assessments"][0]["state"] == "conflict"
+    report["tools"][0]["annotation_conflicts"] = []
+    _refresh_report_summary(report)
+
+    with pytest.raises(DiffError, match="conflicts do not match its assessments"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_branch_report_is_accepted_and_branch_changes_are_surfaced():
+    before = _branch_risk_report()
+    after = copy.deepcopy(before)
+    case = next(
+        case
+        for case in after["tools"][0]["branch_risk"]["cases"]
+        if case["risk"] == "write"
+    )
+    case["effects"] = ["changed_write_effect"]
+    after["declared_controls"]["tools"][0]["branches"] = copy.deepcopy(
+        after["tools"][0]["branch_risk"]
+    )
+    _refresh_control_fingerprint(after)
+
+    diff = diff_reports(before, after)
+
+    change = next(
+        change for change in diff["changes"] if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "review"
+    assert change["field"] == "branch_risk"
+
+
+def _set_branch_active_arguments(report, risk, arguments):
+    case = next(
+        case
+        for case in report["tools"][0]["branch_risk"]["cases"]
+        if case["risk"] == risk
+    )
+    case["active_arguments"] = arguments
+    report["declared_controls"]["tools"][0]["branches"] = copy.deepcopy(
+        report["tools"][0]["branch_risk"]
+    )
+    _refresh_control_fingerprint(report)
+
+
+def test_expanding_branch_active_arguments_is_an_authority_increase():
+    before = _branch_risk_report()
+    after = copy.deepcopy(before)
+    _set_branch_active_arguments(after, "read_only", ["action", "index"])
+
+    result = diff_reports(before, after)
+
+    change = next(
+        change
+        for change in result["changes"]
+        if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "authority_increase"
+    assert result["summary"]["authority_increases"] == 1
+
+
+def test_reducing_branch_active_arguments_is_a_protection_increase():
+    after = _branch_risk_report()
+    before = copy.deepcopy(after)
+    _set_branch_active_arguments(before, "read_only", ["action", "index"])
+
+    result = diff_reports(before, after)
+
+    change = next(
+        change
+        for change in result["changes"]
+        if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "protection_increase"
+    assert result["summary"]["protection_increases"] == 1
+
+
+def test_mixed_branch_active_argument_changes_cannot_mask_an_increase():
+    before = _branch_risk_report()
+    after = copy.deepcopy(before)
+    _set_branch_active_arguments(after, "read_only", ["action", "index"])
+    _set_branch_active_arguments(after, "destructive", ["action"])
+
+    result = diff_reports(before, after)
+
+    change = next(
+        change
+        for change in result["changes"]
+        if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "authority_increase"
+    assert result["summary"]["authority_increases"] == 1
+
+
+def test_branch_risk_edit_cannot_mask_active_argument_expansion():
+    before = _branch_risk_report()
+    after = copy.deepcopy(before)
+    _set_branch_active_arguments(after, "read_only", ["action", "index"])
+    case = next(
+        case
+        for case in after["tools"][0]["branch_risk"]["cases"]
+        if case["risk"] == "read_only"
+    )
+    case["effects"] = ["changed_read_effect"]
+    after["declared_controls"]["tools"][0]["branches"] = copy.deepcopy(
+        after["tools"][0]["branch_risk"]
+    )
+    _refresh_control_fingerprint(after)
+
+    result = diff_reports(before, after)
+
+    change = next(
+        change
+        for change in result["changes"]
+        if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "authority_increase"
+    assert result["summary"]["authority_increases"] == 1
+
+
+def test_set_incomparable_branch_replacement_is_an_authority_increase():
+    before = _branch_risk_report()
+    _set_branch_active_arguments(before, "read_only", ["action", "index"])
+    after = copy.deepcopy(before)
+    _set_branch_active_arguments(after, "read_only", ["action", "url"])
+    case = next(
+        case
+        for case in after["tools"][0]["branch_risk"]["cases"]
+        if case["risk"] == "read_only"
+    )
+    case["evidence"] = "declared"
+    after["declared_controls"]["tools"][0]["branches"] = copy.deepcopy(
+        after["tools"][0]["branch_risk"]
+    )
+    _refresh_control_fingerprint(after)
+
+    result = diff_reports(before, after)
+
+    change = next(
+        change
+        for change in result["changes"]
+        if change["kind"] == "branch_risk_changed"
+    )
+    assert change["classification"] == "authority_increase"
+    assert result["summary"]["authority_increases"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda report: report["tools"][0]["branch_risk"]["cases"][0].update(
+                {"value": "close"}
+            ),
+            "unsupported fields",
+        ),
+        (
+            lambda report: report["tools"][0]["branch_risk"]["cases"][0].update(
+                {"needs_confirmation": True}
+            ),
+            "needs_confirmation is inconsistent",
+        ),
+        (
+            lambda report: report["tools"][0].update({"risk": "write"}),
+            "branch-derived risk",
+        ),
+        (
+            lambda report: report["tools"][0]["branch_risk"]["cases"][0].update(
+                {"active_arguments": ["action", "missing"]}
+            ),
+            "active_arguments is inconsistent",
+        ),
+        (
+            lambda report: report["tools"][0]["branch_risk"]["cases"].append(
+                copy.deepcopy(
+                    report["tools"][0]["branch_risk"]["cases"][0]
+                )
+            ),
+            "duplicate branch fingerprints",
+        ),
+        (
+            lambda report: report["tools"][0]["branch_risk"]["cases"].reverse(),
+            "not in canonical order",
+        ),
+    ],
+)
+def test_branch_report_forgery_is_rejected(mutate, message):
+    report = _branch_risk_report()
+    mutate(report)
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_branch_case_fingerprints_must_exhaust_selector_enum():
+    report = _branch_risk_report()
+    cases = report["tools"][0]["branch_risk"]["cases"]
+    replacement = "f" * 64
+    assert replacement not in {
+        case["value_fingerprint_sha256"] for case in cases
+    }
+    cases[0]["value_fingerprint_sha256"] = replacement
+    cases.sort(key=lambda case: case["value_fingerprint_sha256"])
+    report["declared_controls"]["tools"][0]["branches"] = copy.deepcopy(
+        report["tools"][0]["branch_risk"]
+    )
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="do not exhaust the selector enum"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source", "branch_declaration", "invalid risk inference source"),
+        ("confidence", "heuristic", "inconsistent risk inference"),
+        ("mutability", "trusted_party", "invalid risk inference mutability"),
+        ("matched_tokens", ["delete"], "inconsistent risk inference"),
+    ],
+)
+def test_branch_report_rejects_forged_risk_inference(field, value, message):
+    report = _branch_risk_report()
+    report["tools"][0]["risk_inference"][field] = value
+
+    with pytest.raises(DiffError, match=message):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_raw_signed_zero_selector_change_is_detected(tmp_path):
+    def schema(value):
+        return {
+            "tools": [
+                {
+                    "name": "choose_mode",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "number", "enum": [value]}
+                        },
+                    },
+                }
+            ]
+        }
+
+    def controls(value):
+        return {
+            "version": 1,
+            "tools": {
+                "choose_mode": {
+                    "branches": {
+                        "selector": "action",
+                        "cases": [
+                            {
+                                "value": value,
+                                "risk": {
+                                    "tier": "read_only",
+                                    "evidence": "observed",
+                                    "effects": ["reads_state"],
+                                },
+                                "arguments": ["action"],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+    before_schema = tmp_path / "before-schema.json"
+    after_schema = tmp_path / "after-schema.json"
+    before_controls = tmp_path / "before-controls.json"
+    after_controls = tmp_path / "after-controls.json"
+    before_schema.write_text(json.dumps(schema(0.0)), encoding="utf-8")
+    after_schema.write_text(json.dumps(schema(-0.0)), encoding="utf-8")
+    before_controls.write_text(json.dumps(controls(0.0)), encoding="utf-8")
+    after_controls.write_text(json.dumps(controls(-0.0)), encoding="utf-8")
+
+    before = load_report_or_schema(
+        str(before_schema), controls_path=str(before_controls), label="before"
+    )
+    after = load_report_or_schema(
+        str(after_schema), controls_path=str(after_controls), label="after"
+    )
+    result = diff_reports(before, after)
+
+    assert before["schema_fingerprint_sha256"] != after[
+        "schema_fingerprint_sha256"
+    ]
+    assert before["control_declaration_fingerprint_sha256"] != after[
+        "control_declaration_fingerprint_sha256"
+    ]
+    assert {change["kind"] for change in result["changes"]} >= {
+        "enum_changed",
+        "branch_risk_changed",
+    }
+
+
+def test_fail_on_increase_trips_on_branch_active_argument_expansion(tmp_path):
+    schema = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list"]},
+                        "index": {"type": "integer"},
+                    },
+                },
+            }
+        ]
+    }
+
+    def controls(arguments):
+        return {
+            "version": 1,
+            "tools": {
+                "browser_tabs": {
+                    "branches": {
+                        "selector": "action",
+                        "cases": [
+                            {
+                                "value": "list",
+                                "risk": {
+                                    "tier": "read_only",
+                                    "evidence": "observed",
+                                    "effects": ["reads_tabs"],
+                                },
+                                "arguments": arguments,
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+    before_schema = tmp_path / "before.json"
+    after_schema = tmp_path / "after.json"
+    before_controls = tmp_path / "before-controls.json"
+    after_controls = tmp_path / "after-controls.json"
+    before_schema.write_text(json.dumps(schema), encoding="utf-8")
+    after_schema.write_text(json.dumps(schema), encoding="utf-8")
+    before_controls.write_text(
+        json.dumps(controls(["action"])), encoding="utf-8"
+    )
+    after_controls.write_text(
+        json.dumps(controls(["action", "index"])), encoding="utf-8"
+    )
+
+    assert (
+        main(
+            [
+                str(before_schema),
+                str(after_schema),
+                "--before-controls",
+                str(before_controls),
+                "--after-controls",
+                str(after_controls),
+                "--fail-on-increase",
+            ]
+        )
+        == 2
+    )
+
+
+def test_fail_on_increase_trips_on_incomparable_branch_replacement(tmp_path):
+    schema = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list"]},
+                        "index": {"type": "integer"},
+                        "url": {"type": "string"},
+                    },
+                },
+            }
+        ]
+    }
+
+    def controls(arguments, evidence):
+        return {
+            "version": 1,
+            "tools": {
+                "browser_tabs": {
+                    "branches": {
+                        "selector": "action",
+                        "cases": [
+                            {
+                                "value": "list",
+                                "risk": {
+                                    "tier": "read_only",
+                                    "evidence": evidence,
+                                    "effects": ["reads_tabs"],
+                                },
+                                "arguments": arguments,
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+    before_schema = tmp_path / "before.json"
+    after_schema = tmp_path / "after.json"
+    before_controls = tmp_path / "before-controls.json"
+    after_controls = tmp_path / "after-controls.json"
+    before_schema.write_text(json.dumps(schema), encoding="utf-8")
+    after_schema.write_text(json.dumps(schema), encoding="utf-8")
+    before_controls.write_text(
+        json.dumps(controls(["action", "index"], "observed")),
+        encoding="utf-8",
+    )
+    after_controls.write_text(
+        json.dumps(controls(["action", "url"], "declared")),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                str(before_schema),
+                str(after_schema),
+                "--before-controls",
+                str(before_controls),
+                "--after-controls",
+                str(after_controls),
+                "--fail-on-increase",
+            ]
+        )
+        == 2
+    )
+
+
+def test_fail_on_review_includes_unresolved_branch_risk_directly(tmp_path):
+    schema = {
+        "tools": [
+            {
+                "name": "operate_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tabAction": {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        }
+                    },
+                },
+            }
+        ]
+    }
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    before.write_text(json.dumps(schema), encoding="utf-8")
+    after.write_text(json.dumps(schema), encoding="utf-8")
+
+    assert main([str(before), str(after), "--fail-on-review"]) == 2
+
+
+def _assert_unchanged_raw_review_threshold(
+    tmp_path,
+    document,
+    *,
+    expected_summary_field,
+    controls=None,
+):
+    report = scan_documents([document], control_declarations=controls)
+    assert report["summary"][expected_summary_field] > 0
+    assert diff_reports(report, copy.deepcopy(report))["summary"] == {
+        "changes": 0,
+        "changed_tools": 0,
+        "authority_increases": 0,
+        "reviews": 0,
+        "protection_increases": 0,
+    }
+
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    before.write_text(json.dumps(document), encoding="utf-8")
+    after.write_text(json.dumps(document), encoding="utf-8")
+    argv = [str(before), str(after)]
+    if controls is not None:
+        before_controls = tmp_path / "before-controls.json"
+        after_controls = tmp_path / "after-controls.json"
+        before_controls.write_text(json.dumps(controls), encoding="utf-8")
+        after_controls.write_text(json.dumps(controls), encoding="utf-8")
+        argv.extend(
+            [
+                "--before-controls",
+                str(before_controls),
+                "--after-controls",
+                str(after_controls),
+            ]
+        )
+
+    assert main([*argv, "--fail-on-review"]) == 2
+
+
+def test_fail_on_review_trips_on_unchanged_argument_review_debt(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "write_record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "write_record": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["writes_record"],
+                }
+            }
+        },
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="review_required",
+    )
+
+
+def test_fail_on_review_trips_on_unchanged_risk_review_debt(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "mystery",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        expected_summary_field="risk_review_required_tools",
+    )
+
+
+def test_fail_on_review_trips_on_unchanged_risk_conflict(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "delete_record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "delete_record": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "observed",
+                    "effects": ["reads_record"],
+                }
+            }
+        },
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="risk_conflicts",
+    )
+
+
+def test_fail_on_review_trips_on_unchanged_schema_review_debt(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "read_record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "allOf": [
+                        {"properties": {"recipient": {"type": "string"}}}
+                    ],
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "read_record": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "observed",
+                    "effects": ["reads_record"],
+                }
+            }
+        },
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="schema_review_required_tools",
+    )
+
+
+def test_fail_on_review_trips_on_unchanged_annotation_conflict(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "read_record",
+                "annotations": {"readOnlyHint": False},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "read_record": {
+                "risk": {
+                    "tier": "read_only",
+                    "evidence": "observed",
+                    "effects": ["reads_record"],
+                }
+            }
+        },
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="annotation_conflicts",
+    )
+
+
+def test_fail_on_review_trips_on_unchanged_branch_review_debt(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "operate_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tabAction": {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "operate_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes_tabs"],
+                }
+            }
+        },
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="branch_risk_review_required_tools",
+    )
+
+
+def test_branch_declaration_copy_must_match_report_branch():
+    report = _branch_risk_report()
+    report["declared_controls"]["tools"][0]["branches"]["cases"][0][
+        "effects"
+    ] = ["forged_effect"]
+    _refresh_control_fingerprint(report)
+
+    with pytest.raises(DiffError, match="branches conflict with the report tool"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_branch_review_summary_and_state_are_recomputed():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "operate",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["read", "delete"],
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    assert report["tools"][0]["branch_risk_review_required"] is True
+    assert report["summary"]["branch_risk_review_required_tools"] == 1
+
+    report["tools"][0]["branch_risk_review_required"] = False
+    report["summary"]["branch_risk_review_required_tools"] = 0
+    with pytest.raises(DiffError, match="inconsistent branch risk review state"):
         diff_reports(report, copy.deepcopy(report))
 
 
@@ -1022,12 +2032,39 @@ def test_argument_confidence_policy_and_review_must_be_coherent():
         diff_reports(report, copy.deepcopy(report))
 
 
+def test_all_read_only_branch_report_uses_fail_closed_argument_coherence():
+    report = _branch_risk_report(all_read_only=True)
+    tool = report["tools"][0]
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+
+    assert tool["risk"] == "read_only"
+    assert diff_reports(report, copy.deepcopy(report))["summary"]["changes"] == 0
+    assert (
+        arguments["action"]["policy"],
+        arguments["action"]["confidence"],
+        arguments["action"]["review_required"],
+    ) == ("trusted_fixed", "uncertain", True)
+
+    forged = copy.deepcopy(report)
+    forged_action = next(
+        argument
+        for argument in forged["tools"][0]["arguments"]
+        if argument["name"] == "action"
+    )
+    forged_action["policy"] = "typed_bounded"
+    forged_action["review_required"] = False
+    _refresh_report_summary(forged)
+
+    with pytest.raises(DiffError, match="inconsistent policy inference"):
+        diff_reports(report, forged)
+
+
 @pytest.mark.parametrize(
     ("argument_name", "argument_type", "declared_read_only", "expected"),
     (
         ("recipient", "string", False, ("trusted_fixed", "high", False)),
         ("value", "string", False, ("trusted_fixed", "uncertain", True)),
-        ("value", "integer", False, ("typed_bounded", "high", False)),
+        ("value", "integer", False, ("trusted_fixed", "uncertain", True)),
         ("value", "string", True, ("typed_bounded", "uncertain", False)),
         ("message", "string", False, ("outbound_payload", "high", False)),
     ),
@@ -1183,6 +2220,7 @@ def test_risk_inference_vocabulary_is_closed(field, message):
         "risk_conflicts",
         "annotation_conflicts",
         "schema_review_required_tools",
+        "branch_risk_review_required_tools",
     ),
 )
 def test_every_report_summary_counter_is_recomputed(summary_field):
@@ -1317,6 +2355,7 @@ def _strip_report_header_but_keep_report_tool_markers(report):
             "unsupported report version",
         ),
         (lambda report: report.update({"report_version": 2}), "legacy report"),
+        (lambda report: report.update({"report_version": 3}), "legacy report"),
         (_replace_with_invalid_generator_raw_shape, "report-shaped"),
         (_strip_report_header_but_keep_report_tool_markers, "report-shaped"),
     ],
@@ -1324,6 +2363,7 @@ def _strip_report_header_but_keep_report_tool_markers(report):
         "missing-generator",
         "missing-version-hybrid",
         "legacy-v2",
+        "legacy-v3",
         "invalid-generator-only",
         "nested-report-tool-markers",
     ),
@@ -1576,6 +2616,23 @@ def _wrap_report_tool(wrapper, tool):
 
 @pytest.mark.parametrize(
     "wrapper",
+    ("top-level-list", "tools-envelope", "mcp-result", "atlas-sources"),
+)
+def test_raw_diff_loader_rejects_report_header_on_collection_entry(
+    tmp_path, wrapper
+):
+    hybrid = _diff_collision_mcp_tool("operate")
+    hybrid.update({"generator": "verb-authority", "report_version": 3})
+    candidate = _wrap_report_tool(wrapper, hybrid)
+    path = tmp_path / f"{wrapper}-report-header-hybrid.json"
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    with pytest.raises(DiffError, match="report-shaped"):
+        differ.load_raw_schema(str(path), label="candidate")
+
+
+@pytest.mark.parametrize(
+    "wrapper",
     (
         "direct-tool",
         "top-level-list",
@@ -1707,10 +2764,19 @@ def test_text_diff_escapes_terminal_and_bidi_controls():
     hostile_argument = "amount\r\x1b\u202e\u2028\u2029"
     hostile_type = "number\r\x1b\u202e\u2028\u2029"
     for report in (before, after):
-        report["tools"][0]["name"] = hostile
+        tool = report["tools"][0]
+        tool["name"] = hostile
+        inference = verb_authority.infer_risk(hostile)
+        tool["inferred_risk"] = inference.risk.value
+        tool["risk_inference"] = {
+            "source": inference.source,
+            "confidence": inference.confidence.value,
+            "mutability": inference.mutability,
+            "matched_tokens": list(inference.matched_tokens),
+        }
         amount = next(
             argument
-            for argument in report["tools"][0]["arguments"]
+            for argument in tool["arguments"]
             if argument["name"] == "amount"
         )
         amount["name"] = hostile_argument

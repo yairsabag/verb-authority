@@ -402,11 +402,28 @@ class Param:
 
 
 @dataclass
+class SelectorCase:
+    """One exact branch of a trusted polymorphic-tool registration.
+
+    ``value`` is one JSON scalar from the selector parameter's enum. ``risk``
+    is the effective runtime tier for that exact value, and ``active_args`` is
+    the complete argument-name set accepted by the branch.  This deliberately
+    small model has no predicates, nested selectors, or fallback case.
+    """
+
+    value: Any
+    risk: Risk | str
+    active_args: list[str]
+
+
+@dataclass
 class Tool:
     name: str
     params: list[Param]
     fn: Callable[..., Any] | None = None
     risk: Risk | str | None = None  # explicit application declaration; overrides name inference
+    selector: str | None = None
+    selector_cases: list[SelectorCase] | None = None
 
 
 @dataclass
@@ -1056,10 +1073,21 @@ def infer_policy(
     if _identifier_name_requires_review(p.name, context):
         return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
     if p.type in ("number", "integer", "enum", "boolean"):
-        return Policy.TYPED_BOUNDED, Confidence.HIGH
-    if _is_payload_name(p.name, context) or (
-        p.type == "string" and (p.max_len or 0) > 200
-    ):
+        # A primitive type constrains representation, not authority.  In
+        # particular, an enum may select a side-effectful operation and a
+        # numeric value may select the object it affects; neither membership
+        # in the enum nor numeric type-checking establishes that untrusted
+        # data may author the value.  Keep undeclared primitives locked for
+        # review.  ``sink=False`` remains the explicit authorable declaration,
+        # while build_policy may safely relax an uncertain value for a
+        # non-conflicting, declared read-only tool.
+        return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN
+    # A length bound constrains representation, not authority.  Only an
+    # independently meaningful payload name (or the explicit ``sink=False``
+    # declaration handled above) may make a string data-authorable.  Otherwise
+    # an author-controlled schema could unlock an operation selector merely by
+    # attaching a generous ``maxLength``.
+    if _is_payload_name(p.name, context):
         return Policy.OUTBOUND_PAYLOAD, Confidence.HIGH
     return Policy.TRUSTED_FIXED, Confidence.UNCERTAIN   # locked-safe until you confirm
 
@@ -1118,9 +1146,16 @@ def build_policy(
             if conf is Confidence.UNCERTAIN:
                 if (
                     r is Risk.READ_ONLY
+                    and tool.selector is None
+                    and tool.selector_cases is None
                     and not inference_context.inference_incomplete_for(p.name)
                 ):
-                    pol = Policy.TYPED_BOUNDED        # safe to auto-relax: no side effects
+                    # A tool-wide read-only declaration can establish that an
+                    # otherwise ambiguous primitive has no side effects.  A
+                    # selector registration cannot: its case risks describe
+                    # only the chosen call's effects and applicability, never
+                    # who may author the selector or any other argument.
+                    pol = Policy.TYPED_BOUNDED
                 else:
                     review.append((name, p.name))    # keep locked + surface for review
             policy[name][p.name] = pol
@@ -1154,8 +1189,11 @@ class ConfirmationRequest:
     same isolated argument snapshot the runner will execute. Confirmation UIs
     should parse and render it as structured fields, not inject it into markup.
     ``action_id`` commits that exact encoding to the frozen registration,
-    effective risk, and executable. Risk fields and their evidence are
-    detached canonical strings: compare them by value, never by Enum identity.
+    effective risk, executable, and any exact selector branch. For a branched
+    tool, ``selector_value_json`` preserves the type-exact scalar and
+    ``active_args`` names the complete argument set approved for that case.
+    Risk fields and their evidence are detached canonical strings: compare
+    them by value, never by Enum identity.
     Compatibility properties retain the small ``Decision`` callback surface
     used by beta callers while making the approved action inspectable.
     """
@@ -1171,6 +1209,9 @@ class ConfirmationRequest:
     executable_id: str
     ledger_version: int
     action_id: str
+    selector: str | None = None
+    selector_value_json: str | None = None
+    active_args: tuple[str, ...] | None = None
 
     @property
     def allow(self) -> bool:
@@ -1668,7 +1709,12 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
     implementation = reg.tools[tool].fn
     if implementation is not None:
         try:
-            _validate_callable_signature(tool, set(by_name), implementation)
+            _validate_callable_signature(
+                tool,
+                set(by_name),
+                implementation,
+                reg.tools[tool].selector_cases,
+            )
         except Exception as exc:
             return Decision(
                 False,
@@ -1676,16 +1722,27 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
                 + _safe_reason_text(str(exc)),
             )
     pol = ps.policy[tool]
-    for name, param in by_name.items():
-        display_name = _safe_reason_text(name)
-        if name not in args:
-            if param.required:
-                return Decision(False, f"required param '{display_name}' is missing")
-            return Decision(
-                False,
-                f"param '{display_name}' has an implicit optional default; "
-                "materialize and validate it before gating",
-            )
+    branch, branch_error = _resolved_branch_policy(
+        reg.tools[tool],
+        ps,
+        args,
+    )
+    if branch_error is not None:
+        return Decision(False, branch_error)
+    if branch is None:
+        for name, param in by_name.items():
+            display_name = _safe_reason_text(name)
+            if name not in args:
+                if param.required:
+                    return Decision(
+                        False,
+                        f"required param '{display_name}' is missing",
+                    )
+                return Decision(
+                    False,
+                    f"param '{display_name}' has an implicit optional default; "
+                    "materialize and validate it before gating",
+                )
     nfkc_budget = _NFKCWorkBudget()
     for name, val in args.items():
         display_name = _safe_reason_text(name)
@@ -1714,9 +1771,18 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
         # registered type, enum, length, or numeric cap.
         if not _type_ok(by_name[name], val):
             return Decision(False, f"param '{display_name}' failed its type/bounds check")
-    if tool in ps.confirm:
-        return Decision(True, f"risk policy ({ps.risk[tool].value}); needs human confirmation",
-                        needs_confirm=True)
+    effective_risk = ps.risk[tool] if branch is None else branch.risk
+    needs_confirm = (
+        tool in ps.confirm
+        if branch is None
+        else effective_risk in NEEDS_CONFIRM or tool in ps.extra_confirm
+    )
+    if needs_confirm:
+        return Decision(
+            True,
+            f"risk policy ({_risk_literal(effective_risk)}); needs human confirmation",
+            needs_confirm=True,
+        )
     return Decision(True, "within authority")
 
 
@@ -2604,6 +2670,15 @@ class _FrozenParam:
 
 
 @dataclass(frozen=True)
+class _FrozenSelectorCase:
+    canonical_value: str
+    risk: Risk
+    active_args: tuple[str, ...]
+    source_id: int
+    active_args_source_id: int
+
+
+@dataclass(frozen=True)
 class _FrozenTool:
     name: str
     params: tuple[_FrozenParam, ...]
@@ -2611,12 +2686,21 @@ class _FrozenTool:
     risk: Risk | None
     source_id: int
     params_source_id: int
+    selector: str | None
+    selector_cases: tuple[_FrozenSelectorCase, ...] | None
+    selector_cases_source_id: int | None
 
 
 @dataclass(frozen=True)
 class _FrozenRegistry:
     tools: Any
     source_tools_id: int
+
+
+@dataclass(frozen=True)
+class _FrozenBranchPolicyCase:
+    risk: Risk
+    active_args: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2628,6 +2712,9 @@ class _FrozenPolicySet:
     risk_inference: Any
     risk_review: tuple[str, ...]
     risk_conflicts: tuple[str, ...]
+    selector: Any
+    selector_cases: Any
+    extra_confirm: tuple[str, ...]
     registry_binding: str | None
     registry_version: int | None
 
@@ -2638,6 +2725,61 @@ class _RegistrationBundle:
     policy_set: _FrozenPolicySet
     registration_id: str
     source_state: tuple[int, str]
+
+
+def _resolved_branch_policy(
+    tool: _FrozenTool,
+    policy_set: _FrozenPolicySet,
+    args: dict[str, Any],
+) -> tuple[_FrozenBranchPolicyCase | None, str | None]:
+    """Resolve one exact selector case and enforce its complete argument set."""
+
+    if tool.selector is None:
+        return None, None
+    selector = tool.selector
+    display_selector = _safe_reason_text(selector)
+    if selector not in args:
+        return None, f"selector param '{display_selector}' is missing"
+    try:
+        canonical_value = _canonical_selector_scalar(args[selector])
+    except Exception:
+        return None, f"selector param '{display_selector}' is not a JSON scalar"
+    if policy_set.selector.get(tool.name) != selector:
+        return None, "selector policy does not match the frozen registration"
+    cases = policy_set.selector_cases.get(tool.name)
+    if cases is None:
+        return None, "selector policy is missing from the frozen registration"
+    case = cases.get(canonical_value)
+    if type(case) is not _FrozenBranchPolicyCase:
+        return None, f"selector param '{display_selector}' has no exact case"
+
+    active = frozenset(case.active_args)
+    provided = frozenset(args)
+    for name in case.active_args:
+        if name not in provided:
+            return None, f"active param '{_safe_reason_text(name)}' is missing"
+    for name in args:
+        if name not in active:
+            return (
+                None,
+                f"param '{_safe_reason_text(name)}' is inactive for this selector case",
+            )
+    return case, None
+
+
+def _effective_call_risk(
+    tool: _FrozenTool,
+    policy_set: _FrozenPolicySet,
+    args: dict[str, Any],
+) -> tuple[Risk, tuple[str, ...] | None]:
+    """Return the exact runtime risk and active args for one validated call."""
+
+    branch, error = _resolved_branch_policy(tool, policy_set, args)
+    if error is not None:
+        raise ValueError(error)
+    if branch is None:
+        return policy_set.risk[tool.name], None
+    return branch.risk, branch.active_args
 
 
 def _normalize_declared_risk(value: Risk | str | None) -> Risk | None:
@@ -2653,6 +2795,103 @@ def _normalize_declared_risk(value: Risk | str | None) -> Risk | None:
     # not a declaration that can resolve review. Treating it exactly like an
     # omitted tier preserves the unknown => review-and-confirm invariant.
     return None if normalized is Risk.UNKNOWN else normalized
+
+
+def _canonical_selector_scalar(value: Any) -> str:
+    """Canonicalize one exact JSON scalar without Python coercion."""
+
+    if value is not None and type(value) not in (str, bool, int, float):
+        raise TypeError("selector values must be exact JSON scalars")
+    try:
+        return _canonical_json_value(_snapshot_json_value(value))
+    except Exception as exc:
+        raise ValueError("selector values must be finite portable JSON scalars") from exc
+
+
+def _freeze_selector_registration(
+    tool: Tool,
+    params: tuple[_FrozenParam, ...],
+) -> tuple[
+    str | None,
+    tuple[_FrozenSelectorCase, ...] | None,
+    int | None,
+]:
+    """Validate and detach the intentionally narrow one-selector model."""
+
+    if tool.selector is None and tool.selector_cases is None:
+        return None, None, None
+    if tool.selector is None or tool.selector_cases is None:
+        raise ValueError("selector and selector_cases must be declared together")
+    if type(tool.selector) is not str or not tool.selector:
+        raise TypeError("tool selector must be a non-empty plain string")
+    if type(tool.selector_cases) is not list:
+        raise TypeError("tool selector_cases must be a plain list")
+    if not tool.selector_cases:
+        raise ValueError("tool selector_cases cannot be empty")
+
+    by_name = {param.name: param for param in params}
+    selector_param = by_name.get(tool.selector)
+    if selector_param is None:
+        raise ValueError("tool selector must name a registered parameter")
+    if selector_param.type != "enum" or selector_param.enum is None:
+        raise ValueError("tool selector parameter must be an enum")
+    if not selector_param.enum:
+        raise ValueError("tool selector enum cannot be empty")
+
+    enum_values: list[str] = []
+    for member in selector_param.enum:
+        # Selector enums are deliberately more restrictive than ordinary
+        # enum params: nested JSON values would turn this exact-case model into
+        # an implicit predicate language.
+        decoded = json.loads(member.canonical_json)
+        enum_values.append(_canonical_selector_scalar(decoded))
+    if len(enum_values) != len(set(enum_values)):
+        raise ValueError("tool selector enum values must be type-exact and unique")
+
+    frozen_cases: list[_FrozenSelectorCase] = []
+    seen_values: set[str] = set()
+    valid_args = frozenset(by_name)
+    for case in tool.selector_cases:
+        if type(case) is not SelectorCase:
+            raise TypeError("tool selector_cases must contain SelectorCase values")
+        canonical_value = _canonical_selector_scalar(case.value)
+        if canonical_value in seen_values:
+            raise ValueError("selector case values must be type-exact and unique")
+        if canonical_value not in enum_values:
+            raise ValueError("selector case value must be a member of the selector enum")
+        seen_values.add(canonical_value)
+
+        risk = _normalize_declared_risk(case.risk)
+        if risk is None:
+            raise ValueError("every selector case must declare an established risk")
+        if type(case.active_args) is not list:
+            raise TypeError("selector case active_args must be a plain list")
+        if not case.active_args:
+            raise ValueError("selector case active_args cannot be empty")
+        if not all(type(name) is str and name for name in case.active_args):
+            raise TypeError(
+                "selector case active_args must contain non-empty plain strings"
+            )
+        if len(case.active_args) != len(set(case.active_args)):
+            raise ValueError("selector case active_args must be unique")
+        if tool.selector not in case.active_args:
+            raise ValueError("selector case active_args must include the selector")
+        if not set(case.active_args).issubset(valid_args):
+            raise ValueError("selector case active_args must name registered parameters")
+
+        frozen_cases.append(
+            _FrozenSelectorCase(
+                canonical_value=canonical_value,
+                risk=risk,
+                active_args=tuple(case.active_args),
+                source_id=id(case),
+                active_args_source_id=id(case.active_args),
+            )
+        )
+
+    if seen_values != set(enum_values) or len(frozen_cases) != len(enum_values):
+        raise ValueError("selector cases must exhaust the selector enum exactly")
+    return tool.selector, tuple(frozen_cases), id(tool.selector_cases)
 
 
 @dataclass(frozen=True)
@@ -2744,6 +2983,7 @@ def _validate_callable_signature(
     tool_name: str,
     param_names: set[str],
     implementation: Callable[..., Any],
+    selector_cases: tuple[_FrozenSelectorCase, ...] | None = None,
 ) -> None:
     shape = _raw_callable_shape(tool_name, implementation)
 
@@ -2775,6 +3015,20 @@ def _validate_callable_signature(
         raise ValueError(
             f"implementation for '{tool_name}' does not accept params: {names}"
         )
+
+    if selector_cases is not None:
+        inactive_explicit = {
+            name
+            for name in explicit
+            if any(name not in case.active_args for case in selector_cases)
+        }
+        if inactive_explicit:
+            names = ", ".join(sorted(inactive_explicit))
+            raise ValueError(
+                f"implementation for '{tool_name}' has explicit callable params "
+                f"inactive in some selector cases: {names}; use **kwargs so "
+                "inactive arguments cannot materialize callable defaults"
+            )
 
 
 def _raw_signature_material(signature: inspect.Signature) -> list[dict[str, Any]]:
@@ -2885,6 +3139,9 @@ def _freeze_registry(
                 )
             )
 
+        selector, selector_cases, selector_cases_source_id = (
+            _freeze_selector_registration(tool, tuple(params))
+        )
         if tool.fn is not None and not callable(tool.fn):
             raise TypeError("registered implementations must be callable or None")
         if validate_callable and tool.fn is None:
@@ -2892,7 +3149,12 @@ def _freeze_registry(
                 f"registered implementation for '{tool.name}' must be callable"
             )
         if tool.fn is not None and validate_callable:
-            _validate_callable_signature(tool.name, seen_names, tool.fn)
+            _validate_callable_signature(
+                tool.name,
+                seen_names,
+                tool.fn,
+                selector_cases,
+            )
         frozen_tools[registered_name] = _FrozenTool(
             name=tool.name,
             params=tuple(params),
@@ -2900,6 +3162,9 @@ def _freeze_registry(
             risk=_normalize_declared_risk(tool.risk),
             source_id=id(tool),
             params_source_id=id(tool.params),
+            selector=selector,
+            selector_cases=selector_cases,
+            selector_cases_source_id=selector_cases_source_id,
         )
     return _FrozenRegistry(MappingProxyType(frozen_tools), id(registry.tools))
 
@@ -2944,6 +3209,8 @@ def _freeze_policy_set(
     expected_confirm: list[str] = []
     expected_risk_review: list[str] = []
     expected_risk_conflicts: list[str] = []
+    selector_names: dict[str, str] = {}
+    selector_case_policies: dict[str, Any] = {}
     inference_context = _PolicyInferenceContext()
     for tool_name, tool in registry.tools.items():
         inferred = infer_risk(tool_name, inference_context)
@@ -2971,6 +3238,20 @@ def _freeze_policy_set(
         ):
             expected_confirm.append(tool_name)
 
+        if tool.selector is not None:
+            if tool.selector_cases is None:
+                raise ValueError("frozen selector registration is incomplete")
+            selector_names[tool_name] = tool.selector
+            selector_case_policies[tool_name] = MappingProxyType(
+                {
+                    case.canonical_value: _FrozenBranchPolicyCase(
+                        risk=case.risk,
+                        active_args=case.active_args,
+                    )
+                    for case in tool.selector_cases
+                }
+            )
+
         expected_policies[tool_name] = {}
         for param in tool.params:
             inferred_policy, confidence = infer_policy(
@@ -2983,6 +3264,7 @@ def _freeze_policy_set(
             if confidence is Confidence.UNCERTAIN:
                 if (
                     effective_risk is Risk.READ_ONLY
+                    and tool.selector is None
                     and not param_inference_incomplete
                 ):
                     inferred_policy = Policy.TYPED_BOUNDED
@@ -3119,6 +3401,9 @@ def _freeze_policy_set(
         raise ValueError("risk review and conflict state must match derived evidence")
     if len(confirm) != len(set(confirm)) or not set(expected_confirm).issubset(confirm):
         raise ValueError("confirmation policy cannot remove a derived requirement")
+    extra_confirm = tuple(
+        name for name in confirm if name not in set(expected_confirm)
+    )
 
     frozen_binding, _ = _policy_registry_source(registry)
     return _FrozenPolicySet(
@@ -3129,6 +3414,9 @@ def _freeze_policy_set(
         risk_inference=MappingProxyType(assessments),
         risk_review=risk_review,
         risk_conflicts=risk_conflicts,
+        selector=MappingProxyType(selector_names),
+        selector_cases=MappingProxyType(selector_case_policies),
+        extra_confirm=extra_confirm,
         registry_binding=frozen_binding,
         registry_version=None,
     )
@@ -3160,11 +3448,34 @@ def _private_callable_binding(
     if implementation is None:
         return None
     shape = _raw_callable_shape("<binding>", implementation)
+    default_bindings = [
+        {
+            "name": parameter.name,
+            "value_id": id(parameter.default),
+        }
+        for parameter in shape.signature.parameters.values()
+        if parameter.default is not inspect.Parameter.empty
+    ]
     return {
         "invocation_id": shape.invocation_id,
         "owner_id": shape.owner_id,
         "code_sha256": _code_content_sha256(shape.target.__code__),
         "signature": _raw_signature_material(shape.signature),
+        # Callable defaults are trusted live registration state.  Raw object
+        # identities stay inside the private hash material; binding both the
+        # containers and each visible default detects value replacement
+        # without invoking arbitrary repr/equality hooks.
+        "positional_defaults_id": (
+            None
+            if shape.target.__defaults__ is None
+            else id(shape.target.__defaults__)
+        ),
+        "keyword_defaults_id": (
+            None
+            if shape.target.__kwdefaults__ is None
+            else id(shape.target.__kwdefaults__)
+        ),
+        "default_bindings": default_bindings,
     }
 
 
@@ -3198,6 +3509,22 @@ def _registry_material(registry: _FrozenRegistry) -> list[dict[str, Any]]:
                     for param in tool.params
                 ],
                 "risk": None if tool.risk is None else tool.risk.value,
+                "selector": tool.selector,
+                "selector_cases": (
+                    None
+                    if tool.selector_cases is None
+                    else [
+                        {
+                            "value": case.canonical_value,
+                            "risk": case.risk.value,
+                            "active_args": case.active_args,
+                            "source_id": case.source_id,
+                            "active_args_source_id": case.active_args_source_id,
+                        }
+                        for case in tool.selector_cases
+                    ]
+                ),
+                "selector_cases_source_id": tool.selector_cases_source_id,
                 "executable": _callable_identity(tool.fn),
                 "private_executable_binding": _private_callable_binding(tool.fn),
                 "source_id": tool.source_id,
@@ -3238,6 +3565,23 @@ def _policy_material(policy_set: _FrozenPolicySet) -> dict[str, Any]:
         },
         "risk_review": sorted(policy_set.risk_review),
         "risk_conflicts": sorted(policy_set.risk_conflicts),
+        "selector": {
+            tool: policy_set.selector[tool]
+            for tool in sorted(policy_set.selector)
+        },
+        "selector_cases": {
+            tool: {
+                value: {
+                    "risk": case.risk.value,
+                    "active_args": case.active_args,
+                }
+                for value, case in sorted(
+                    policy_set.selector_cases[tool].items()
+                )
+            }
+            for tool in sorted(policy_set.selector_cases)
+        },
+        "extra_confirm": sorted(policy_set.extra_confirm),
         "registry_binding": policy_set.registry_binding,
         "registry_version": policy_set.registry_version,
     }
@@ -3366,7 +3710,16 @@ def _confirmation_request(
     tool_name = approved_call["name"]
     tool = bundle.registry.tools[tool_name]
     arguments_json = _canonical_arguments(approved_call["input"])
-    effective_risk = bundle.policy_set.risk[tool_name]
+    effective_risk, active_args = _effective_call_risk(
+        tool,
+        bundle.policy_set,
+        approved_call["input"],
+    )
+    selector_value_json = (
+        None
+        if tool.selector is None
+        else _canonical_selector_scalar(approved_call["input"][tool.selector])
+    )
     executable_id = _callable_identity(tool.fn)
     ledger_version = ledger.version
     action_id = _material_sha256(
@@ -3374,6 +3727,9 @@ def _confirmation_request(
             "tool": tool_name,
             "arguments_json": arguments_json,
             "risk": _risk_literal(effective_risk),
+            "selector": tool.selector,
+            "selector_value_json": selector_value_json,
+            "active_args": active_args,
             "registration_id": bundle.registration_id,
             "executable_id": executable_id,
             "ledger_version": ledger_version,
@@ -3403,6 +3759,9 @@ def _confirmation_request(
         executable_id=executable_id,
         ledger_version=ledger_version,
         action_id=action_id,
+        selector=tool.selector,
+        selector_value_json=selector_value_json,
+        active_args=active_args,
     )
 
 
@@ -3562,6 +3921,22 @@ class GuardedToolRunner:
                 for name, assessment in enforced_policy.risk_inference.items()
             }
         )
+        inspection_selector_cases = MappingProxyType(
+            {
+                tool: MappingProxyType(
+                    {
+                        value: MappingProxyType(
+                            {
+                                "risk": _risk_literal(case.risk),
+                                "active_args": case.active_args,
+                            }
+                        )
+                        for value, case in cases.items()
+                    }
+                )
+                for tool, cases in enforced_policy.selector_cases.items()
+            }
+        )
         self.policy_set = _FrozenPolicySet(
             policy=inspection_policy,
             risk=inspection_risk,
@@ -3570,6 +3945,9 @@ class GuardedToolRunner:
             risk_inference=inspection_assessments,
             risk_review=enforced_policy.risk_review,
             risk_conflicts=enforced_policy.risk_conflicts,
+            selector=MappingProxyType(dict(enforced_policy.selector)),
+            selector_cases=inspection_selector_cases,
+            extra_confirm=enforced_policy.extra_confirm,
             registry_binding=enforced_policy.registry_binding,
             registry_version=enforced_policy.registry_version,
         )
