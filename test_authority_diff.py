@@ -1186,6 +1186,87 @@ def test_fail_on_review_includes_unresolved_branch_risk_directly(tmp_path):
     assert main([str(before), str(after), "--fail-on-review"]) == 2
 
 
+def _write_identical_risk_review_inputs(tmp_path):
+    document = {
+        "tools": [
+            {
+                "name": "mystery",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    report = scan_documents([document])
+    assert report["summary"]["risk_review_required_tools"] == 1
+    assert all(
+        report["summary"][field] == 0
+        for field in (
+            "review_required",
+            "schema_review_required_tools",
+            "risk_conflicts",
+            "annotation_conflicts",
+            "branch_risk_review_required_tools",
+        )
+    )
+
+    before = tmp_path / "before-review-debt.json"
+    after = tmp_path / "after-review-debt.json"
+    before.write_text(json.dumps(document), encoding="utf-8")
+    after.write_text(json.dumps(document), encoding="utf-8")
+    return before, after
+
+
+def test_unchanged_candidate_review_debt_is_explained_in_text_output(
+    tmp_path, capsys
+):
+    before, after = _write_identical_risk_review_inputs(tmp_path)
+
+    assert main([str(before), str(after), "--fail-on-review"]) == 2
+
+    captured = capsys.readouterr()
+    assert "Review-classified changes: 0" in captured.out
+    assert "No authority-relevant changes detected." in captured.out
+    assert captured.err == (
+        "Review threshold failed: candidate scan has existing review debt "
+        "(tool risks requiring review: 1).\n"
+    )
+
+
+def test_unchanged_candidate_review_debt_keeps_json_stdout_valid(tmp_path, capsys):
+    before, after = _write_identical_risk_review_inputs(tmp_path)
+
+    assert (
+        main(
+            [
+                str(before),
+                str(after),
+                "--format",
+                "json",
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    rendered = json.loads(captured.out)
+    assert rendered["summary"] == {
+        "changes": 0,
+        "changed_tools": 0,
+        "authority_increases": 0,
+        "reviews": 0,
+        "protection_increases": 0,
+    }
+    assert "Review threshold failed" not in captured.out
+    assert captured.err == (
+        "Review threshold failed: candidate scan has existing review debt "
+        "(tool risks requiring review: 1).\n"
+    )
+
+
 def _assert_unchanged_raw_review_threshold(
     tmp_path,
     document,

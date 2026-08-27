@@ -12,6 +12,7 @@ from collections import Counter
 import hashlib
 import json
 import math
+import sys
 import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -2931,6 +2932,28 @@ def _short(value: Any) -> str:
     return str(value)
 
 
+def _candidate_review_debt_diagnostic(summary: dict[str, Any]) -> str:
+    """Describe nonzero candidate review counters without exposing names."""
+
+    counter_labels = (
+        ("review_required", "parameters requiring review"),
+        ("schema_review_required_tools", "schemas requiring review"),
+        ("risk_review_required_tools", "tool risks requiring review"),
+        ("risk_conflicts", "risk conflicts"),
+        ("annotation_conflicts", "annotation conflicts"),
+        ("branch_risk_review_required_tools", "branch risks requiring review"),
+    )
+    counters = "; ".join(
+        f"{label}: {summary[field]}"
+        for field, label in counter_labels
+        if summary[field]
+    )
+    return (
+        "Review threshold failed: candidate scan has existing review debt "
+        f"({counters})."
+    )
+
+
 def render_text(diff: dict[str, Any]) -> str:
     """Render a compact diff intended for terminals and pull-request logs."""
 
@@ -2940,7 +2963,7 @@ def render_text(diff: dict[str, Any]) -> str:
         "",
         f"Changes: {summary['changes']} across {summary['changed_tools']} tool(s)",
         f"Authority increases: {summary['authority_increases']}",
-        f"Needs review: {summary['reviews']}",
+        f"Review-classified changes: {summary['reviews']}",
         f"Protection increases: {summary['protection_increases']}",
     ]
     if not diff["changes"]:
@@ -3008,8 +3031,8 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-review",
         action="store_true",
         help=(
-            "exit with status 2 when a change requires review; both inputs "
-            "must be raw schemas"
+            "exit with status 2 when a change requires review or the candidate "
+            "has existing review debt; both inputs must be raw schemas"
         ),
     )
     args = parser.parse_args(argv)
@@ -3042,11 +3065,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fail_on_increase and diff["summary"]["authority_increases"]:
         return 2
-    if args.fail_on_review and (
-        diff["summary"]["reviews"]
-        or _summary_requires_review(after["summary"])
-    ):
-        return 2
+    if args.fail_on_review:
+        candidate_has_review_debt = _summary_requires_review(after["summary"])
+        if diff["summary"]["reviews"] or candidate_has_review_debt:
+            if candidate_has_review_debt:
+                print(
+                    _candidate_review_debt_diagnostic(after["summary"]),
+                    file=sys.stderr,
+                )
+            return 2
     return 0
 
 

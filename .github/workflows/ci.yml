@@ -322,7 +322,10 @@ jobs:
           before: ${{ github.workspace }}/atlas/public_mcp_schemas.json
           after: ${{ github.workspace }}/atlas/public_mcp_schemas.json
           fail_on_increase: "true"
-          fail_on_review: "true"
+          # The Atlas intentionally preserves known review debt. This step
+          # verifies packaging and an identity comparison; the dedicated
+          # action-shadowing job below verifies fail_on_review itself.
+          fail_on_review: "false"
 
       - name: Preserve distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

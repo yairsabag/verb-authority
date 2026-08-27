@@ -893,7 +893,8 @@ trusted raw inputs or authenticate them independently.
 The two CLI thresholds are independent. `--fail-on-increase` returns status 2
 only for authority increases; review-only and protection increases remain
 visible without tripping that flag. Add `--fail-on-review` when any ambiguous
-or unmodeled change should also return status 2:
+or unmodeled change, or review debt already present in the candidate scan,
+should also return status 2:
 
 ```bash
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority diff tools-main.json tools-pr.json \

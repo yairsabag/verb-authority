@@ -32,7 +32,9 @@ dates are added when a GitHub release is actually published.
   to fall into review only. Existing branch and ordinary review debt now also
   trips `--fail-on-review`, and imported all-read-only branch reports cannot
   relax protected arguments through an inference tuple the scanner would not
-  emit.
+  emit. The CLI distinguishes review-classified changes from pre-existing
+  candidate review debt and explains the latter on stderr without contaminating
+  JSON output.
 - Support finite exact JSON-scalar `Literal[...]` annotations in the pinned
   Pydantic AI schema adapter and carry branch identity into deferred approval
   metadata. Add core, scanner, diff, adapter, mutation, drift, and installed
