@@ -22,12 +22,16 @@ tool-call arguments—without classifying prompts.
 > can allow the directory-supplied address. Preventing that control-flow
 > influence requires planner- or session-level information-flow control.
 
-> **Compositional-authority boundary:** conformance is per argument, not an
-> authorization decision for the action instance as a whole. A recipient,
-> account, amount, and purpose can each have valid provenance while their
-> particular combination is still forbidden. The surrounding application must
-> enforce cross-argument, transaction, sequence, and business-policy rules
-> before execution; Verb Authority does not infer those relationships.
+> **Compositional-authority boundary:** conformance is per argument. Trusted
+> application code may additionally register one exhaustive, exact selector
+> map so the gate can say, for example, that `action="close"` is destructive
+> and uses `index`, while `action="list"` is read-only. That narrow branch map
+> is an applicability and risk declaration, not authorization of the action
+> instance. A recipient, account, amount, and purpose can each have valid
+> provenance while their particular combination is still forbidden. The
+> surrounding application must enforce general cross-argument, transaction,
+> sequence, and business-policy rules before execution; Verb Authority does
+> not infer those relationships.
 
 The per-argument boundary is the intended utility tradeoff: an application can
 lock `to` while still allowing untrusted text to fill `body`, instead of
@@ -46,8 +50,8 @@ information-flow tracking to cover that deeper boundary.
 
 ## Install
 
-Verb Authority is not published on PyPI. Install the current source directly
-from GitHub:
+Verb Authority is not published on PyPI. Install the latest published
+prerelease directly from GitHub:
 
 ```bash
 python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.10"
@@ -147,8 +151,8 @@ that value before the gate. A protected materialized value must also appear,
 with the same exact JSON type and value, in `trusted_args`. `required=False`
 is retained as beta schema/API metadata; it is not permission to execute an
 implicit default. The runner also rejects registered callables that consume an
-undeclared parameter or rely on an undeclared default. Beta.10 accepts only an
-exact plain Python function as an implementation. Bound methods, callable
+undeclared parameter or rely on an undeclared default. The current core accepts
+only an exact plain Python function as an implementation. Bound methods, callable
 instances or classes, builtins, and partials are rejected because their hidden
 receiver or bound state is not a declared tool argument; materialize that
 state as explicit parameters instead.
@@ -190,7 +194,8 @@ cannot be weakened in a caller-supplied `PolicySet`; a parameter policy can be
 overridden only when that parameter appears in the derived review queue and
 its bounded identifier inference completed. A review caused by an inference
 resource limit remains locked; intentionally releasing it requires an explicit
-`sink=False` declaration in the schema/registration and a rebuilt policy.
+`sink=False` declaration in trusted application registration code and a rebuilt
+policy. Raw exported schema metadata is not a trusted release mechanism.
 Required confirmation may be made stricter. The ledger's private stores and
 lock are exact built-ins, are excluded from its representation, and replacement
 of one after runner construction is detected. Direct in-process mutation of
@@ -309,6 +314,243 @@ Authority. The lookup key may itself be influenced by untrusted content. The
 control-flow example at the top of this page is therefore an explicit product
 boundary, not an inference that the request was user-authorized.
 
+## Pydantic AI 2.35 runtime adapter
+
+The unreleased beta.11 source includes a deliberately narrow Pydantic AI
+adapter. It routes every supported tool invocation through the existing
+`GuardedToolRunner`; Pydantic performs schema generation and argument
+validation, but the registered Pydantic callable is a fresh, permanently inert
+function. The schema source is not retained as an execution target. The exact
+function frozen in the Verb Authority `Registry` is the only implementation
+that the sealed agent can invoke. At construction, the agent validates each
+caller-supplied schema helper and builds a second private inert tool and
+validator graph; mutating the caller-owned helper later cannot change the
+runtime tool. Immediately before argument validation and again before guarded
+execution, the adapter compares that private tool and validator graph with its
+construction-time seal. A callback that mutates an executable validator after
+run setup therefore fails before the validator or Registry implementation can
+execute.
+
+The optional extra pins Pydantic AI 2.35.0, Pydantic 2.13.4, and
+pydantic-core 2.46.4 because this fail-closed adapter audits private runtime
+surfaces rather than assuming compatibility from public version ranges.
+Pydantic 2.13.4 builds one of two validator shapes depending on whether its
+plugin loader finds installed plugins. The adapter accepts the exact direct
+`SchemaValidator` used by a clean installation, or Pydantic's exact plugin
+container only while all three validation methods remain bound directly to the
+same sealed core validator. Plugin-provided executable validation wrappers are
+outside this beta's trust boundary and fail closed.
+
+Install the optional integration from a local checkout:
+
+```bash
+python -I -m pip install ".[pydantic]"
+```
+
+For an application-fixed recipient, omit `to` from the model-visible Pydantic
+function entirely and inject it through an authenticated session:
+
+```python
+from verb_authority import Param, Registry, Risk, Tool, build_policy
+from verb_authority_pydantic import (
+    PydanticAuthorityAgent,
+    PydanticAuthoritySession,
+    pydantic_schema_tool,
+)
+
+def send_email(to: str, body: str):
+    # The real implementation; only GuardedToolRunner may call it.
+    return {"status": "sent", "to": to}
+
+def model_visible_send_email(body: str):
+    # Schema source only. The adapter never calls this function.
+    raise AssertionError("unreachable")
+
+registry = Registry()
+registry.add(Tool(
+    "send_email",
+    [
+        Param("to", "email", sink=True),
+        Param("body", "string", sink=False),
+    ],
+    fn=send_email,
+    risk=Risk.WRITE,
+))
+
+session = PydanticAuthoritySession(
+    registry,
+    build_policy(registry),
+    trusted_fixed={
+        "send_email": {"to": "dana@company.com"},
+    },
+)
+
+agent = PydanticAuthorityAgent(
+    existing_model,
+    deps_type=PydanticAuthoritySession,
+    tools=[pydantic_schema_tool(model_visible_send_email, name="send_email")],
+)
+
+result = agent.run_sync(
+    "Send Dana the meeting summary",
+    deps=session,  # created by authenticated application code, never by the model
+)
+```
+
+For an approved catalog choice, keep the key visible to the model and bind the
+argument through `trusted_choices`. A model value such as `"Dana"` is resolved
+to the catalog's canonical value plus evidence before the gate sees it.
+Unknown and ambiguous keys fail closed. A later trusted resolution cannot
+launder a value already recorded as untrusted tool output in the session
+ledger.
+
+The adapter also accepts finite, exact JSON-scalar `Literal[...]` annotations
+for a selector whose `Registry` tool carries an exhaustive `selector_cases`
+map. `Literal` constrains representation only: the runtime registration must
+still use `sink=False` when the model is intentionally allowed to choose the
+selector. The selected branch then controls effective risk, active arguments,
+and deferred-confirmation metadata, and approval is bound to that exact branch.
+
+This beta.11 Pydantic adapter supports branch risk only when every selector
+case shares one model-visible active-argument shape. A session rejects
+branch-varying `active_args` during construction instead of failing later at
+invocation. The core gate and scanner do support branch-varying active
+arguments, but Pydantic AI materializes one global required/default argument
+shape before this adapter's gate runs. Split such a polymorphic tool into
+separate Pydantic tools, or use `GuardedToolRunner` directly; this first
+adapter does not add a conditional-schema DSL.
+
+The first adapter is intentionally pinned to
+`pydantic-ai-slim==2.35.0`, `pydantic==2.13.4`, and its exact core, and supports
+only direct, local
+`PydanticAuthorityAgent` tools created by `pydantic_schema_tool`, whose
+authoritative implementations are synchronous callables frozen by the
+Registry runner.
+Every protected argument must have either a fixed application binding or a
+closed `TrustedResolver`. A direct tool absent from the Registry fails run
+setup. Runtime-added, remote, capability-provided, MCP, provider-native,
+deferred/native-swapped, executable output-tool, durable, and asynchronous
+execution paths are rejected rather than left outside the gate. Realtime
+sessions are rejected at run setup because their provider-side tool path does
+not pass through the audited classic-run hooks. `run_stream`,
+`run_stream_sync`, and `run_stream_events` are also explicitly unsupported in
+this beta. Supplying an `event_stream_handler` to `run` or `run_sync` is
+unsupported too. In particular, Pydantic's mutable event-stream `RunBinding`
+is rejected before the sealed `Agent.iter` entry grant exists; it is never
+reconciled after entry. Use `run`, `run_sync`, or `iter` without an event
+handler. Validation-time
+approval and external deferral are rejected as well: a resumed caller-supplied
+result would otherwise reach the model without execution by the guarded
+Registry function or a provenance-ledger record. Application-supplied static and per-run
+Pydantic capabilities are rejected in this beta, as are runtime toolsets. They
+are rejected before Pydantic invokes their `for_agent`, `for_run`, enter, or
+wrapper hooks, so a setup or error-recovery hook cannot turn a rejected run
+into a forged success. The two Pydantic-injected infrastructure capabilities
+are accepted only in their exact pristine 2.35 state. Manual or per-run
+installation of `VerbAuthorityCapability` is not a supported API. The sealed
+agent installs it statically, inspects the pinned `CombinedCapability` list
+directly rather than asking the mutable root to describe itself, seals every
+child against instance-method shadowing, and verifies the complete root before
+every run. It rejects `override(spec=...)`,
+tool-boundary overrides, post-construction tool registration, and declarative
+`from_spec`/`from_file` construction. If the capability boundary is absent,
+the inert Pydantic callable still fails before any Registry implementation can
+run. The session getter is bound to one exact session object for the whole
+run; changing tenants, registries, policies, or ledgers between hooks fails
+closed. Model-visible signatures are limited to exact `str`, `int`, `float`,
+`bool`, `list[T]`, `dict[str, T]`, and finite exact JSON-scalar `Literal[...]`
+shapes. `Annotated` validators, unions, models, Python enums, custom classes,
+mutable defaults, `Field` metadata, and default factories fail setup without
+being executed. Defaults are limited to immutable finite JSON scalars. Each
+model tool call must be an exact Pydantic
+`ToolCallPart` with bounded plain-string identities. Its arguments and
+provider details are copied into bounded plain JSON before Pydantic argument
+validation; subclasses and aliased or cyclic object graphs fail closed.
+Pydantic-owned tool timeouts are rejected too: the adapter intentionally
+does not call Pydantic's execution handler, and a synchronous Python thread
+cannot be safely killed. Resource limits must therefore be enforced inside the
+registered implementation or its transport.
+
+Financial, destructive, code-execution, and unknown-risk calls use Pydantic's
+deferred approval flow. The session accepts approval only for the exact prior
+tool-call ID, action commitment, arguments, registered executable, and ledger
+version. Changing an amount after the approval request creates a new request;
+it does not execute under the old approval. Pending state retains only a
+fixed-size action commitment, not the argument payload. Pydantic denials are
+removed automatically; applications should call
+`session.discard_pending_approval(tool_call_id)` when a request is cancelled or
+abandoned without sending a denial result back to Pydantic. Resume input is
+deliberately narrower than Pydantic's general deferred API: only exact boolean
+decisions for IDs currently pending in this session are accepted. External
+`calls` results and caller-supplied deferred metadata are rejected before
+Pydantic can convert them into a result visible to the model. A one-use,
+run-bound transition then checks Pydantic's normalized approval or denial
+against those exact raw booleans before execution. Manually driving a
+`CallToolsNode` cannot insert an approval or result without that immediately
+preceding transition. In a mixed batch, Pydantic's internal `skip` marker is
+accepted only for the same call ID and tool name already settled in the
+authenticated history; the approved sibling still executes exactly once.
+Approval and tool-call batches are capped at 256 entries.
+
+The live `AgentRun`, its backing `GraphRun`, graph iterator, graph dependencies,
+tool manager, and execution state are sealed as one runtime identity. Retaining
+the private `GraphRun`, replacing an iterator dependency alias, and advancing
+it directly fails before a capability hook, Registry function, or ledger write.
+Only the exact current node may advance. Its lifecycle may begin only in the exact asyncio task that
+drives the transition, and each exact node is claimed once in the external
+run seal before any callback or await. A child task that copied the context
+therefore cannot start the node again and re-arm a consumed permit. Every
+validation or execution sink still requires the active transition token for
+that sealed run so Pydantic's legitimate parallel tool tasks can proceed.
+That transition alone is not an execution authority: `before_node_run` mints
+one permit for each exact
+executable call in the exact current `CallToolsNode`. Validation binds the
+permit to both the raw and validated plain-JSON arguments. For a selector,
+its raw presence, JSON-scalar type, value, and signed zero must survive
+Pydantic validation exactly; coercion is rejected before trusted resolvers,
+the ledger, or the Registry implementation can run. Execution consumes the
+permit before trusted resolvers, confirmation callbacks, ledger writes, or
+the Registry implementation can run. An instruction, model-setting, or other
+accepted callback therefore cannot borrow a valid node transition to execute
+a different call, and a nested or replayed call finds no permit.
+Approved permits are additionally bound to the pending action commitment.
+Every node must also be driven by the exact sealed `AgentRun` step function;
+an event handler or replaced node driver cannot observe a context while a
+permit is live, even through an explicit unbound call to Pydantic's base API.
+Calling an unbound base `Agent.iter`, `AgentRun._advance_graph`, or
+`ToolManager.handle_call` therefore cannot expose an unsealed run, inject a
+result, or turn `approved=True` into an execution. The base-iter entry grant is
+bound to the exact asyncio task, consumed before setup continues, and created
+only after executable retry mappings and mutable run-stream bindings have been
+removed from the path. Rewriting the agent's own expected-baseline fields or a
+public resume-marker attribute does not rewrite the external seals. These
+checks run before the Registry implementation and ledger can change; a later
+context-exit check is defense in depth, not the enforcement point.
+
+Any non-empty `message_history` passed to a resumed run must be authenticated,
+unmodified history produced by the same application session and ledger. This
+adapter does not authenticate foreign Pydantic history or reconstruct
+provenance that was never recorded by Verb Authority. If an application
+accepts caller-authored history, the adapter's provenance claims do not apply
+to that history.
+
+The local Python `Model` implementation and provider adapter are inside the
+trusted application boundary. In particular, a custom `FunctionModel`
+callback is executable application code, and Pydantic may inspect the Python
+objects it returns before capability hooks regain control. It must return
+provider-shaped values built from exact plain Python/JSON types. A remote model
+controlling JSON bytes cannot create a Python `list` or `str` subclass, but an
+untrusted in-process model implementation could; this adapter does not sandbox
+such Python code.
+
+This integration preserves the same stated claim boundaries as the core gate:
+per-argument provenance and local constraints, plus explicitly registered
+exact one-selector branch risk and argument applicability. It does not
+establish selection intent, general cross-argument composition, sequence, or
+action-instance authorization. If Pydantic or application code can invoke an
+implementation through any route not covered above, that route is outside
+this beta and must remain disabled.
+
 ## Scan your tool schemas locally
 
 Export the tool definitions your client already receives, then scan them
@@ -337,6 +579,20 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
   --redact-names --format json --output authority-report.json
 ```
 
+MCP tool annotations are server-supplied, unverified hints, not enforcement
+evidence. Report v4 preserves each recognized boolean hint in a structured
+`annotation_assessments` entry with its value, comparison source and value,
+and explicit `trust: "unverified_hint"`. The assessment state is `consistent`
+when a hint agrees with established effective-risk evidence, `conflict` when
+it disagrees, `unresolved` when the scanner lacks a supported comparison, and
+`inapplicable` when an effect hint does not apply to a tool marked read-only.
+Even a `consistent` hint remains unverified. Conflicts remain visible in
+`annotation_conflicts` and count toward `--fail-on-review`; unknown effective
+risk leaves applicable hints unresolved instead of manufacturing a conflict.
+For MCP's conditional semantics, `destructiveHint` is assessed only when
+`readOnlyHint` is false; an effect hint on a read-only tool is recorded as
+inapplicable rather than contradictory.
+
 Scanner inputs have their own fail-closed resource boundary. Each JSON file is
 limited to 8 MiB of UTF-8 before parsing. The CLI additionally limits one scan
 to 500 input documents and 16 MiB of actual UTF-8 input shared lazily across
@@ -354,7 +610,7 @@ enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
 reports before indexing them. An over-limit CLI input exits with status 2 and
 is not partially scanned or compared.
 
-Named JSON reports use report format v3. For the constraints understood by
+Named JSON reports use report format v4. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a
 SHA-256 fingerprint for each enum member. Raw enum members are omitted, but
 hashes of low-entropy values are dictionary-guessable and repeated hashes are
@@ -366,7 +622,7 @@ reports also include per-tool and per-argument
 `unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
 can likewise be dictionary-guessed or correlated.
 
-When Authority Diff imports a named v3 report, it recomputes summary counters
+When Authority Diff imports a named v4 report, it recomputes summary counters
 and reconciles the complete risk tuple (declaration, advisory inference,
 conflict, effective tier, evidence, review, and confirmation) before comparing
 it. It also checks the stable argument policy/confidence/review combinations,
@@ -395,7 +651,13 @@ exact constraint values or unmodeled validation material. Review any remaining
 author-written evidence before sharing. Redacted reports are intentionally not
 accepted as diff inputs.
 
-The v3 `privacy` object makes that contract machine-readable. It replaces the
+Declared selector branches are also emitted with SHA-256 fingerprints instead
+of raw selector values. These hashes are deliberately stable for comparison,
+but low-entropy values such as `close` are dictionary-guessable. They remain in
+both named and name-redacted reports, and the `privacy` object says so
+explicitly.
+
+The v4 `privacy` object makes that contract machine-readable. It replaces the
 old combined `examples_or_values_included` field with
 `examples_included: false`, `defaults_included: false`, and
 `runtime_values_included: false`. Named reports set
@@ -408,8 +670,9 @@ three booleans to `false` and use the scope
 `modeled_presence_and_enum_count_only`.
 
 Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
-arguments, risk conflicts, MCP annotation conflicts, or unresolved JSON Schema
-composition need attention. The scanner does not resolve `$ref`, `allOf`,
+arguments, likely operation selectors without branch evidence, risk conflicts,
+MCP annotation conflicts, or unresolved JSON Schema composition need attention.
+The scanner does not resolve `$ref`, `allOf`,
 `anyOf`, `oneOf`, or conditional/dependent schemas. It instead sets
 `schema_review_required` on the tool and counts it in
 `summary.schema_review_required_tools`, so authority-bearing properties hidden
@@ -426,7 +689,7 @@ aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
 
-Both schema-review fields are mandatory in imported v3 reports. A report that
+Both schema-review fields are mandatory in imported v4 reports. A report that
 omits either field must be regenerated from the original schema with the
 current scanner; omission is not interpreted as `false`. When Authority Diff
 sees an explicit schema-review obligation change in either direction, it keeps
@@ -521,6 +784,53 @@ proof. With `--redact-names`, tool and argument names plus attribution are
 removed, but author-written bound sources, enforcement text, and notes remain;
 review a redacted report before sharing it.
 
+A polymorphic tool may declare exact risk and argument applicability for one
+enum selector instead of one flattened tool risk. The cases must cover every
+enum value exactly once, use JSON scalars, include the selector in every
+argument list, and name only schema arguments. A tool-level `risk` and
+`branches` are mutually exclusive:
+
+```json
+{
+  "version": 1,
+  "tools": {
+    "browser_tabs": {
+      "branches": {
+        "selector": "action",
+        "cases": [
+          {
+            "value": "list",
+            "risk": {
+              "tier": "read_only",
+              "evidence": "observed",
+              "effects": ["reads_tabs"]
+            },
+            "arguments": ["action"]
+          },
+          {
+            "value": "close",
+            "risk": {
+              "tier": "destructive",
+              "evidence": "observed",
+              "effects": ["closes_tab"]
+            },
+            "arguments": ["action", "index"]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The example is abbreviated: a real declaration must include every selector
+enum member. The report summarizes the worst branch at tool level, exposes
+each case's risk and active arguments with only a selector-value fingerprint,
+and compares MCP annotations against that worst established tier. Branch
+evidence never unlocks the selector. Model authorship still requires trusted
+runtime registration such as `Param("action", "enum", sink=False)`; the branch
+map then supplies per-call risk and confirmation, not value provenance.
+
 The public [`avp9-nexus` financial fixture](fixtures/README.md) includes a tool
 schema, attributed control sidecar, and expected classification used as a
 regression oracle.
@@ -551,18 +861,22 @@ Example output:
 
 Without a failure threshold, the command also accepts two non-redacted JSON
 reports for observational comparison. Diff output format v2 is paired with
-scanner report format v3. Earlier report v2 omitted constraint values and
-cannot be migrated without inventing evidence; rescan the original raw schema
-with the v3 scanner before comparing it. When implementation controls are part
-of a raw-schema comparison, pass the sidecars with `--before-controls` and
+scanner report format v4. Report v3 did not preserve the structured provenance
+and assessment state of MCP annotation hints, so it is rejected rather than
+upgraded by inference. Report v2 also omitted constraint values and cannot be
+migrated without inventing evidence. Rescan the original raw schema with the
+v4 scanner before comparing it. When implementation controls are part of a
+raw-schema comparison, pass the sidecars with `--before-controls` and
 `--after-controls`. Control evidence remains visibly author-supplied; a diff
 does not turn a declaration into verified enforcement.
 Malformed or legacy report-shaped input is rejected as a report and is never
-reinterpreted as a raw tool schema.
-Intermediate, unpublished v3 reports that predate the mandatory
+reinterpreted as a raw tool schema. This includes report header or per-tool
+sentinels hidden inside a direct tool list, `tools`, `result.tools`, or an Atlas
+`sources[*].tools` collection.
+Intermediate, unpublished v4 reports that predate the mandatory
 `schema_review_required` and `summary.schema_review_required_tools` fields must
 also be rescanned rather than compared under an optimistic default.
-Imported v3 reports must contain at least one tool, matching the scanner's own
+Imported v4 reports must contain at least one tool, matching the scanner's own
 output boundary; a fabricated empty report is rejected with rescan guidance.
 They must also preserve scanner-normalized declaration text and canonical
 declaration order, and remain within the scanner's aggregate limits for tools,
@@ -579,7 +893,8 @@ trusted raw inputs or authenticate them independently.
 The two CLI thresholds are independent. `--fail-on-increase` returns status 2
 only for authority increases; review-only and protection increases remain
 visible without tripping that flag. Add `--fail-on-review` when any ambiguous
-or unmodeled change should also return status 2:
+or unmodeled change, or review debt already present in the candidate scan,
+should also return status 2:
 
 ```bash
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority diff tools-main.json tools-pr.json \
@@ -626,7 +941,7 @@ pin in the example above supports both thresholds. The action removes
 and comparison, preventing modules in the consumer checkout from shadowing
 `pip` or the installed Verb Authority package.
 
-The v3 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
+The v4 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
 increase; and enum replacements without a strict subset relationship require
 review. Any effective risk-tier change also requires review; tiers are not
@@ -656,7 +971,8 @@ community corpus, not a ranking of MCP servers.
 
 ## What the gate does
 
-The project is one importable module with five cooperating pieces:
+The dependency-free core remains one importable module with five cooperating
+pieces. The optional Pydantic adapter is a separate module and extra:
 
 - **Per-parameter policies.** Sensitive sinks such as recipients, URLs,
   accounts, paths, and commands default to `trusted_fixed`; bounded values are
@@ -666,6 +982,9 @@ The project is one importable module with five cooperating pieces:
   a one-time review queue. Authority-bearing names are evaluated before broad
   numeric or payload rules: an integer `account_id` and a string `reply_to`
   remain locked, while an ambiguous `message_id` remains locked for review.
+  A raw `maxLength`, enum membership, numeric type, or boolean type constrains
+  representation but does not by itself grant the model authority to author an
+  ambiguous consequential argument.
   Payload names are token-bound rather than matched as arbitrary substrings.
   Flattened names such as `destinationurlvalue` and
   `destinationurloverride` conservatively retain the underlying URL boundary,
@@ -673,11 +992,22 @@ The project is one importable module with five cooperating pieces:
   still a finite label heuristic, not semantic proof: unusual author-chosen
   names must declare their sink role explicitly.
 - **Declared capabilities.** `Param(..., sink=True|False)` lets a tool schema
-  resolve overloaded names such as `path` without relying on the heuristic.
+  registered by trusted application code resolve overloaded names such as
+  `path` without relying on the heuristic. The scanner does not treat a raw
+  schema's `x-verb-authority-sink` extension as verified authority evidence;
+  that author-controlled field remains committed by the schema fingerprints
+  but cannot unlock an argument.
 - **Declared verb-risk tiers.** Applications declare tools as read-only, write,
   financial, destructive, or code execution. Undeclared tools remain `unknown`
   and require review plus confirmation. A complete-token name heuristic is
   reported only as caller-mutable evidence; it never establishes authority.
+- **Exact selector branches.** A trusted registration may enumerate every
+  value of one scalar enum selector and bind each value to its effective risk
+  plus complete active-argument set. Missing, unknown, duplicated, or
+  non-exhaustive cases fail closed; inactive arguments are rejected. The
+  selected branch is committed into policy fingerprints, action IDs, and any
+  human-confirmation request. This is a deliberately narrow exception for
+  local risk/applicability, not a general relational-policy language.
 - **Optional provenance ledger.** Values returned by tools are recorded as
   untrusted. Exact, type-tagged JSON scalar leaves (`null`, booleans, integers,
   finite floats, and strings), every exact object key, and exact list/object
@@ -701,13 +1031,14 @@ The project is one importable module with five cooperating pieces:
   session instead of evicting old evidence, so callers must create a fresh
   session and must not retry the tool call that already produced the result.
 
-The gate rejects unknown tools, unknown arguments, and every omitted registered
-parameter. `Param.required` remains schema metadata, not an implicit-default
+The gate rejects unknown tools, unknown arguments, and every omitted active
+registered parameter. A non-branched tool treats every registered parameter as
+active. `Param.required` remains schema metadata, not an implicit-default
 execution path. URI containment is not a general URI/IDN validator, and the
 mixed-script check is not a complete Unicode-confusables implementation. The
 gate also does not replace complete JSON Schema validation or the tool
-implementation's own authorization checks, including cross-argument and
-action-instance authorization.
+implementation's own authorization checks, including general cross-argument
+and action-instance authorization.
 
 ## Integrating a tool loop
 
@@ -747,6 +1078,63 @@ result = run_tool(tool_call)
 ledger.record_result(result)
 ```
 
+For a reviewed polymorphic tool, trusted application code can register one
+exact selector map. The selector remains explicitly model-authored here;
+branch metadata changes the risk and accepted argument set, not its
+provenance:
+
+```python
+from verb_authority import GuardedToolRunner, SelectorCase
+
+def browser_tabs(action: str, **active_arguments):
+    # Only arguments admitted by the selected branch reach this function.
+    return call_browser(action=action, **active_arguments)
+
+registry.add(Tool(
+    "browser_tabs",
+    [
+        Param(
+            "action",
+            "enum",
+            enum=["list", "new", "close", "select"],
+            sink=False,
+        ),
+        Param("index", "integer", sink=False),
+        Param("url", "uri"),
+    ],
+    fn=browser_tabs,
+    risk=Risk.WRITE,
+    selector="action",
+    selector_cases=[
+        SelectorCase("list", Risk.READ_ONLY, ["action"]),
+        SelectorCase("new", Risk.WRITE, ["action", "url"]),
+        SelectorCase("close", Risk.DESTRUCTIVE, ["action", "index"]),
+        SelectorCase("select", Risk.WRITE, ["action", "index"]),
+    ],
+))
+
+runner = GuardedToolRunner(registry)
+result = runner.run(
+    {"name": "browser_tabs", "input": {"action": "close", "index": 0}},
+    confirm=show_structured_confirmation,
+)
+```
+
+`list` runs at read-only risk, while `close` is bound to a destructive
+confirmation request containing the exact selector value and active arguments.
+Sending `index` on the `list` branch, omitting `index` from `close`, changing
+the selector after approval, or using an unmapped value fails before the
+implementation runs. The application's own authorization layer must still
+decide whether closing that particular tab is permitted.
+
+When selector cases have different active-argument sets, the registered Python
+implementation must accept those conditional arguments through `**kwargs`, as
+shown above. An explicit Python parameter that is inactive in any case is
+rejected at registration, preventing its callable default from materializing
+after authorization. The first Pydantic AI adapter is narrower still: every
+case must share one model-visible argument shape; split a polymorphic tool or
+use `GuardedToolRunner` directly when its shapes differ.
+
 This direct-dispatch example leaves confirmation-to-execution atomicity,
 callable identity, result validation, and result capture to the application.
 Thread one ledger through the session and record each plain JSON result
@@ -778,6 +1166,7 @@ python adversarial.py    # known successes and failures by attack family
 python adaptive.py       # adaptive resistance depth and first observed break
 python capability_demo.py
 python trusted_choice_demo.py  # trusted lookup -> gate -> actual local function
+python pydantic_ai_demo.py     # optional extra; offline 6-case runtime evaluation
 ```
 
 The adaptive evaluation found a mixed-script homograph bypass in the earlier
@@ -787,9 +1176,11 @@ That is a semantic/representation boundary rather than the original destination
 string reaching the gate.
 That result describes this test arsenal, not a universal security score.
 
+`pydantic_ai_demo.py` requires the `pydantic` extra but uses Pydantic's local
+`FunctionModel`; it performs no network request and needs no API key.
 `agent_demo.py` and `resolve_live.py` are optional Anthropic-backed demos and
-require `ANTHROPIC_API_KEY`. The core module, tests, and offline evaluations do
-not require an API key.
+require `ANTHROPIC_API_KEY`. The core module, tests, and other offline
+evaluations do not require an API key.
 
 ## Security boundary and known limitations
 
@@ -851,10 +1242,11 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release. This source tree describes
-v0.10.0-beta.10 for the local schema scanner, control evidence, Authority Diff,
-Tool Authority Atlas, and runtime-integration boundary; beta.7, beta.8, and
-beta.9 were withheld and are not reused.
+v0.9.0 is the latest stable release, and v0.10.0-beta.10 is the latest
+published prerelease. This source tree prepares v0.10.0-beta.11 with the
+safe-default scanner fixes, exact one-selector branch risk, and first optional
+Pydantic AI runtime adapter;
+beta.7, beta.8, and beta.9 were withheld and are not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

@@ -5,6 +5,180 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Exact selector branch risk
+
+- Add a deliberately narrow runtime model for one exact scalar enum selector.
+  Trusted registration must enumerate every selector value exactly once and
+  bind it to an effective risk tier plus the complete active-argument set.
+  Missing, unknown, duplicate, non-scalar, non-exhaustive, or inactive
+  arguments fail closed. Branch declarations do not grant model authorship;
+  releasing the selector still requires explicit trusted configuration such as
+  `Param(..., sink=False)`.
+- Resolve risk, confirmation, and accepted arguments from the selected branch
+  before execution. Bind selector identity, its type-exact value, active
+  arguments, and effective branch risk into frozen policy material,
+  registration fingerprints, action IDs, confirmation requests, and approval
+  replay checks. `list` can therefore remain read-only while `close` requires
+  confirmation, without trusting the selector value through the provenance
+  ledger.
+- Extend scanner control declarations and report v4 with exact branch evidence.
+  Raw selector values are omitted from reports and replaced by stable SHA-256
+  fingerprints; their low entropy and dictionary-guessability are stated in
+  the privacy metadata. A likely operation-selector enum without branch
+  evidence remains a review obligation. Authority Diff validates, reconciles,
+  and compares the complete branch structure rather than flattening it.
+- Treat every unequal replacement of a branch's active-argument set as an
+  authority increase rather than allowing incomparable additions and removals
+  to fall into review only. Existing branch and ordinary review debt now also
+  trips `--fail-on-review`, and imported all-read-only branch reports cannot
+  relax protected arguments through an inference tuple the scanner would not
+  emit. The CLI distinguishes review-classified changes from pre-existing
+  candidate review debt and explains the latter on stderr without contaminating
+  JSON output.
+- Support finite exact JSON-scalar `Literal[...]` annotations in the pinned
+  Pydantic AI schema adapter and carry branch identity into deferred approval
+  metadata. Add core, scanner, diff, adapter, mutation, drift, and installed
+  smoke regressions for exact selector substitution and approval binding.
+- Preserve the broader boundary: branch maps express local risk and argument
+  applicability only. They do not establish selection intent, arbitrary
+  cross-argument relationships, sequence policy, business authorization, or
+  action-instance authorization.
+
+### Safe-default authority inference
+
+- Stop treating primitive representation or a raw string-length bound as proof
+  of authorship. Undeclared enum, number, integer, boolean, and ambiguously
+  named string arguments now remain locked with uncertain confidence and review
+  on consequential or unknown-risk tools, even when a string carries
+  `maxLength`. Explicit
+  `Param(..., sink=False)` in trusted application registration remains the
+  deliberate release, and a non-conflicting declared read-only tool may still
+  auto-relax an ambiguous primitive.
+- Preserve the existing corpus truth labels while recording the stricter
+  trade-off: the current development baseline has no false allows, with eight
+  conservative policy false blocks and six call false blocks.
+- Add a synthetic Playwright `browser_tabs` regression covering an operation
+  selector, an unbounded numeric index, and a protected URL. Data-authored
+  `action="close"` and `index=0` no longer pass merely because their JSON
+  representations are valid.
+- Stop accepting raw-schema `x-verb-authority-sink` metadata as verified
+  authority control. The scanner preserves changes to that author-controlled
+  extension in its schema fingerprints but cannot use it to unlock an
+  argument. Runtime `Param.sink` remains trusted application configuration.
+- Reject report header and per-tool sentinels wherever a supported raw tool
+  collection can appear. A malformed or legacy report entry can no longer be
+  reinterpreted as a fresh raw schema by nesting it in a direct list, `tools`,
+  `result.tools`, or `sources[*].tools` envelope.
+
+### Scanner report v4
+
+- Bump named and redacted scanner reports from v3 to v4. Preserve each
+  recognized boolean MCP tool annotation as a structured
+  `annotation_assessments` entry containing the hint value, comparison source
+  and value, assessment state, `evidence_source: "mcp_tool_annotation"`, and
+  `trust: "unverified_hint"`. Server annotations remain advisory hints even
+  when an assessment is `consistent`; they never become verified enforcement
+  evidence.
+- Distinguish `consistent`, `conflict`, `unresolved`, and `inapplicable`
+  annotation states. Unknown effective risk leaves applicable hints unresolved
+  rather than creating a false conflict, while read-only hints make effect
+  hints inapplicable. Derived conflicts remain review evidence and continue to
+  fail `--fail-on-review`.
+- Require report v4 for imported-report comparison. Legacy report v3 lacks the
+  structured annotation evidence needed to preserve this distinction and is
+  rejected with rescan guidance rather than accepted through a compatibility
+  default. Extend the installed-wheel smoke to pin report v4, its annotation
+  assessment structure, and explicit legacy-v3 rejection.
+
+### Pydantic AI runtime integration
+
+- Add an optional, fail-closed adapter pinned to Pydantic AI 2.35.0,
+  Pydantic 2.13.4, and pydantic-core 2.46.4. Direct local
+  tools created by `pydantic_schema_tool` are permanently inert schema surfaces;
+  the exact synchronous implementation frozen in `GuardedToolRunner` is the
+  sole executable. A sealed `PydanticAuthorityAgent` installs and verifies the
+  static capability root before every run. It rebuilds each caller-owned schema
+  helper as a private inert tool and validator graph, so later helper mutation
+  cannot affect execution. Revalidate that graph against its construction-time
+  seal immediately before argument validation and again before guarded
+  execution, closing callback-time mutation windows before an executable
+  validator or Registry implementation can run. Accept both exact validator
+  shapes produced by the pinned Pydantic release: its direct core-validator
+  fast path in clean installations and its exact plugin container only when
+  every validation entry point still delegates directly to the sealed core.
+- Add application-owned runtime sessions for hidden fixed values, closed
+  trusted-choice resolution, per-session provenance ledgers, and approvals
+  bound to the exact tool call, action, arguments, executable, registration,
+  and ledger version. Pending approvals retain fixed-size commitments, remove
+  denied entries automatically, expose explicit cancellation cleanup, and
+  accept resume input only as exact boolean decisions for currently pending
+  IDs. Reject external deferred results and caller-supplied deferred metadata
+  before Pydantic can surface them to the model. Bind raw decisions to the
+  immediately following normalized resume node with a one-use run marker,
+  preserve already-settled siblings in mixed batches, and bound approval/tool
+  batches to 256 entries.
+- Snapshot selector identity and branch shape from the runner's authoritative
+  frozen registration into an external session seal. Permit construction no
+  longer consults the mutable public inspection alias; empty or bogus alias
+  replacement cannot disable raw selector exactness, while mutation or
+  replacement of the authoritative registration fails closed before tool or
+  ledger activity.
+- Reject unregistered tools, generated-schema drift, provider-native tools,
+  runtime or remote toolsets, async implementations, wrong session deps, and
+  all application-supplied static or per-run capabilities. Reject them before
+  lifecycle, enter, or binding hooks can execute. Seal the exact Pydantic-owned
+  capability tree and its pristine infrastructure children against replacement
+  and instance-method shadowing without dispatching through the mutable root.
+  Bind one exact application session identity for the complete run so a session
+  getter cannot switch registries or tenants between hooks.
+  Reject manual/per-run gate installation, capability-root replacement or
+  mutation, `override(spec=...)`, tool-boundary overrides, post-construction
+  registration, arbitrary executable Pydantic tools, and declarative agent
+  construction paths that do not preserve the sealed subclass.
+  Reject realtime sessions, validation-time external deferral, and
+  handler-owned timeouts whose semantics the guarded synchronous runner cannot
+  preserve. Explicitly reject `run_stream`, `run_stream_sync`, and
+  `run_stream_events`, plus per-run `event_stream_handler` callbacks; consume
+  and reject Pydantic's mutable event-stream run binding before the sealed
+  iter-entry grant exists.
+- Keep construction seals outside the mutable Agent object, seal the live
+  AgentRun, backing GraphRun, graph iterator, graph dependencies, ToolManager aliases, and
+  execution state, and require an exact current node for public graph driving.
+  A retained private GraphRun with swapped dependency aliases is rejected
+  before any capability hook, Registry implementation, or ledger mutation.
+  Consume a one-use entry grant before base `Agent.iter` proceeds, and require
+  the corresponding live run-transition token again at tool validation and
+  execution. Bind the entry grant and node-lifecycle driver to the exact
+  asyncio task, claim every exact node once in the external run seal before
+  any callback or await, and snapshot retry configuration before minting the
+  entry grant. A child task with a copied context therefore cannot re-enter a
+  node and re-arm consumed authority. Mint a separate one-use execution permit
+  only for each exact call in the exact current `CallToolsNode`; bind it to raw
+  and validated arguments plus any pending action commitment, then consume it
+  before resolvers, callbacks, ledger writes, or Registry invocation. Accepted
+  callbacks therefore cannot borrow a live transition for another call.
+  Require the exact sealed `AgentRun` step function for every node, so an event
+  handler or replaced driver cannot observe a context while a permit is live,
+  including through an explicit unbound base-API call.
+  Explicit base-descriptor calls and direct ToolManager calls fail before the
+  Registry implementation, ledger, or pending approval can change.
+  Keep approval-transition state in the external run-root seal so rewriting an
+  instance marker cannot authorize a call.
+- Limit schema annotations and defaults to a non-executable exact JSON-shaped
+  subset; reject `Annotated` validators, custom classes, `Field` metadata,
+  factories, and mutable defaults. Require exact bounded model tool-call
+  identities and snapshot raw arguments and provider details to isolated plain
+  JSON before Pydantic argument validation. Treat the local Python model/provider
+  implementation as trusted application code; the adapter does not sandbox a
+  malicious in-process `Model` implementation.
+- Preserve the explicit boundary that independently valid arguments do not
+  establish selection intent, tuple, sequence, or action-instance
+  authorization.
+- Add an offline Pydantic integration evaluation and end-to-end regression
+  coverage for canonical resolution, fail-closed lookup, exact deferred
+  approval, drift, no-unwrapped-tool invariants, provenance laundering, and
+  the intentional control-flow limitation.
+
 ## [0.10.0-beta.10]
 
 `0.10.0-beta.9` was an assetless release candidate. Its build job passed the

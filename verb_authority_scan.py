@@ -25,18 +25,22 @@ from typing import Any, Iterable
 
 from verb_authority import (
     Confidence,
+    MAX_JSON_INTEGER_DIGITS,
     Param,
     Policy,
     Registry,
     Risk,
+    SelectorCase,
     Tool,
     _PolicyInferenceContext,
+    _compact_identifier_segments,
+    _identifier_tokens,
     build_policy,
     infer_policy,
 )
 
 
-REPORT_VERSION = 3
+REPORT_VERSION = 4
 CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
@@ -46,10 +50,29 @@ CONTROL_EXPOSURES = frozenset({"server_fixed"})
 DECLARABLE_RISKS = frozenset(
     risk.value for risk in Risk if risk is not Risk.UNKNOWN
 )
+_CONFIRMATION_RISKS = frozenset(
+    {Risk.UNKNOWN, Risk.FINANCIAL, Risk.DESTRUCTIVE, Risk.CODE_EXEC}
+)
+_BRANCH_RISK_PRIORITY = {
+    Risk.READ_ONLY: 0,
+    Risk.WRITE: 1,
+    Risk.FINANCIAL: 2,
+    Risk.CODE_EXEC: 3,
+    Risk.DESTRUCTIVE: 4,
+}
+_BRANCH_SELECTOR_TOKENS = frozenset({"action", "operation", "method", "command"})
+_MAX_RUNTIME_SELECTOR_INTEGER_ABS = 10 ** MAX_JSON_INTEGER_DIGITS
 CONTROL_VERIFICATION_NOTICE = (
     "Control declarations are supplied by the report author. Their evidence "
     "labels and operational statuses are preserved but are not independently "
     "verified by this scanner."
+)
+
+_MCP_BOOLEAN_TOOL_ANNOTATIONS = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
 )
 
 _SCHEMA_ANNOTATION_KEYS = frozenset(
@@ -171,7 +194,10 @@ _REPORT_TOOL_SENTINEL_KEYS = frozenset(
         "risk_review_required",
         "needs_confirmation",
         "schema_review_required",
+        "annotation_assessments",
         "annotation_conflicts",
+        "branch_risk",
+        "branch_risk_review_required",
         "schema_material_fingerprint_sha256",
         "unmodeled_schema_fingerprint_sha256",
     }
@@ -551,13 +577,21 @@ class ToolDefinition:
 def _entry_is_report_shaped(entry: Any) -> bool:
     if type(entry) is not dict:
         return False
-    if _REPORT_TOOL_SENTINEL_KEYS.intersection(entry):
+    if (
+        "generator" in entry
+        or _REPORT_SENTINEL_KEYS.intersection(entry)
+        or _REPORT_TOOL_SENTINEL_KEYS.intersection(entry)
+    ):
         return True
     function = entry.get("function")
     return (
         entry.get("type") == "function"
         and type(function) is dict
-        and bool(_REPORT_TOOL_SENTINEL_KEYS.intersection(function))
+        and (
+            "generator" in function
+            or bool(_REPORT_SENTINEL_KEYS.intersection(function))
+            or bool(_REPORT_TOOL_SENTINEL_KEYS.intersection(function))
+        )
     )
 
 
@@ -651,6 +685,16 @@ def _select_schema_alias(
     return schema
 
 
+def _validate_tool_annotations(name: str, annotations: Any) -> None:
+    if type(annotations) is not dict:
+        raise SchemaError(f"tool '{name}' has non-object annotations")
+    for annotation in _MCP_BOOLEAN_TOOL_ANNOTATIONS:
+        if annotation in annotations and type(annotations[annotation]) is not bool:
+            raise SchemaError(
+                f"tool '{name}' annotation '{annotation}' must be boolean"
+            )
+
+
 def _tool_from_mapping(
     raw: dict[str, Any],
     *,
@@ -705,8 +749,7 @@ def _tool_from_mapping(
 
     if not isinstance(name, str) or not name.strip():
         raise SchemaError("tool definition is missing a non-empty name")
-    if type(annotations) is not dict:
-        raise SchemaError(f"tool '{name}' has non-object annotations")
+    _validate_tool_annotations(name, annotations)
     return ToolDefinition(
         name=name,
         input_schema=schema,
@@ -856,14 +899,14 @@ def _canonical_decimal_text(value: Decimal) -> str:
     if not value.is_finite():
         raise SchemaError("JSON numbers must be finite")
     sign, raw_digits, exponent = value.as_tuple()
+    prefix = "-" if sign else ""
     digits = list(raw_digits)
     while len(digits) > 1 and digits[-1] == 0:
         digits.pop()
         exponent += 1
     if not any(digits):
-        return "0"
+        return prefix + "0"
 
-    prefix = "-" if sign else ""
     digit_text = "".join(str(digit) for digit in digits)
     point = len(digit_text) + exponent
     if 0 < point <= 128:
@@ -1167,16 +1210,12 @@ def _param(name: str, schema: Any) -> Param:
     # The runtime Param API intentionally accepts only built-in numbers.
     cap = 0.0 if "maximum" in constraints else None
     max_len = constraints.get("max_length")
-    sink = schema.get("x-verb-authority-sink")
-    if not isinstance(sink, bool):
-        sink = None
     return Param(
         name=name,
         type=param_type,
         enum=_policy_json_value(enum) if isinstance(enum, list) else None,
         max_len=max_len,
         cap=cap,
-        sink=sink,
     )
 
 
@@ -1378,6 +1417,26 @@ def _consume_control_declaration_limits(
         if type(raw_risk) is dict and type(raw_risk.get("effects")) is list:
             budget.consume_control_collection_members(len(raw_risk["effects"]))
 
+        raw_branches = raw_tool.get("branches")
+        if type(raw_branches) is dict and type(raw_branches.get("cases")) is list:
+            raw_cases = raw_branches["cases"]
+            budget.consume_control_collection_members(len(raw_cases))
+            for raw_case in raw_cases:
+                if type(raw_case) is not dict:
+                    continue
+                raw_case_risk = raw_case.get("risk")
+                if (
+                    type(raw_case_risk) is dict
+                    and type(raw_case_risk.get("effects")) is list
+                ):
+                    budget.consume_control_collection_members(
+                        len(raw_case_risk["effects"])
+                    )
+                if type(raw_case.get("arguments")) is list:
+                    budget.consume_control_collection_members(
+                        len(raw_case["arguments"])
+                    )
+
         raw_arguments = raw_tool.get("arguments")
         if type(raw_arguments) is not dict:
             continue
@@ -1395,6 +1454,98 @@ def _optional_text(value: Any, *, field: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise SchemaError(f"control declaration field '{field}' must be non-empty text")
     return value.strip()
+
+
+def _same_exact_scalar(left: Any, right: Any) -> bool:
+    """Compare JSON scalars without Python's ``True == 1`` aliasing."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is float and left == 0.0 and right == 0.0:
+        return math.copysign(1.0, left) == math.copysign(1.0, right)
+    if type(left) is Decimal and left.is_zero() and right.is_zero():
+        return left.is_signed() is right.is_signed()
+    return left == right
+
+
+def _require_exact_json_scalar(value: Any, *, field: str) -> Any:
+    if value is None or type(value) in {str, bool, int, float, Decimal}:
+        return value
+    raise SchemaError(f"{field} must be an exact JSON scalar")
+
+
+def _runtime_selector_scalar(value: Any, *, field: str) -> Any:
+    """Normalize an exact parsed JSON scalar for the runtime selector API.
+
+    The strict JSON loader retains non-integer numbers as ``Decimal`` so
+    fingerprints never depend on accidental binary-float rounding. The
+    runtime selector deliberately accepts only ordinary JSON scalar types,
+    however, so a decimal selector is portable only when converting it to a
+    float preserves its canonical JSON spelling exactly.
+    """
+
+    value = _require_exact_json_scalar(value, field=field)
+    if type(value) is int and not (
+        -_MAX_RUNTIME_SELECTOR_INTEGER_ABS
+        < value
+        < _MAX_RUNTIME_SELECTOR_INTEGER_ABS
+    ):
+        raise SchemaError(f"{field} exceeds the portable runtime integer limit")
+    if type(value) is not Decimal:
+        return value
+    converted = float(value)
+    if (
+        not math.isfinite(converted)
+        or canonical_decimal_text(converted) != canonical_decimal_text(value)
+    ):
+        raise SchemaError(
+            f"{field} cannot be represented as an exact portable runtime "
+            "selector value"
+        )
+    return converted
+
+
+def _validated_risk_declaration(raw_risk: Any, *, field: str) -> dict[str, Any]:
+    if not isinstance(raw_risk, dict):
+        raise SchemaError(f"{field} must be an object")
+    _reject_unknown_fields(
+        raw_risk,
+        allowed={"tier", "evidence", "effects", "note"},
+        field=field,
+    )
+    tier = raw_risk.get("tier")
+    evidence = raw_risk.get("evidence")
+    if tier not in DECLARABLE_RISKS:
+        raise SchemaError(
+            f"risk tier in {field} must be one of: "
+            + ", ".join(sorted(DECLARABLE_RISKS))
+        )
+    if evidence not in CONTROL_EVIDENCE:
+        raise SchemaError(
+            f"{field} evidence must be one of: "
+            + ", ".join(sorted(CONTROL_EVIDENCE))
+        )
+    raw_effects = raw_risk.get("effects")
+    if not isinstance(raw_effects, list) or not raw_effects:
+        raise SchemaError(f"{field} effects must be a non-empty array")
+    effects: list[str] = []
+    for effect_index, raw_effect in enumerate(raw_effects, start=1):
+        effect = _optional_text(
+            raw_effect,
+            field=f"{field}.effects[{effect_index}]",
+        )
+        if effect is None:
+            raise SchemaError(
+                f"{field} effect {effect_index} must be non-empty text"
+            )
+        if effect in effects:
+            raise SchemaError(f"duplicate effect in {field}: {effect}")
+        effects.append(effect)
+    normalized = {"tier": tier, "evidence": evidence, "effects": effects}
+    note = _optional_text(raw_risk.get("note"), field=f"{field}.note")
+    if note is not None:
+        normalized["note"] = note
+    return normalized
 
 
 def _reject_unknown_fields(
@@ -1453,67 +1604,153 @@ def _validate_control_declarations(
             raise SchemaError(f"control declaration for '{tool_name}' must be an object")
         _reject_unknown_fields(
             raw_tool,
-            allowed={"risk", "arguments", "unexposed_arguments"},
+            allowed={"risk", "branches", "arguments", "unexposed_arguments"},
             field=f"control declaration for '{tool_name}'",
         )
 
         raw_risk = raw_tool.get("risk")
         risk_declaration: dict[str, Any] | None = None
         if raw_risk is not None:
-            if not isinstance(raw_risk, dict):
-                raise SchemaError(
-                    f"risk declaration for '{tool_name}' must be an object"
-                )
-            _reject_unknown_fields(
+            risk_declaration = _validated_risk_declaration(
                 raw_risk,
-                allowed={"tier", "evidence", "effects", "note"},
                 field=f"risk declaration for '{tool_name}'",
             )
-            tier = raw_risk.get("tier")
-            evidence = raw_risk.get("evidence")
-            if tier not in DECLARABLE_RISKS:
-                raise SchemaError(
-                    f"risk tier for '{tool_name}' must be one of: "
-                    + ", ".join(sorted(DECLARABLE_RISKS))
-                )
-            if evidence not in CONTROL_EVIDENCE:
-                raise SchemaError(
-                    f"risk evidence for '{tool_name}' must be one of: "
-                    + ", ".join(sorted(CONTROL_EVIDENCE))
-                )
-            raw_effects = raw_risk.get("effects")
-            if not isinstance(raw_effects, list) or not raw_effects:
-                raise SchemaError(
-                    f"risk effects for '{tool_name}' must be a non-empty array"
-                )
-            effects: list[str] = []
-            for effect_index, raw_effect in enumerate(raw_effects, start=1):
-                effect = _optional_text(
-                    raw_effect,
-                    field=f"{tool_name}.risk.effects[{effect_index}]",
-                )
-                if effect is None:
-                    raise SchemaError(
-                        f"risk effect {effect_index} for '{tool_name}' "
-                        "must be non-empty text"
-                    )
-                if effect in effects:
-                    raise SchemaError(
-                        f"duplicate risk effect for '{tool_name}': {effect}"
-                    )
-                effects.append(effect)
-            risk_declaration = {
-                "tier": tier,
-                "evidence": evidence,
-                "effects": effects,
-            }
-            risk_note = _optional_text(
-                raw_risk.get("note"), field=f"{tool_name}.risk.note"
-            )
-            if risk_note is not None:
-                risk_declaration["note"] = risk_note
 
         properties, _ = _properties(definitions_by_name[tool_name])
+        raw_branches = raw_tool.get("branches")
+        branch_declaration: dict[str, Any] | None = None
+        if raw_branches is not None:
+            if risk_declaration is not None:
+                raise SchemaError(
+                    f"control declaration for '{tool_name}' cannot combine "
+                    "tool risk with branch risk"
+                )
+            if not isinstance(raw_branches, dict):
+                raise SchemaError(
+                    f"branch declaration for '{tool_name}' must be an object"
+                )
+            _reject_unknown_fields(
+                raw_branches,
+                allowed={"selector", "cases"},
+                field=f"branch declaration for '{tool_name}'",
+            )
+            selector = _optional_text(
+                raw_branches.get("selector"),
+                field=f"{tool_name}.branches.selector",
+            )
+            if selector is None or selector not in properties:
+                raise SchemaError(
+                    f"branch selector for '{tool_name}' must name an exposed "
+                    "schema argument"
+                )
+            selector_schema = properties[selector]
+            selector_enum = (
+                selector_schema.get("enum")
+                if type(selector_schema) is dict
+                else None
+            )
+            if not isinstance(selector_enum, list) or not selector_enum:
+                raise SchemaError(
+                    f"branch selector '{tool_name}.{selector}' must have a "
+                    "non-empty enum"
+                )
+            runtime_selector_enum = []
+            for enum_index, enum_value in enumerate(selector_enum, start=1):
+                runtime_selector_enum.append(
+                    _runtime_selector_scalar(
+                        enum_value,
+                        field=(
+                            f"branch selector '{tool_name}.{selector}' enum"
+                            f"[{enum_index}]"
+                        ),
+                    )
+                )
+
+            raw_cases = raw_branches.get("cases")
+            if not isinstance(raw_cases, list) or not raw_cases:
+                raise SchemaError(
+                    f"branch cases for '{tool_name}' must be a non-empty array"
+                )
+            normalized_by_enum_index: dict[int, dict[str, Any]] = {}
+            for case_index, raw_case in enumerate(raw_cases, start=1):
+                case_field = f"{tool_name}.branches.cases[{case_index}]"
+                if not isinstance(raw_case, dict):
+                    raise SchemaError(f"{case_field} must be an object")
+                _reject_unknown_fields(
+                    raw_case,
+                    allowed={"value", "risk", "arguments"},
+                    field=case_field,
+                )
+                if "value" not in raw_case:
+                    raise SchemaError(f"{case_field} is missing value")
+                value = _runtime_selector_scalar(
+                    raw_case["value"], field=f"{case_field}.value"
+                )
+                matching_enum_indexes = [
+                    enum_index
+                    for enum_index, enum_value in enumerate(runtime_selector_enum)
+                    if _same_exact_scalar(value, enum_value)
+                ]
+                if len(matching_enum_indexes) != 1:
+                    raise SchemaError(
+                        f"{case_field}.value must match exactly one selector "
+                        "enum member"
+                    )
+                enum_index = matching_enum_indexes[0]
+                if enum_index in normalized_by_enum_index:
+                    raise SchemaError(
+                        f"duplicate exact branch case for '{tool_name}.{selector}'"
+                    )
+                case_risk = _validated_risk_declaration(
+                    raw_case.get("risk"), field=f"{case_field}.risk"
+                )
+                raw_active = raw_case.get("arguments")
+                if not isinstance(raw_active, list) or not raw_active:
+                    raise SchemaError(
+                        f"{case_field}.arguments must be a non-empty array"
+                    )
+                active_seen: set[str] = set()
+                for active_index, active_name in enumerate(raw_active, start=1):
+                    if (
+                        not isinstance(active_name, str)
+                        or not active_name.strip()
+                        or active_name not in properties
+                    ):
+                        raise SchemaError(
+                            f"{case_field}.arguments[{active_index}] must name "
+                            "an exposed schema argument"
+                        )
+                    if active_name in active_seen:
+                        raise SchemaError(
+                            f"duplicate active argument in {case_field}: "
+                            f"{active_name}"
+                        )
+                    active_seen.add(active_name)
+                if selector not in active_seen:
+                    raise SchemaError(
+                        f"{case_field}.arguments must include selector '{selector}'"
+                    )
+                normalized_by_enum_index[enum_index] = {
+                    "value": value,
+                    "risk": case_risk,
+                    "arguments": [
+                        argument_name
+                        for argument_name in properties
+                        if argument_name in active_seen
+                    ],
+                }
+            if set(normalized_by_enum_index) != set(range(len(selector_enum))):
+                raise SchemaError(
+                    f"branch cases for '{tool_name}' must exhaust the selector enum"
+                )
+            branch_declaration = {
+                "selector": selector,
+                "cases": [
+                    normalized_by_enum_index[index]
+                    for index in range(len(selector_enum))
+                ],
+            }
+
         raw_arguments = raw_tool.get("arguments", {})
         if not isinstance(raw_arguments, dict):
             raise SchemaError(f"control arguments for '{tool_name}' must be an object")
@@ -1707,6 +1944,8 @@ def _validate_control_declarations(
         }
         if risk_declaration is not None:
             normalized_tool["risk"] = risk_declaration
+        if branch_declaration is not None:
+            normalized_tool["branches"] = branch_declaration
         normalized_tools[tool_name] = normalized_tool
 
     return {
@@ -1744,23 +1983,215 @@ def _reason(param: Param, policy: Policy, confidence: Confidence, risk: Risk) ->
     return "typed or bounded value"
 
 
-def _annotation_conflicts(risk: Risk, annotations: dict[str, Any]) -> list[str]:
-    conflicts: list[str] = []
+def _annotation_assessment(
+    annotation: str,
+    value: bool,
+    state: str,
+    *,
+    comparison_source: str,
+    comparison_value: Any,
+) -> dict[str, Any]:
+    return {
+        "annotation": annotation,
+        "value": value,
+        "state": state,
+        "evidence_source": "mcp_tool_annotation",
+        "trust": "unverified_hint",
+        "comparison_source": comparison_source,
+        "comparison_value": comparison_value,
+    }
+
+
+def _annotation_assessments(
+    risk: Risk, annotations: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Keep MCP hints as evidence without turning uncertainty into conflict."""
+
+    assessments: list[dict[str, Any]] = []
     read_only = annotations.get("readOnlyHint")
-    destructive = annotations.get("destructiveHint")
-    if read_only is True and risk is not Risk.READ_ONLY:
-        conflicts.append("readOnlyHint=true conflicts with effective risk")
-    elif read_only is False and risk is Risk.READ_ONLY:
-        conflicts.append("readOnlyHint=false conflicts with effective risk")
-    if destructive is True and risk is not Risk.DESTRUCTIVE:
-        conflicts.append("destructiveHint=true conflicts with effective risk")
-    elif (
-        destructive is False
-        and read_only is not True
-        and risk is Risk.DESTRUCTIVE
-    ):
-        conflicts.append("destructiveHint=false conflicts with effective risk")
-    return conflicts
+
+    if read_only is not None:
+        if risk is Risk.UNKNOWN:
+            state = "unresolved"
+        else:
+            expected_read_only = risk is Risk.READ_ONLY
+            state = "consistent" if read_only is expected_read_only else "conflict"
+        assessments.append(
+            _annotation_assessment(
+                "readOnlyHint",
+                read_only,
+                state,
+                comparison_source="effective_risk",
+                comparison_value=risk.value,
+            )
+        )
+
+    if "destructiveHint" in annotations:
+        destructive = annotations["destructiveHint"]
+        if read_only is True:
+            assessments.append(
+                _annotation_assessment(
+                    "destructiveHint",
+                    destructive,
+                    "inapplicable",
+                    comparison_source="readOnlyHint",
+                    comparison_value=True,
+                )
+            )
+        else:
+            if risk is Risk.UNKNOWN:
+                state = "unresolved"
+            else:
+                expected_destructive = risk is Risk.DESTRUCTIVE
+                state = (
+                    "consistent"
+                    if destructive is expected_destructive
+                    else "conflict"
+                )
+            assessments.append(
+                _annotation_assessment(
+                    "destructiveHint",
+                    destructive,
+                    state,
+                    comparison_source="effective_risk",
+                    comparison_value=risk.value,
+                )
+            )
+
+    if "idempotentHint" in annotations:
+        idempotent = annotations["idempotentHint"]
+        if read_only is True:
+            state = "inapplicable"
+            comparison_source = "readOnlyHint"
+            comparison_value: Any = True
+        else:
+            state = "unresolved"
+            comparison_source = "none"
+            comparison_value = None
+        assessments.append(
+            _annotation_assessment(
+                "idempotentHint",
+                idempotent,
+                state,
+                comparison_source=comparison_source,
+                comparison_value=comparison_value,
+            )
+        )
+
+    if "openWorldHint" in annotations:
+        assessments.append(
+            _annotation_assessment(
+                "openWorldHint",
+                annotations["openWorldHint"],
+                "unresolved",
+                comparison_source="none",
+                comparison_value=None,
+            )
+        )
+
+    return assessments
+
+
+def _annotation_conflicts(
+    assessments: list[dict[str, Any]],
+) -> list[str]:
+    return [
+        f"{assessment['annotation']}={str(assessment['value']).lower()} "
+        "conflicts with effective risk"
+        for assessment in assessments
+        if assessment["state"] == "conflict"
+    ]
+
+
+def _worst_branch_risk(branches: dict[str, Any]) -> Risk:
+    return max(
+        (Risk(case["risk"]["tier"]) for case in branches["cases"]),
+        key=lambda risk: _BRANCH_RISK_PRIORITY[risk],
+    )
+
+
+def _branch_selector_candidate(
+    definition: ToolDefinition,
+    params: list[Param],
+    risk: Risk,
+    inference_context: _PolicyInferenceContext,
+) -> bool:
+    """Flag unresolved enum selectors without inventing branch semantics.
+
+    A raw schema can prove only membership in an enum, not what each member
+    does.  Consequential or unresolved tools therefore keep any ambiguous enum
+    argument locked and expose the missing branch declaration as review debt.
+    """
+
+    if risk is Risk.READ_ONLY:
+        return False
+    for param in params:
+        if param.type != "enum":
+            continue
+        if not is_branch_selector_name(param.name, inference_context):
+            continue
+        policy, confidence = infer_policy(param, inference_context)
+        if policy is Policy.TRUSTED_FIXED and confidence is Confidence.UNCERTAIN:
+            return True
+    return False
+
+
+def is_branch_selector_name(
+    name: str,
+    inference_context: _PolicyInferenceContext | None = None,
+) -> bool:
+    """Recognize complete-token, camel-case, and flat selector suffixes."""
+
+    semantic_tokens = tuple(
+        token
+        for token in _identifier_tokens(name, inference_context)
+        if not token.isdigit()
+    )
+    compact_segments = _compact_identifier_segments(name, inference_context)
+    return bool(_BRANCH_SELECTOR_TOKENS.intersection(semantic_tokens)) or any(
+        token.endswith(suffix) and token != suffix
+        for token in semantic_tokens
+        for suffix in _BRANCH_SELECTOR_TOKENS
+    ) or any(
+        segment == suffix or segment.endswith(suffix)
+        for segment in compact_segments
+        for suffix in _BRANCH_SELECTOR_TOKENS
+    )
+
+
+def _branch_risk_report(
+    branches: dict[str, Any],
+    *,
+    properties: dict[str, Any],
+    redact_names: bool,
+) -> dict[str, Any]:
+    display_names = {
+        name: f"param_{index:03d}" if redact_names else name
+        for index, name in enumerate(properties, start=1)
+    }
+    cases = []
+    for case in branches["cases"]:
+        risk = case["risk"]
+        item: dict[str, Any] = {
+            "value_fingerprint_sha256": _enum_value_fingerprint(case["value"]),
+            "risk": risk["tier"],
+            "evidence": risk["evidence"],
+            "effects": list(risk["effects"]),
+            "active_arguments": [
+                display_names[name] for name in case["arguments"]
+            ],
+            "needs_confirmation": Risk(risk["tier"]) in _CONFIRMATION_RISKS,
+        }
+        if "note" in risk:
+            item["note"] = risk["note"]
+        cases.append(item)
+    cases.sort(key=lambda item: item["value_fingerprint_sha256"])
+    return {
+        "source": "control_declaration",
+        "selector": display_names[branches["selector"]],
+        "value_disclosure": "sha256_fingerprint_only",
+        "cases": cases,
+    }
 
 
 def _fingerprint(
@@ -1880,6 +2311,12 @@ def _declared_controls_report(
             # report. Keep the public report an actual JSON tree rather than
             # sharing a compact Python object graph between those locations.
             tool_item["risk"] = copy.deepcopy(declared_tool["risk"])
+        if "branches" in declared_tool:
+            tool_item["branches"] = _branch_risk_report(
+                declared_tool["branches"],
+                properties=properties,
+                redact_names=redact_names,
+            )
         tools.append(tool_item)
 
     report = {
@@ -1912,6 +2349,7 @@ def _scan_definitions_bounded(
             raise SchemaError("tool definitions must use ToolDefinition values")
         if type(definition.name) is not str or not definition.name.strip():
             raise SchemaError("tool definition is missing a non-empty name")
+        _validate_tool_annotations(definition.name, definition.annotations)
         for source_field, source_value in (
             ("source_id", definition.source_id),
             ("source_url", definition.source_url),
@@ -1971,7 +2409,6 @@ def _scan_definitions_bounded(
         if definition.name in registry.tools:
             raise SchemaError(f"duplicate tool name: {definition.name}")
         properties, required = _properties(definition)
-        params = [_param(name, raw) for name, raw in properties.items()]
         declared_tool = (
             declarations["tools"].get(definition.name) if declarations else None
         )
@@ -1980,7 +2417,57 @@ def _scan_definitions_bounded(
             if declared_tool is not None and "risk" in declared_tool
             else None
         )
-        registry.add(Tool(definition.name, params, risk=declared_risk))
+        declared_branches = (
+            declared_tool.get("branches") if declared_tool is not None else None
+        )
+        params = []
+        for name, raw in properties.items():
+            if (
+                declared_branches is not None
+                and name == declared_branches["selector"]
+            ):
+                # Branch validation has already converted exact Decimal input
+                # only when it has a lossless portable float representation.
+                # Feed those same runtime scalars to Param so the enum and the
+                # SelectorCase values cannot disagree after JSON loading.
+                selector_schema = (
+                    copy.deepcopy(raw) if isinstance(raw, dict) else {}
+                )
+                selector_schema["enum"] = [
+                    case["value"] for case in declared_branches["cases"]
+                ]
+                params.append(_param(name, selector_schema))
+            else:
+                params.append(_param(name, raw))
+        selector_cases = (
+            [
+                SelectorCase(
+                    value=case["value"],
+                    risk=case["risk"]["tier"],
+                    active_args=list(case["arguments"]),
+                )
+                for case in declared_branches["cases"]
+            ]
+            if declared_branches is not None
+            else None
+        )
+        registry.add(
+            Tool(
+                definition.name,
+                params,
+                # Branch evidence says what each operation does; it says
+                # nothing about who may author an argument. Keep the coarse
+                # risk input identical to a scan without branch declarations
+                # so branch metadata can never relax provenance inference.
+                risk=declared_risk,
+                selector=(
+                    declared_branches["selector"]
+                    if declared_branches is not None
+                    else None
+                ),
+                selector_cases=selector_cases,
+            )
+        )
         params_by_tool[definition.name] = params
         required_by_tool[definition.name] = required
 
@@ -1998,17 +2485,19 @@ def _scan_definitions_bounded(
         "data_fillable_parameters": 0,
         "review_required": 0,
         "schema_review_required_tools": 0,
-        "confirmation_required_tools": len(policy_set.confirm),
-        "risk_review_required_tools": len(policy_set.risk_review),
-        "risk_conflicts": len(policy_set.risk_conflicts),
+        "confirmation_required_tools": 0,
+        "risk_review_required_tools": 0,
+        "risk_conflicts": 0,
         "annotation_conflicts": 0,
+        "branch_risk_review_required_tools": 0,
     }
 
     for tool_index, definition in enumerate(definitions, start=1):
         tool_name = definition.name
         display_tool = f"tool_{tool_index:03d}" if redact_names else tool_name
         properties, _ = _properties(definition)
-        risk = policy_set.risk[tool_name]
+        inference_risk = policy_set.risk[tool_name]
+        risk = inference_risk
         inferred_risk = policy_set.risk_inference[tool_name]
         declared_tool = (
             declarations["tools"].get(tool_name) if declarations else None
@@ -2016,7 +2505,35 @@ def _scan_definitions_bounded(
         declared_risk = (
             declared_tool.get("risk") if declared_tool is not None else None
         )
-        conflicts = _annotation_conflicts(risk, definition.annotations)
+        declared_branches = (
+            declared_tool.get("branches") if declared_tool is not None else None
+        )
+        branch_report = (
+            _branch_risk_report(
+                declared_branches,
+                properties=properties,
+                redact_names=redact_names,
+            )
+            if declared_branches is not None
+            else None
+        )
+        if declared_branches is not None:
+            risk = _worst_branch_risk(declared_branches)
+        branch_review_required = (
+            declared_branches is None
+            and _branch_selector_candidate(
+                definition,
+                params_by_tool[tool_name],
+                risk,
+                inference_context,
+            )
+        )
+        if branch_review_required:
+            counts["branch_risk_review_required_tools"] += 1
+        annotation_assessments = _annotation_assessments(
+            risk, definition.annotations
+        )
+        conflicts = _annotation_conflicts(annotation_assessments)
         counts["annotation_conflicts"] += len(conflicts)
         schema_closes_unknown_arguments = _schema_closes_unknown_arguments(
             definition
@@ -2055,7 +2572,9 @@ def _scan_definitions_bounded(
                 "policy": final_policy.value,
                 "confidence": confidence.value,
                 "review_required": needs_review,
-                "reason": _reason(param, final_policy, confidence, risk),
+                "reason": _reason(
+                    param, final_policy, confidence, inference_risk
+                ),
             }
             constraints = _normalized_constraints(
                 properties.get(param.name), redact_values=redact_names
@@ -2078,14 +2597,37 @@ def _scan_definitions_bounded(
         else:
             risk_inference["matched_tokens"] = list(inferred_risk.matched_tokens)
 
-        risk_conflict = tool_name in policy_set.risk_conflicts
+        risk_conflict = (
+            False
+            if declared_branches is not None
+            else tool_name in policy_set.risk_conflicts
+        )
         inference_incomplete = inferred_risk.source == "inference_limit"
-        if risk_conflict:
+        if declared_branches is not None:
+            risk_source = "branch_control_declaration"
+        elif risk_conflict:
             risk_source = "conflict_safe_default"
         elif declared_risk is not None and not inference_incomplete:
             risk_source = "control_declaration"
         else:
             risk_source = "safe_default"
+
+        risk_review_required = (
+            False
+            if declared_branches is not None
+            else tool_name in policy_set.risk_review
+        )
+        needs_confirmation = (
+            any(
+                Risk(case["risk"]["tier"]) in _CONFIRMATION_RISKS
+                for case in declared_branches["cases"]
+            )
+            if declared_branches is not None
+            else tool_name in policy_set.confirm
+        )
+        counts["risk_conflicts"] += int(risk_conflict)
+        counts["risk_review_required_tools"] += int(risk_review_required)
+        counts["confirmation_required_tools"] += int(needs_confirmation)
 
         tool_report: dict[str, Any] = {
             "name": display_tool,
@@ -2104,10 +2646,13 @@ def _scan_definitions_bounded(
             "risk_inference": risk_inference,
             "declared_risk": declared_risk,
             "risk_conflict": risk_conflict,
-            "risk_review_required": tool_name in policy_set.risk_review,
-            "needs_confirmation": tool_name in policy_set.confirm,
+            "risk_review_required": risk_review_required,
+            "needs_confirmation": needs_confirmation,
+            "branch_risk": branch_report,
+            "branch_risk_review_required": branch_review_required,
             "schema_closes_unknown_arguments": schema_closes_unknown_arguments,
             "schema_review_required": schema_review_required,
+            "annotation_assessments": annotation_assessments,
             "annotation_conflicts": conflicts,
             "arguments": arguments,
         }
@@ -2136,6 +2681,8 @@ def _scan_definitions_bounded(
             "enum_values_included": False,
             "enum_value_fingerprints_included": not redact_names,
             "enum_value_fingerprints_dictionary_guessable": not redact_names,
+            "branch_value_fingerprints_included": True,
+            "branch_value_fingerprints_dictionary_guessable": True,
             "schema_material_fingerprints_included": not redact_names,
             "schema_material_fingerprints_dictionary_guessable": not redact_names,
             "unmodeled_schema_fingerprints_included": not redact_names,
@@ -2347,6 +2894,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Schemas requiring review | {summary.get('schema_review_required_tools', 0)} |",
         f"| Tools requiring confirmation | {summary['confirmation_required_tools']} |",
         f"| Tool risks requiring review | {summary['risk_review_required_tools']} |",
+        f"| Branch risks requiring review | {summary['branch_risk_review_required_tools']} |",
         f"| Tool risk conflicts | {summary['risk_conflicts']} |",
         f"| Annotation conflicts | {summary['annotation_conflicts']} |",
         "",
@@ -2410,6 +2958,79 @@ def render_markdown(report: dict[str, Any]) -> str:
                 confirmation="yes" if tool["needs_confirmation"] else "no",
             )
         )
+    branch_rows = [
+        (tool, case)
+        for tool in report["tools"]
+        if tool["branch_risk"] is not None
+        for case in tool["branch_risk"]["cases"]
+    ]
+    if branch_rows:
+        lines.extend(
+            [
+                "",
+                "## Declared branch risk",
+                "",
+                "> Selector values are omitted; stable SHA-256 fingerprints are "
+                "shown instead.",
+                "",
+                "| Tool | Selector | Value fingerprint | Risk | Evidence | "
+                "Active arguments | Confirmation | Effects |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for tool, case in branch_rows:
+            branch = tool["branch_risk"]
+            lines.append(
+                "| {tool} | {selector} | `{fingerprint}` | {risk} | "
+                "{evidence} | {arguments} | {confirmation} | {effects} |".format(
+                    tool=_markdown_cell(tool["name"]),
+                    selector=_markdown_cell(branch["selector"]),
+                    fingerprint=case["value_fingerprint_sha256"],
+                    risk=_markdown_cell(case["risk"]),
+                    evidence=_markdown_cell(case["evidence"]),
+                    arguments=_markdown_cell(", ".join(case["active_arguments"])),
+                    confirmation="yes" if case["needs_confirmation"] else "no",
+                    effects=_markdown_cell(", ".join(case["effects"])),
+                )
+            )
+    annotation_rows = [
+        (tool, assessment)
+        for tool in report["tools"]
+        for assessment in tool["annotation_assessments"]
+    ]
+    if annotation_rows:
+        lines.extend(
+            [
+                "",
+                "## MCP annotation evidence",
+                "",
+                "> Tool annotations are unverified server hints, not enforcement "
+                "evidence.",
+                "",
+                "| Tool | Annotation | Value | State | Comparison source | "
+                "Comparison value |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for tool, assessment in annotation_rows:
+            comparison_value = assessment["comparison_value"]
+            if comparison_value is None:
+                comparison_display = "—"
+            elif type(comparison_value) is bool:
+                comparison_display = str(comparison_value).lower()
+            else:
+                comparison_display = str(comparison_value)
+            lines.append(
+                "| {tool} | {annotation} | {value} | {state} | {source} | "
+                "{comparison} |".format(
+                    tool=_markdown_cell(tool["name"]),
+                    annotation=_markdown_cell(assessment["annotation"]),
+                    value="true" if assessment["value"] else "false",
+                    state=_markdown_cell(assessment["state"]),
+                    source=_markdown_cell(assessment["comparison_source"]),
+                    comparison=_markdown_cell(comparison_display),
+                )
+            )
     declared_controls = report.get("declared_controls")
     if declared_controls is not None:
         lines.extend(
@@ -2518,6 +3139,22 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _summary_requires_review(summary: dict[str, Any]) -> bool:
+    """Return whether a scanner summary carries any advertised review debt."""
+
+    return any(
+        summary[field]
+        for field in (
+            "review_required",
+            "schema_review_required_tools",
+            "risk_review_required_tools",
+            "risk_conflicts",
+            "annotation_conflicts",
+            "branch_risk_review_required_tools",
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Scan exported MCP/OpenAI/Anthropic tool schemas locally."
@@ -2580,14 +3217,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(rendered, end="" if rendered.endswith("\n") else "\n")
 
-    summary = report["summary"]
-    if args.fail_on_review and (
-        summary["review_required"]
-        or summary.get("schema_review_required_tools", 0)
-        or summary["risk_review_required_tools"]
-        or summary["risk_conflicts"]
-        or summary["annotation_conflicts"]
-    ):
+    if args.fail_on_review and _summary_requires_review(report["summary"]):
         return 2
     return 0
 

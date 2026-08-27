@@ -11,20 +11,24 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+import math
+import sys
 import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from verb_authority import infer_risk
 from verb_authority_scan import (
     CONTROL_VERIFICATION_NOTICE,
     MAX_SCAN_ARGUMENTS,
     MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
     MAX_SCAN_ENUM_MEMBERS,
     MAX_SCAN_TOOL_DEFINITIONS,
-    REPORT_VERSION,
     SchemaError,
+    _summary_requires_review,
     canonical_decimal_text,
+    is_branch_selector_name,
     is_report_shaped_document,
     load_json_path,
     scan_documents,
@@ -33,6 +37,7 @@ from verb_authority_scan import (
 
 
 DIFF_VERSION = 2
+_SUPPORTED_REPORT_VERSION = 4
 
 _CLASSIFICATION_ORDER = {
     "authority_increase": 0,
@@ -60,7 +65,12 @@ _POLICIES = frozenset(_POLICY_RANK)
 _DECLARED_AUTHORITIES = frozenset(_DECLARED_AUTHORITY_RANK)
 _RISKS = frozenset({"unknown", *_RISK_RANK})
 _RISK_SOURCES = frozenset(
-    {"safe_default", "control_declaration", "conflict_safe_default"}
+    {
+        "safe_default",
+        "control_declaration",
+        "branch_control_declaration",
+        "conflict_safe_default",
+    }
 )
 _RISK_INFERENCE_SOURCES = frozenset({"tool_name", "inference_limit"})
 _RISK_CONFIDENCES = frozenset({"heuristic", "uncertain"})
@@ -68,10 +78,43 @@ _ARGUMENT_CONFIDENCES = frozenset({"high", "uncertain"})
 _CONFIRMATION_RISKS = frozenset(
     {"unknown", "financial", "destructive", "code_exec"}
 )
+_BRANCH_RISK_PRIORITY = {
+    "read_only": 0,
+    "write": 1,
+    "financial": 2,
+    "code_exec": 3,
+    "destructive": 4,
+}
 _EVIDENCE = frozenset({"observed", "declared", "attested"})
 _BOUND_MUTABILITY = frozenset({"immutable", "trusted_party", "caller"})
 _BOUND_STATUS = frozenset({"enforced", "specified", "not_stated"})
+_MCP_ANNOTATION_ORDER = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+)
+_MCP_ANNOTATIONS = frozenset(_MCP_ANNOTATION_ORDER)
+_ANNOTATION_STATES = frozenset(
+    {"consistent", "conflict", "unresolved", "inapplicable"}
+)
+_ANNOTATION_COMPARISON_SOURCES = frozenset(
+    {"effective_risk", "readOnlyHint", "none"}
+)
+_ANNOTATION_ASSESSMENT_FIELDS = frozenset(
+    {
+        "annotation",
+        "value",
+        "state",
+        "evidence_source",
+        "trust",
+        "comparison_source",
+        "comparison_value",
+    }
+)
 _HEX = frozenset("0123456789abcdef")
+
+
 class DiffError(ValueError):
     """Raised when reports cannot be correlated safely."""
 
@@ -175,13 +218,13 @@ def _validate_declared_risk(value: Any, *, field: str) -> None:
         _require_scanner_normalized_text(risk["note"], field=f"{field}.note")
 
 
-def _validate_report_risk_coherence(
+def _validate_risk_inference_coherence(
     tool: dict[str, Any],
     *,
     name: str,
     matched_tokens_included: bool,
 ) -> None:
-    """Reject report-v3 risk tuples the scanner could never emit."""
+    """Reject inferred-risk evidence tuples the scanner could never emit."""
 
     inference = tool["risk_inference"]
     inference_source = inference["source"]
@@ -196,7 +239,10 @@ def _validate_report_risk_coherence(
 
     matched_tokens = inference.get("matched_tokens")
     if matched_tokens_included:
-        if any(not token for token in matched_tokens):
+        if (
+            any(not token for token in matched_tokens)
+            or len(matched_tokens) != len(set(matched_tokens))
+        ):
             raise DiffError(f"tool '{name}' has invalid risk inference tokens")
         if inference_source == "inference_limit":
             inference_coherent = (
@@ -214,11 +260,42 @@ def _validate_report_risk_coherence(
             )
         if not inference_coherent:
             raise DiffError(f"tool '{name}' has inconsistent risk inference")
+        if inference_source == "tool_name":
+            expected = infer_risk(name)
+            if (
+                inferred_risk != expected.risk.value
+                or inference_confidence != expected.confidence.value
+                or matched_tokens != list(expected.matched_tokens)
+            ):
+                raise DiffError(f"tool '{name}' has inconsistent risk inference")
     elif inference_source == "inference_limit" and (
         inferred_risk != "unknown" or inference_confidence != "uncertain"
     ):
         raise DiffError(f"tool '{name}' has inconsistent risk inference")
+    elif inference_source == "tool_name" and (
+        (inferred_risk == "unknown" and inference_confidence != "uncertain")
+        or (inferred_risk != "unknown" and inference_confidence != "heuristic")
+    ):
+        raise DiffError(f"tool '{name}' has inconsistent risk inference")
 
+
+def _validate_report_risk_coherence(
+    tool: dict[str, Any],
+    *,
+    name: str,
+    matched_tokens_included: bool,
+) -> None:
+    """Reject complete non-branch risk tuples the scanner could never emit."""
+
+    _validate_risk_inference_coherence(
+        tool,
+        name=name,
+        matched_tokens_included=matched_tokens_included,
+    )
+
+    inference = tool["risk_inference"]
+    inference_source = inference["source"]
+    inferred_risk = tool["inferred_risk"]
     declared = tool["declared_risk"]
     declared_tier = declared["tier"] if declared is not None else None
     inference_incomplete = inference_source == "inference_limit"
@@ -334,6 +411,329 @@ def _validate_report_argument(
             )
 
 
+def _same_exact_scalar(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if type(left) is float and left == 0.0 and right == 0.0:
+        return math.copysign(1.0, left) == math.copysign(1.0, right)
+    if type(left) is Decimal and left.is_zero() and right.is_zero():
+        return left.is_signed() is right.is_signed()
+    return left == right
+
+
+def _validate_annotation_assessments(
+    tool: dict[str, Any], *, name: str
+) -> None:
+    raw_assessments = _require_array(
+        tool.get("annotation_assessments"),
+        field=f"tool '{name}' annotation assessments",
+    )
+    assessments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    order: list[int] = []
+
+    for index, raw_assessment in enumerate(raw_assessments, start=1):
+        field = f"tool '{name}' annotation assessment[{index}]"
+        assessment = _require_object(raw_assessment, field=field)
+        _reject_unknown_fields(
+            assessment,
+            allowed=_ANNOTATION_ASSESSMENT_FIELDS,
+            field=field,
+        )
+        missing = sorted(_ANNOTATION_ASSESSMENT_FIELDS - set(assessment))
+        if missing:
+            raise DiffError(
+                f"{field} is missing required fields: " + ", ".join(missing)
+            )
+
+        annotation = _require_text(
+            assessment["annotation"], field=f"{field}.annotation"
+        )
+        if annotation not in _MCP_ANNOTATIONS:
+            raise DiffError(f"{field}.annotation is unsupported")
+        if annotation in seen:
+            raise DiffError(
+                f"tool '{name}' contains duplicate annotation assessment: "
+                f"{annotation}"
+            )
+        seen.add(annotation)
+        order.append(_MCP_ANNOTATION_ORDER.index(annotation))
+
+        _require_bool(assessment["value"], field=f"{field}.value")
+        state = _require_text(assessment["state"], field=f"{field}.state")
+        if state not in _ANNOTATION_STATES:
+            raise DiffError(f"{field}.state is unsupported")
+        if assessment["evidence_source"] != "mcp_tool_annotation":
+            raise DiffError(f"{field}.evidence_source is unsupported")
+        if assessment["trust"] != "unverified_hint":
+            raise DiffError(f"{field}.trust is unsupported")
+        comparison_source = _require_text(
+            assessment["comparison_source"],
+            field=f"{field}.comparison_source",
+        )
+        if comparison_source not in _ANNOTATION_COMPARISON_SOURCES:
+            raise DiffError(f"{field}.comparison_source is unsupported")
+        assessments.append(assessment)
+
+    if order != sorted(order):
+        raise DiffError(
+            f"tool '{name}' annotation assessments are not in canonical order"
+        )
+
+    by_annotation = {
+        assessment["annotation"]: assessment for assessment in assessments
+    }
+    read_only = by_annotation.get("readOnlyHint")
+    read_only_value = read_only["value"] if read_only is not None else None
+    risk = tool["risk"]
+
+    for assessment in assessments:
+        annotation = assessment["annotation"]
+        value = assessment["value"]
+        if annotation == "readOnlyHint":
+            expected_read_only = risk == "read_only"
+            expected_state = (
+                "unresolved"
+                if risk == "unknown"
+                else "consistent" if value is expected_read_only else "conflict"
+            )
+            expected_source = "effective_risk"
+            expected_value: Any = risk
+        elif annotation == "destructiveHint":
+            if read_only_value is True:
+                expected_state = "inapplicable"
+                expected_source = "readOnlyHint"
+                expected_value = True
+            else:
+                expected_destructive = risk == "destructive"
+                expected_state = (
+                    "unresolved"
+                    if risk == "unknown"
+                    else (
+                        "consistent"
+                        if value is expected_destructive
+                        else "conflict"
+                    )
+                )
+                expected_source = "effective_risk"
+                expected_value = risk
+        elif annotation == "idempotentHint":
+            if read_only_value is True:
+                expected_state = "inapplicable"
+                expected_source = "readOnlyHint"
+                expected_value = True
+            else:
+                expected_state = "unresolved"
+                expected_source = "none"
+                expected_value = None
+        else:
+            expected_state = "unresolved"
+            expected_source = "none"
+            expected_value = None
+
+        if (
+            assessment["state"] != expected_state
+            or assessment["comparison_source"] != expected_source
+            or not _same_exact_scalar(
+                assessment["comparison_value"], expected_value
+            )
+        ):
+            raise DiffError(
+                f"tool '{name}' annotation assessment for {annotation} "
+                "is inconsistent"
+            )
+
+    expected_conflicts = [
+        f"{assessment['annotation']}={str(assessment['value']).lower()} "
+        "conflicts with effective risk"
+        for assessment in assessments
+        if assessment["state"] == "conflict"
+    ]
+    conflicts = _require_string_array(
+        tool.get("annotation_conflicts"),
+        field=f"tool '{name}' annotation conflicts",
+    )
+    if conflicts != expected_conflicts:
+        raise DiffError(
+            f"tool '{name}' annotation conflicts do not match its assessments"
+        )
+
+
+def _validate_branch_risk(
+    tool: dict[str, Any],
+    *,
+    name: str,
+    argument_names: set[str],
+    names_redacted: bool,
+) -> None:
+    branch_review = _require_bool(
+        tool.get("branch_risk_review_required"),
+        field=f"tool '{name}' branch_risk_review_required",
+    )
+    raw_branch = tool.get("branch_risk")
+    if raw_branch is None:
+        expected_review = (
+            any(
+                argument.get("type") == "enum"
+                and argument.get("policy") == "trusted_fixed"
+                and argument.get("confidence") == "uncertain"
+                and is_branch_selector_name(argument["name"])
+                for argument in tool["arguments"]
+            )
+            and tool["risk"] != "read_only"
+        )
+        if not names_redacted and branch_review is not expected_review:
+            raise DiffError(
+                f"tool '{name}' has inconsistent branch risk review state"
+            )
+        return
+
+    if branch_review is not False:
+        raise DiffError(
+            f"tool '{name}' cannot require branch review with declared branches"
+        )
+    branch = _require_object(raw_branch, field=f"tool '{name}' branch risk")
+    _reject_unknown_fields(
+        branch,
+        allowed={"source", "selector", "value_disclosure", "cases"},
+        field=f"tool '{name}' branch risk",
+    )
+    if branch.get("source") != "control_declaration":
+        raise DiffError(f"tool '{name}' has invalid branch risk source")
+    selector = _require_text(
+        branch.get("selector"), field=f"tool '{name}' branch selector"
+    )
+    if selector not in argument_names:
+        raise DiffError(f"tool '{name}' branch selector is not an argument")
+    selector_argument = next(
+        argument for argument in tool["arguments"] if argument["name"] == selector
+    )
+    if selector_argument["type"] != "enum":
+        raise DiffError(f"tool '{name}' branch selector is not an enum")
+    if branch.get("value_disclosure") != "sha256_fingerprint_only":
+        raise DiffError(f"tool '{name}' has invalid branch value disclosure")
+
+    cases = _require_array(
+        branch.get("cases"), field=f"tool '{name}' branch cases"
+    )
+    if not cases:
+        raise DiffError(f"tool '{name}' branch cases must not be empty")
+    normalized_cases: list[dict[str, Any]] = []
+    seen_fingerprints: set[str] = set()
+    for index, raw_case in enumerate(cases, start=1):
+        field = f"tool '{name}' branch case[{index}]"
+        case = _require_object(raw_case, field=field)
+        allowed = {
+            "value_fingerprint_sha256",
+            "risk",
+            "evidence",
+            "effects",
+            "active_arguments",
+            "needs_confirmation",
+            "note",
+        }
+        _reject_unknown_fields(case, allowed=allowed, field=field)
+        required = allowed - {"note"}
+        missing = sorted(required - set(case))
+        if missing:
+            raise DiffError(
+                f"{field} is missing required fields: " + ", ".join(missing)
+            )
+        fingerprint = _require_sha256(
+            case["value_fingerprint_sha256"],
+            field=f"{field}.value_fingerprint_sha256",
+        )
+        if fingerprint in seen_fingerprints:
+            raise DiffError(f"tool '{name}' has duplicate branch fingerprints")
+        seen_fingerprints.add(fingerprint)
+        risk = case["risk"]
+        if risk not in _RISKS - {"unknown"}:
+            raise DiffError(f"{field}.risk is invalid")
+        if case["evidence"] not in _EVIDENCE:
+            raise DiffError(f"{field}.evidence is invalid")
+        effects = _require_string_array(case["effects"], field=f"{field}.effects")
+        if not effects or len(effects) != len(set(effects)):
+            raise DiffError(
+                f"{field}.effects must contain unique, non-empty text"
+            )
+        for effect_index, effect in enumerate(effects, start=1):
+            _require_scanner_normalized_text(
+                effect, field=f"{field}.effects[{effect_index}]"
+            )
+        active_arguments = _require_string_array(
+            case["active_arguments"], field=f"{field}.active_arguments"
+        )
+        if (
+            not active_arguments
+            or len(active_arguments) != len(set(active_arguments))
+            or any(argument not in argument_names for argument in active_arguments)
+            or selector not in active_arguments
+        ):
+            raise DiffError(f"{field}.active_arguments is inconsistent")
+        expected_active_order = [
+            argument["name"]
+            for argument in tool["arguments"]
+            if argument["name"] in set(active_arguments)
+        ]
+        if active_arguments != expected_active_order:
+            raise DiffError(
+                f"{field}.active_arguments is not in canonical argument order"
+            )
+        expected_confirmation = risk in _CONFIRMATION_RISKS
+        if (
+            _require_bool(
+                case["needs_confirmation"],
+                field=f"{field}.needs_confirmation",
+            )
+            is not expected_confirmation
+        ):
+            raise DiffError(f"{field}.needs_confirmation is inconsistent")
+        if "note" in case:
+            _require_scanner_normalized_text(case["note"], field=f"{field}.note")
+        normalized_cases.append(case)
+
+    fingerprints = [case["value_fingerprint_sha256"] for case in normalized_cases]
+    if fingerprints != sorted(fingerprints):
+        raise DiffError(f"tool '{name}' branch cases are not in canonical order")
+    selector_constraints = selector_argument.get("constraints")
+    selector_enum = (
+        selector_constraints.get("enum")
+        if isinstance(selector_constraints, dict)
+        else None
+    )
+    if not isinstance(selector_enum, dict):
+        raise DiffError(f"tool '{name}' branch selector has no enum evidence")
+    if names_redacted:
+        if selector_enum.get("count") != len(fingerprints):
+            raise DiffError(
+                f"tool '{name}' branch cases do not exhaust the selector enum"
+            )
+    elif selector_enum.get("value_fingerprints_sha256") != fingerprints:
+        raise DiffError(
+            f"tool '{name}' branch cases do not exhaust the selector enum"
+        )
+    worst = max(
+        (case["risk"] for case in normalized_cases),
+        key=lambda risk: _BRANCH_RISK_PRIORITY[risk],
+    )
+    expected = {
+        "risk": worst,
+        "risk_source": "branch_control_declaration",
+        "risk_evidence": None,
+        "declared_risk": None,
+        "risk_conflict": False,
+        "risk_review_required": False,
+        "needs_confirmation": any(
+            case["needs_confirmation"] is True for case in normalized_cases
+        ),
+    }
+    for field, expected_value in expected.items():
+        if tool[field] != expected_value:
+            raise DiffError(
+                f"tool '{name}' has inconsistent branch-derived {field}"
+            )
+
+
 def _validate_report_tool(
     value: Any,
     *,
@@ -356,7 +756,10 @@ def _validate_report_tool(
             "needs_confirmation",
             "schema_closes_unknown_arguments",
             "schema_review_required",
+            "annotation_assessments",
             "annotation_conflicts",
+            "branch_risk",
+            "branch_risk_review_required",
             "arguments",
             "schema_material_fingerprint_sha256",
             "unmodeled_schema_fingerprint_sha256",
@@ -425,6 +828,12 @@ def _validate_report_tool(
         raise DiffError(f"tool '{name}' is missing risk_evidence")
     if "declared_risk" not in tool:
         raise DiffError(f"tool '{name}' is missing declared_risk")
+    if "branch_risk" not in tool:
+        raise DiffError(f"tool '{name}' is missing branch_risk")
+    if "branch_risk_review_required" not in tool:
+        raise DiffError(
+            f"tool '{name}' is missing branch_risk_review_required"
+        )
     _validate_declared_risk(tool["declared_risk"], field=f"tool '{name}' risk")
     for boolean_field in (
         "risk_conflict",
@@ -433,11 +842,6 @@ def _validate_report_tool(
         "schema_closes_unknown_arguments",
     ):
         _require_bool(tool.get(boolean_field), field=f"tool '{name}' {boolean_field}")
-    _validate_report_risk_coherence(
-        tool,
-        name=name,
-        matched_tokens_included=require_fingerprints,
-    )
     if "schema_review_required" not in tool:
         raise DiffError(
             f"tool '{name}' is missing schema_review_required; rescan the "
@@ -446,10 +850,6 @@ def _validate_report_tool(
     _require_bool(
         tool["schema_review_required"],
         field=f"tool '{name}' schema_review_required",
-    )
-    _require_string_array(
-        tool.get("annotation_conflicts"),
-        field=f"tool '{name}' annotation conflicts",
     )
     for optional_text_field in ("source_id", "source_url"):
         if optional_text_field in tool:
@@ -472,6 +872,13 @@ def _validate_report_tool(
             )
 
     argument_names: set[str] = set()
+    # Branch declarations establish operation-specific risk and applicability,
+    # not argument authorship. Validate the argument rows against the same
+    # fail-closed UNKNOWN inference context used by the scanner before the
+    # displayed worst-branch risk is applied to the tool summary.
+    argument_inference_risk = (
+        "unknown" if tool["branch_risk"] is not None else tool["risk"]
+    )
     for argument in _require_array(
         tool.get("arguments"), field=f"tool '{name}' arguments"
     ):
@@ -480,7 +887,26 @@ def _validate_report_tool(
             tool=name,
             seen=argument_names,
             require_fingerprints=require_fingerprints,
-            effective_risk=tool["risk"],
+            effective_risk=argument_inference_risk,
+        )
+    _validate_branch_risk(
+        tool,
+        name=name,
+        argument_names=argument_names,
+        names_redacted=not require_fingerprints,
+    )
+    _validate_annotation_assessments(tool, name=name)
+    if tool["branch_risk"] is None:
+        _validate_report_risk_coherence(
+            tool,
+            name=name,
+            matched_tokens_included=require_fingerprints,
+        )
+    else:
+        _validate_risk_inference_coherence(
+            tool,
+            name=name,
+            matched_tokens_included=require_fingerprints,
         )
     return name, argument_names
 
@@ -561,6 +987,7 @@ def _validate_declared_controls(
                 "arguments",
                 "unexposed_arguments",
                 "risk",
+                "branches",
             },
             field="declared control tool",
         )
@@ -589,6 +1016,19 @@ def _validate_declared_controls(
         if tool.get("risk") != report_tool.get("declared_risk"):
             raise DiffError(
                 f"declared control tool '{name}' risk conflicts with the report tool"
+            )
+        if "risk" in tool and "branches" in tool:
+            raise DiffError(
+                f"declared control tool '{name}' combines tool and branch risk"
+            )
+        if "branches" in tool:
+            _require_object(
+                tool["branches"], field=f"declared tool '{name}' branches"
+            )
+        if tool.get("branches") != report_tool.get("branch_risk"):
+            raise DiffError(
+                f"declared control tool '{name}' branches conflict with the "
+                "report tool"
             )
 
         argument_names: set[str] = set()
@@ -790,7 +1230,10 @@ def _validate_declared_controls(
         raise DiffError("declared control tool order does not match report order")
 
     for name, report_tool in report_tools.items():
-        if report_tool.get("declared_risk") is not None and name not in tools_seen:
+        if (
+            report_tool.get("declared_risk") is not None
+            or report_tool.get("branch_risk") is not None
+        ) and name not in tools_seen:
             raise DiffError(
                 f"report tool '{name}' exposes declared risk without the matching "
                 "declared control tool"
@@ -823,6 +1266,12 @@ def _validate_report_cardinalities(
             risk = tool.get("risk")
             if risk is not None:
                 control_collection_members += len(risk["effects"])
+            branches = tool.get("branches")
+            if branches is not None:
+                control_collection_members += len(branches["cases"])
+                for case in branches["cases"]:
+                    control_collection_members += len(case["effects"])
+                    control_collection_members += len(case["active_arguments"])
             for argument in tool["arguments"]:
                 control_collection_members += len(argument.get("bounds", []))
 
@@ -871,20 +1320,23 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
     if type(report) is not dict:
         raise DiffError(f"{label} is not a Verb Authority JSON report")
     report_version = report.get("report_version")
-    if report_version == 2:
+    if type(report_version) is int and report_version in {2, 3}:
         raise DiffError(
-            f"{label} uses legacy report version 2, which omitted schema "
-            "constraint values; rescan the original schema with report "
-            f"version {REPORT_VERSION} before diffing"
+            f"{label} uses legacy report version {report_version}; rescan the "
+            "original schema with report version "
+            f"{_SUPPORTED_REPORT_VERSION} before diffing"
         )
     if report.get("generator") != "verb-authority":
         raise DiffError(
             f"{label} is report-shaped but has a missing or invalid generator"
         )
-    if type(report_version) is not int or report_version != REPORT_VERSION:
+    if (
+        type(report_version) is not int
+        or report_version != _SUPPORTED_REPORT_VERSION
+    ):
         raise DiffError(
             f"{label} uses unsupported report version "
-            f"{report_version!r}; expected {REPORT_VERSION}"
+            f"{report_version!r}; expected {_SUPPORTED_REPORT_VERSION}"
         )
     _reject_unknown_fields(
         report,
@@ -920,6 +1372,8 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
             "enum_values_included",
             "enum_value_fingerprints_included",
             "enum_value_fingerprints_dictionary_guessable",
+            "branch_value_fingerprints_included",
+            "branch_value_fingerprints_dictionary_guessable",
             "schema_material_fingerprints_included",
             "schema_material_fingerprints_dictionary_guessable",
             "unmodeled_schema_fingerprints_included",
@@ -952,6 +1406,8 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         is not exact_constraints_included
         or privacy.get("enum_value_fingerprints_dictionary_guessable")
         is not exact_constraints_included
+        or privacy.get("branch_value_fingerprints_included") is not True
+        or privacy.get("branch_value_fingerprints_dictionary_guessable") is not True
         or privacy.get("schema_material_fingerprints_included")
         is not exact_constraints_included
         or privacy.get("schema_material_fingerprints_dictionary_guessable")
@@ -976,6 +1432,7 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         "risk_conflicts",
         "annotation_conflicts",
         "schema_review_required_tools",
+        "branch_risk_review_required_tools",
     }
     _reject_unknown_fields(
         summary,
@@ -1042,6 +1499,9 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         "annotation_conflicts": sum(
             len(tool["annotation_conflicts"]) for tool in tools
         ),
+        "branch_risk_review_required_tools": sum(
+            tool["branch_risk_review_required"] is True for tool in tools
+        ),
     }
     for field, expected_value in expected_summary.items():
         if summary[field] != expected_value:
@@ -1078,7 +1538,10 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
             )
     elif "declared_controls" in report or "control_declaration_fingerprint_sha256" in report:
         raise DiffError(f"{label} has inconsistent declared control metadata")
-    elif any(tool["declared_risk"] is not None for tool in tools):
+    elif any(
+        tool["declared_risk"] is not None or tool["branch_risk"] is not None
+        for tool in tools
+    ):
         raise DiffError(
             f"{label} exposes declared risk without declared control metadata"
         )
@@ -1250,7 +1713,12 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "risk_conflict": raw_tool.get("risk_conflict"),
             "risk_review_required": raw_tool.get("risk_review_required"),
             "needs_confirmation": raw_tool.get("needs_confirmation"),
-            "annotation_conflicts": raw_tool.get("annotation_conflicts", []),
+            "annotation_assessments": raw_tool["annotation_assessments"],
+            "annotation_conflicts": raw_tool["annotation_conflicts"],
+            "branch_risk": raw_tool["branch_risk"],
+            "branch_risk_review_required": raw_tool[
+                "branch_risk_review_required"
+            ],
             "schema_closes_unknown_arguments": raw_tool.get(
                 "schema_closes_unknown_arguments"
             ),
@@ -1332,6 +1800,76 @@ def _change(
         item["before"] = before
         item["after"] = after
     return item
+
+
+def _classify_branch_risk_change(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Classify pure active-argument set changes; keep all others advisory."""
+
+    if before is None or after is None:
+        return "review", "Selector branch declarations were added or removed."
+    if (
+        before.get("source") != after.get("source")
+        or before.get("selector") != after.get("selector")
+        or before.get("value_disclosure") != after.get("value_disclosure")
+    ):
+        return "review", "Selector branch identity or evidence changed."
+    before_cases = {
+        case["value_fingerprint_sha256"]: case for case in before["cases"]
+    }
+    after_cases = {
+        case["value_fingerprint_sha256"]: case for case in after["cases"]
+    }
+    expanded = False
+    reduced = False
+    other_changed = False
+    for fingerprint in set(before_cases) & set(after_cases):
+        before_case = before_cases[fingerprint]
+        after_case = after_cases[fingerprint]
+        before_other = {
+            key: value
+            for key, value in before_case.items()
+            if key != "active_arguments"
+        }
+        after_other = {
+            key: value
+            for key, value in after_case.items()
+            if key != "active_arguments"
+        }
+        if before_other != after_other:
+            other_changed = True
+        before_active = set(before_case["active_arguments"])
+        after_active = set(after_case["active_arguments"])
+        # Any newly admitted argument is an authority increase, even when the
+        # same edit also removes another argument (set-incomparable
+        # replacement) or changes branch risk/evidence. Removals cannot cancel
+        # the larger caller-visible surface introduced by the addition.
+        if after_active - before_active:
+            expanded = True
+        if before_active - after_active:
+            reduced = True
+
+    # A simultaneous risk/evidence edit or reduction must never mask a known
+    # expansion. Any existing exact case that accepts another argument has a
+    # concrete larger caller-controlled surface and must trip the increase
+    # threshold.
+    if expanded:
+        return (
+            "authority_increase",
+            "One or more branches now admit additional caller-visible arguments.",
+        )
+    if set(before_cases) != set(after_cases):
+        return "review", "The set of selector branch cases changed."
+    if other_changed:
+        return "review", "Branch risk or supporting evidence changed."
+    if reduced:
+        return (
+            "protection_increase",
+            "One or more branches now admit fewer caller-visible arguments.",
+        )
+    return "review", "Branch active-argument applicability changed ambiguously."
 
 
 def _ranked_change(
@@ -2123,18 +2661,50 @@ def diff_reports(
                 )
             )
 
-        before_conflicts = before_tool["annotation_conflicts"]
-        after_conflicts = after_tool["annotation_conflicts"]
-        if before_conflicts != after_conflicts:
+        before_assessments = before_tool["annotation_assessments"]
+        after_assessments = after_tool["annotation_assessments"]
+        if before_assessments != after_assessments:
             changes.append(
                 _change(
                     "review",
-                    "annotation_conflicts_changed",
+                    "annotation_assessments_changed",
                     tool,
-                    field="annotation_conflicts",
-                    before=before_conflicts,
-                    after=after_conflicts,
-                    message="MCP annotation conflicts changed.",
+                    field="annotation_assessments",
+                    before=before_assessments,
+                    after=after_assessments,
+                    message="MCP annotation evidence or its assessment changed.",
+                )
+            )
+
+        if before_tool["branch_risk"] != after_tool["branch_risk"]:
+            classification, message = _classify_branch_risk_change(
+                before_tool["branch_risk"], after_tool["branch_risk"]
+            )
+            changes.append(
+                _change(
+                    classification,
+                    "branch_risk_changed",
+                    tool,
+                    field="branch_risk",
+                    before=before_tool["branch_risk"],
+                    after=after_tool["branch_risk"],
+                    message=message,
+                )
+            )
+
+        if (
+            before_tool["branch_risk_review_required"]
+            is not after_tool["branch_risk_review_required"]
+        ):
+            changes.append(
+                _change(
+                    "review",
+                    "branch_risk_review_requirement_changed",
+                    tool,
+                    field="branch_risk_review_required",
+                    before=before_tool["branch_risk_review_required"],
+                    after=after_tool["branch_risk_review_required"],
+                    message="The unresolved branch-risk review requirement changed.",
                 )
             )
 
@@ -2362,6 +2932,28 @@ def _short(value: Any) -> str:
     return str(value)
 
 
+def _candidate_review_debt_diagnostic(summary: dict[str, Any]) -> str:
+    """Describe nonzero candidate review counters without exposing names."""
+
+    counter_labels = (
+        ("review_required", "parameters requiring review"),
+        ("schema_review_required_tools", "schemas requiring review"),
+        ("risk_review_required_tools", "tool risks requiring review"),
+        ("risk_conflicts", "risk conflicts"),
+        ("annotation_conflicts", "annotation conflicts"),
+        ("branch_risk_review_required_tools", "branch risks requiring review"),
+    )
+    counters = "; ".join(
+        f"{label}: {summary[field]}"
+        for field, label in counter_labels
+        if summary[field]
+    )
+    return (
+        "Review threshold failed: candidate scan has existing review debt "
+        f"({counters})."
+    )
+
+
 def render_text(diff: dict[str, Any]) -> str:
     """Render a compact diff intended for terminals and pull-request logs."""
 
@@ -2371,7 +2963,7 @@ def render_text(diff: dict[str, Any]) -> str:
         "",
         f"Changes: {summary['changes']} across {summary['changed_tools']} tool(s)",
         f"Authority increases: {summary['authority_increases']}",
-        f"Needs review: {summary['reviews']}",
+        f"Review-classified changes: {summary['reviews']}",
         f"Protection increases: {summary['protection_increases']}",
     ]
     if not diff["changes"]:
@@ -2439,8 +3031,8 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-review",
         action="store_true",
         help=(
-            "exit with status 2 when a change requires review; both inputs "
-            "must be raw schemas"
+            "exit with status 2 when a change requires review or the candidate "
+            "has existing review debt; both inputs must be raw schemas"
         ),
     )
     args = parser.parse_args(argv)
@@ -2473,8 +3065,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fail_on_increase and diff["summary"]["authority_increases"]:
         return 2
-    if args.fail_on_review and diff["summary"]["reviews"]:
-        return 2
+    if args.fail_on_review:
+        candidate_has_review_debt = _summary_requires_review(after["summary"])
+        if diff["summary"]["reviews"] or candidate_has_review_debt:
+            if candidate_has_review_debt:
+                print(
+                    _candidate_review_debt_diagnostic(after["summary"]),
+                    file=sys.stderr,
+                )
+            return 2
     return 0
 
 

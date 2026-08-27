@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verb-authority"
-version = "0.10.0b10"
+version = "0.10.0b11"
 description = "A Python gate that prevents untrusted agent data from authoring sensitive tool-call arguments—without classifying prompts."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,13 +42,22 @@ dev = [
   "build>=1.2,<2",
   "pytest>=8,<10",
 ]
+pydantic = [
+  "pydantic-ai-slim==2.35.0",
+  "pydantic==2.13.4",
+]
 
 [project.urls]
 Repository = "https://github.com/yairsabag/verb-authority"
 Issues = "https://github.com/yairsabag/verb-authority/issues"
 
 [tool.setuptools]
-py-modules = ["verb_authority", "verb_authority_scan", "verb_authority_diff"]
+py-modules = [
+  "verb_authority",
+  "verb_authority_scan",
+  "verb_authority_diff",
+  "verb_authority_pydantic",
+]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
