@@ -2,6 +2,7 @@ import base64
 import hashlib
 from io import BytesIO
 import gzip
+import os
 from pathlib import Path
 import stat
 import struct
@@ -41,9 +42,22 @@ SCRIPTS = {
 }
 
 
+#: Global git settings that change what these helpers BUILD rather than how they
+#: run, so a throwaway repository must not inherit them. With ``tag.gpgsign``
+#: on, ``git tag <name> <commit>`` stops being a lightweight tag and becomes an
+#: annotated signed one, which needs a message and exits 128 with
+#: "no tag message?" -- so the suite fails for anyone who signs their tags, and
+#: the failure names git rather than the setting. ``commit.gpgsign`` is pinned
+#: for the same reason at ``_commit_test_project``.
+_ISOLATED_GIT_CONFIG = (
+    "-c", "tag.gpgsign=false",
+    "-c", "commit.gpgsign=false",
+)
+
+
 def _git(repository: Path, *arguments: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        ["git", "-C", str(repository), *_ISOLATED_GIT_CONFIG, *arguments],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -93,7 +107,26 @@ def _write_project(path: Path, *, version: str = PROJECT_VERSION) -> Path:
         ),
         encoding="utf-8",
     )
+    _normalize_source_modes(path)
     return project_path
+
+
+#: The sdist contract requires 0o644 on every regular member and 0o755 on every
+#: directory. Two separate things set those, and both follow the developer's
+#: umask, so both have to be pinned or the test measures the machine:
+#: setuptools COPIES the mode of a source file it packages, which is what this
+#: function fixes, and it CREATES its own generated members under the umask of
+#: the build process, which is what ``_release_contract_umask`` fixes.
+_SDIST_FILE_MODE = 0o644
+_SDIST_DIRECTORY_MODE = 0o755
+
+
+def _normalize_source_modes(root: Path) -> None:
+    for entry in root.rglob("*"):
+        if entry.is_symlink():
+            continue
+        entry.chmod(_SDIST_DIRECTORY_MODE if entry.is_dir() else _SDIST_FILE_MODE)
+    root.chmod(_SDIST_DIRECTORY_MODE)
 
 
 def _metadata(*, name: str = PROJECT_NAME, version: str = PROJECT_VERSION) -> str:
@@ -525,6 +558,17 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
     ) == (wheel, sdist)
 
 
+#: The sdist contract in ``scripts/verify_release_artifacts.py`` requires mode
+#: 0o644 on every regular member and 0o755 on every directory. setuptools sets
+#: those from the umask of the process that builds them, on files it generates
+#: itself, so under the common ``umask 002`` the archive arrives 0o664 and
+#: 0o775 and this test fails on a tree nobody has touched. CI happens to run
+#: ``umask 022`` and never sees it. Set it for the build child only, so the
+#: test measures the build rather than the machine it ran on.
+def _release_contract_umask() -> None:
+    os.umask(0o022)
+
+
 def test_real_setuptools_build_uses_the_verified_archive_contract(tmp_path):
     build_available = subprocess.run(
         [sys.executable, "-I", "-m", "build", "--version"],
@@ -551,6 +595,7 @@ def test_real_setuptools_build_uses_the_verified_archive_contract(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        preexec_fn=_release_contract_umask,
     )
 
     wheel, sdist = verify_artifacts(project_path, dist)
