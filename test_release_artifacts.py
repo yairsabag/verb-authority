@@ -1393,6 +1393,10 @@ def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
         in config.sdist_source_payloads
     )
     assert "pydantic_ai_demo.py" in config.sdist_source_payloads
+    assert not any(
+        member.startswith("fixtures/external/")
+        for member in config.sdist_source_payloads
+    )
 
     ci = (repository / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"

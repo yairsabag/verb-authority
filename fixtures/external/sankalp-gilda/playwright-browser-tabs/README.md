@@ -7,11 +7,12 @@ cannot widen the claim back over them without CI noticing.
 
 ## What it holds
 
-`frozen/` is the evidence, byte-for-byte, and nothing in it is derived or
-reduced. It carries the verbatim `tools/list` from `@playwright/mcp@0.0.76`,
-the control sidecar, all four run reports across two releases, a SHA-256
-manifest over every one of those files, and the exact commands. Reruns go
-through `COMMANDS.md`; nothing there is a reconstruction.
+`frozen/` is the contributor-supplied evidence, preserved byte-for-byte. It
+carries the attributed `tools/list` from `@playwright/mcp@0.0.76`, the control
+sidecar, all four run reports across two releases, a SHA-256 manifest over
+those six JSON artifacts, and the reported scanner rerun commands. The
+derived oracle also pins the manifest and `COMMANDS.md` bytes so accidental
+drift fails CI.
 
 Everything outside `frozen/` is for CI and may be rewritten freely.
 `EXPECTED.json` is the oracle, `probe-controls-destructive.json` is a third
@@ -20,6 +21,18 @@ input used by one probe, and the assertions live in
 Keeping those apart is Larry Peseckis's rule from the payment fixture, and it
 is worth keeping: a frozen artifact that a CI convenience edit can touch is no
 longer frozen.
+
+[`PROVENANCE.md`](PROVENANCE.md) records the upstream Apache-2.0 source and
+immutable commit, what the maintainer independently reproduced, and the limits
+of the preserved capture record. In particular, the completed manifest
+freezes the contributed bundle; because it includes generated reports, it is
+not itself proof that an oracle was registered before execution. That timing
+remains contributor attestation rather than a cryptographic claim by this
+repository.
+
+The complete external evidence is repository-only and is intentionally omitted
+from Python source and wheel distributions. Repository CI runs the permanent
+regression; an sdist checkout skips it because the frozen evidence is absent.
 
 ## The subject
 
@@ -61,13 +74,18 @@ instead clears it and moves both hints to `consistent`, which is the
 So the check now fires on a hint that actually disagrees, and the one case it
 raises is this fixture's own under-declaration rather than the scanner's.
 
-## One thing the reports do not say plainly
+## What beta.11 did not say plainly, and beta.12 now does
 
 In arm 2 on `0.10.0b11`, `schema_review_required` on the tool is `false` while
-two of its three arguments require review. A consumer reading only the
-tool-level flag would not see the finding. `--fail-on-review` does exit `2`, so
-the intended CI path is unaffected, and the oracle pins the exit status rather
-than the flag for that reason.
+two of its three arguments require review. That field means only that the
+schema structure itself needs no review; it is not a tool-wide aggregate.
+`--fail-on-review` still exits `2`.
+
+Report v5 in `0.10.0b12` closes the visibility gap without changing that
+narrow field. On the same bytes, `browser_tabs.review_required` is `true`, and
+`review_sources` identifies `action`, `index`, the `destructiveHint` conflict,
+and the missing selector-branch declaration in one place. The derived
+regression pins both the beta.11 behavioral fix and this beta.12 aggregate.
 
 ## Scope
 
