@@ -316,7 +316,7 @@ boundary, not an inference that the request was user-authorized.
 
 ## Pydantic AI 2.35 runtime adapter
 
-The unreleased beta.11 source includes a deliberately narrow Pydantic AI
+The beta.11 release includes a deliberately narrow Pydantic AI
 adapter. It routes every supported tool invocation through the existing
 `GuardedToolRunner`; Pydantic performs schema generation and argument
 validation, but the registered Pydantic callable is a fresh, permanently inert
@@ -580,7 +580,7 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
 ```
 
 MCP tool annotations are server-supplied, unverified hints, not enforcement
-evidence. Report v4 preserves each recognized boolean hint in a structured
+evidence. Report v5 retains each recognized boolean hint in a structured
 `annotation_assessments` entry with its value, comparison source and value,
 and explicit `trust: "unverified_hint"`. The assessment state is `consistent`
 when a hint agrees with established effective-risk evidence, `conflict` when
@@ -610,7 +610,7 @@ enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
 reports before indexing them. An over-limit CLI input exits with status 2 and
 is not partially scanned or compared.
 
-Named JSON reports use report format v4. For the constraints understood by
+Named JSON reports use report format v5. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a
 SHA-256 fingerprint for each enum member. Raw enum members are omitted, but
 hashes of low-entropy values are dictionary-guessable and repeated hashes are
@@ -622,14 +622,30 @@ reports also include per-tool and per-argument
 `unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
 can likewise be dictionary-guessed or correlated.
 
-When Authority Diff imports a named v4 report, it recomputes summary counters
-and reconciles the complete risk tuple (declaration, advisory inference,
-conflict, effective tier, evidence, review, and confirmation) before comparing
-it. It also checks the stable argument policy/confidence/review combinations,
-preserves the scanner's declaration-verification warning, and refuses an open
-schema with declared unexposed controls unless schema review remains explicit.
-This catches internally impossible or partially edited reports. The
-unkeyed SHA-256 fields are content commitments, not authentication: a party
+Report v5 also provides one explicit review aggregate per tool. Its
+`review_required` boolean is derived from `review_sources`, which identifies
+flagged argument names in `arguments` plus the `schema`, `risk`,
+`risk_conflict`, `annotation_conflicts`, and `branch_risk` sources already
+present elsewhere in the report. `summary.review_required` remains the number
+of flagged arguments; the new `summary.review_required_tools` counts tools
+with any of those review obligations. This static review debt is deliberately
+separate from `needs_confirmation`: a well-classified consequential call can
+require runtime approval without needing policy review.
+
+When Authority Diff imports a named v4 or v5 report, it recomputes summary
+counters and reconciles the complete risk tuple (declaration, advisory
+inference, conflict, effective tier, evidence, review, and confirmation) before
+comparing it. It also checks the stable argument policy/confidence/review
+combinations, preserves the scanner's declaration-verification warning, and
+refuses an open schema with declared unexposed controls unless schema review
+remains explicit.
+For v5 it additionally requires the per-tool review aggregate and its summary
+counter to match the underlying evidence exactly. A complete v4 report remains
+accepted for observational comparison; Authority Diff derives the aggregate
+only in its internal comparison index and neither mutates nor rewrites the
+caller's report. This catches internally impossible or partially edited
+reports. The unkeyed SHA-256 fields are content commitments, not
+authentication: a party
 that can replace an entire stored report can fabricate a different coherent
 report and matching hashes. For an untrusted pull request or artifact, rescan
 the raw schema/control inputs in CI or require a separately signed/attested
@@ -657,10 +673,11 @@ but low-entropy values such as `close` are dictionary-guessable. They remain in
 both named and name-redacted reports, and the `privacy` object says so
 explicitly.
 
-The v4 `privacy` object makes that contract machine-readable. It replaces the
-old combined `examples_or_values_included` field with
-`examples_included: false`, `defaults_included: false`, and
-`runtime_values_included: false`. Named reports set
+The v5 `privacy` object retains the machine-readable contract introduced in
+v4. It keeps separate `examples_included: false`,
+`defaults_included: false`, and
+`runtime_values_included: false` fields rather than the old combined
+`examples_or_values_included` field. Named reports set
 `schema_material_fingerprints_included`,
 `schema_material_fingerprints_dictionary_guessable`, and
 `unmodeled_schema_fingerprints_included` to `true`, with
@@ -672,6 +689,8 @@ three booleans to `false` and use the scope
 Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
 arguments, likely operation selectors without branch evidence, risk conflicts,
 MCP annotation conflicts, or unresolved JSON Schema composition need attention.
+The v5 per-tool aggregate is an index over those existing obligations, not a
+new inference or a substitute for inspecting their underlying evidence.
 The scanner does not resolve `$ref`, `allOf`,
 `anyOf`, `oneOf`, or conditional/dependent schemas. It instead sets
 `schema_review_required` on the tool and counts it in
@@ -689,13 +708,16 @@ aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
 
-Both schema-review fields are mandatory in imported v4 reports. A report that
-omits either field must be regenerated from the original schema with the
-current scanner; omission is not interpreted as `false`. When Authority Diff
-sees an explicit schema-review obligation change in either direction, it keeps
-the change in the review queue. In particular, clearing `true` to `false` is
-not treated as proof that protection increased when only report evidence is
-available.
+Both schema-review fields are mandatory in imported v4 and v5 reports. In v5,
+each tool's `review_required` and `review_sources` fields and
+`summary.review_required_tools` are also mandatory and must be coherent with
+the underlying argument, schema, risk, annotation, and branch evidence. A
+report that omits any required field must be regenerated from the original
+schema with the current scanner; omission is not interpreted as `false`. When
+Authority Diff sees an explicit schema-review obligation change in either
+direction, it keeps the change in the review queue. In particular, clearing
+`true` to `false` is not treated as proof that protection increased when only
+report evidence is available.
 
 ### Add implementation-level control evidence
 
@@ -861,11 +883,15 @@ Example output:
 
 Without a failure threshold, the command also accepts two non-redacted JSON
 reports for observational comparison. Diff output format v2 is paired with
-scanner report format v4. Report v3 did not preserve the structured provenance
-and assessment state of MCP annotation hints, so it is rejected rather than
-upgraded by inference. Report v2 also omitted constraint values and cannot be
-migrated without inventing evidence. Rescan the original raw schema with the
-v4 scanner before comparing it. When implementation controls are part of a
+scanner report format v5 and accepts complete report v4 or v5 inputs. For a v4
+input, Authority Diff derives the v5 tool-level review aggregate only in its
+internal index; it does not mutate or rewrite the supplied report, and this
+derived presentation field does not create a semantic diff by itself. Report
+v3 did not preserve the structured provenance and assessment state of MCP
+annotation hints, so it is rejected rather than upgraded by inference. Report
+v2 also omitted constraint values and cannot be migrated without inventing
+evidence. Rescan the original raw schema with the v5 scanner before comparing
+it. When implementation controls are part of a
 raw-schema comparison, pass the sidecars with `--before-controls` and
 `--after-controls`. Control evidence remains visibly author-supplied; a diff
 does not turn a declaration into verified enforcement.
@@ -876,8 +902,9 @@ sentinels hidden inside a direct tool list, `tools`, `result.tools`, or an Atlas
 Intermediate, unpublished v4 reports that predate the mandatory
 `schema_review_required` and `summary.schema_review_required_tools` fields must
 also be rescanned rather than compared under an optimistic default.
-Imported v4 reports must contain at least one tool, matching the scanner's own
-output boundary; a fabricated empty report is rejected with rescan guidance.
+Imported v4 and v5 reports must contain at least one tool, matching the
+scanner's own output boundary; a fabricated empty report is rejected with
+rescan guidance.
 They must also preserve scanner-normalized declaration text and canonical
 declaration order, and remain within the scanner's aggregate limits for tools,
 arguments, enum members, effects, and bounds. A report outside those emitter
@@ -941,7 +968,7 @@ pin in the example above supports both thresholds. The action removes
 and comparison, preventing modules in the consumer checkout from shadowing
 `pip` or the installed Verb Authority package.
 
-The v4 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
+The v5 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
 increase; and enum replacements without a strict subset relationship require
 review. Any effective risk-tier change also requires review; tiers are not
@@ -1242,11 +1269,12 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release, and v0.10.0-beta.10 is the latest
-published prerelease. This source tree prepares v0.10.0-beta.11 with the
-safe-default scanner fixes, exact one-selector branch risk, and first optional
-Pydantic AI runtime adapter;
-beta.7, beta.8, and beta.9 were withheld and are not reused.
+v0.9.0 is the latest stable release, and v0.10.0-beta.11 is the latest
+published prerelease. This source tree contains the beta.11 safe-default
+scanner fixes, exact one-selector branch risk, and first optional Pydantic AI
+runtime adapter, and prepares v0.10.0-beta.12 with the report v5 tool-level
+review aggregate. The beta.7, beta.8, and beta.9 version identifiers were
+withheld and are not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

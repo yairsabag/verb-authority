@@ -42,6 +42,20 @@ def _refresh_control_fingerprint(report):
 def _refresh_report_summary(report):
     tools = report["tools"]
     arguments = [argument for tool in tools for argument in tool["arguments"]]
+    for tool in tools:
+        tool["review_sources"] = scanner._tool_review_sources(
+            arguments=tool["arguments"],
+            schema_review_required=tool["schema_review_required"],
+            risk_review_required=tool["risk_review_required"],
+            risk_conflict=tool["risk_conflict"],
+            annotation_assessments=tool["annotation_assessments"],
+            branch_risk_review_required=tool[
+                "branch_risk_review_required"
+            ],
+        )
+        tool["review_required"] = scanner._tool_review_required(
+            tool["review_sources"]
+        )
     summary = report["summary"]
     summary.update(
         {
@@ -56,6 +70,9 @@ def _refresh_report_summary(report):
             "review_required": sum(
                 argument["review_required"] is True for argument in arguments
             ),
+            "review_required_tools": sum(
+                tool["review_required"] is True for tool in tools
+            ),
             "confirmation_required_tools": sum(
                 tool["needs_confirmation"] is True for tool in tools
             ),
@@ -68,12 +85,59 @@ def _refresh_report_summary(report):
             "annotation_conflicts": sum(
                 len(tool["annotation_conflicts"]) for tool in tools
             ),
+            "branch_risk_review_required_tools": sum(
+                tool["branch_risk_review_required"] is True for tool in tools
+            ),
         }
     )
     if "schema_review_required_tools" in summary:
         summary["schema_review_required_tools"] = sum(
             tool.get("schema_review_required", False) is True for tool in tools
         )
+
+
+def _as_v4_report(report):
+    legacy = copy.deepcopy(report)
+    legacy["report_version"] = 4
+    legacy["summary"].pop("review_required_tools")
+    for tool in legacy["tools"]:
+        tool.pop("review_required")
+        tool.pop("review_sources")
+    return legacy
+
+
+def _two_review_argument_report():
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        },
+                        "index": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes_tab_state"],
+                }
+            }
+        },
+    }
+    return scan_documents([document], control_declarations=controls)
 
 
 def _constraint_document(maximum, max_length, enum):
@@ -566,7 +630,7 @@ def test_malformed_v4_constraint_metadata_is_rejected():
         diff_reports(report, copy.deepcopy(report))
 
 
-def test_v4_annotation_assessments_are_accepted_when_scanner_coherent():
+def test_v5_annotation_assessments_are_accepted_when_scanner_coherent():
     report = _annotation_report(
         {
             "readOnlyHint": False,
@@ -578,8 +642,141 @@ def test_v4_annotation_assessments_are_accepted_when_scanner_coherent():
 
     diff = diff_reports(report, copy.deepcopy(report))
 
-    assert report["report_version"] == 4
+    assert report["report_version"] == 5
     assert diff["changes"] == []
+
+
+def test_v4_report_compares_with_v5_without_mutating_legacy_input():
+    current = _avp9_report()
+    legacy = _as_v4_report(current)
+    frozen_legacy = copy.deepcopy(legacy)
+
+    first = diff_reports(legacy, current)
+    second = diff_reports(legacy, current)
+
+    assert first["changes"] == []
+    assert second["changes"] == []
+    assert legacy == frozen_legacy
+    assert legacy["report_version"] == 4
+    assert "review_required_tools" not in legacy["summary"]
+    assert "review_required" not in legacy["tools"][0]
+
+
+@pytest.mark.parametrize("field", ("review_required", "review_sources"))
+def test_v5_tool_review_aggregate_fields_are_mandatory(field):
+    report = _avp9_report()
+    report["tools"][0].pop(field)
+
+    with pytest.raises(DiffError, match=rf"missing {field}"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda tool: tool.__setitem__("review_required", False),
+        lambda tool: tool["review_sources"].__setitem__("arguments", []),
+        lambda tool: tool["review_sources"].pop("schema"),
+        lambda tool: tool["review_sources"].__setitem__("unexpected", False),
+    ),
+)
+def test_v5_tool_review_aggregate_cannot_be_forged(mutate):
+    report = _avp9_report()
+    mutate(report["tools"][0])
+
+    with pytest.raises(DiffError, match="review"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v5_review_required_tools_summary_is_mandatory_and_coherent():
+    missing = _avp9_report()
+    missing["summary"].pop("review_required_tools")
+    with pytest.raises(DiffError, match="invalid report summary"):
+        diff_reports(missing, copy.deepcopy(missing))
+
+    forged = _avp9_report()
+    forged["summary"]["review_required_tools"] = 0
+    with pytest.raises(DiffError, match="review_required_tools does not match"):
+        diff_reports(forged, copy.deepcopy(forged))
+
+
+@pytest.mark.parametrize(
+    "argument_sources",
+    (
+        [],
+        ["index", "action"],
+        ["action", "missing"],
+        ["action", "action"],
+    ),
+)
+def test_v5_review_argument_sources_must_match_canonical_review_rows(
+    argument_sources,
+):
+    report = _two_review_argument_report()
+    assert report["tools"][0]["review_sources"]["arguments"] == [
+        "action",
+        "index",
+    ]
+    report["tools"][0]["review_sources"]["arguments"] = argument_sources
+
+    with pytest.raises(DiffError, match="review_sources are inconsistent"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    "source",
+    ("schema", "risk", "risk_conflict", "branch_risk"),
+)
+def test_v5_review_boolean_sources_cannot_be_flipped(source):
+    report = _avp9_report()
+    current = report["tools"][0]["review_sources"][source]
+    report["tools"][0]["review_sources"][source] = not current
+
+    with pytest.raises(DiffError, match="review_sources are inconsistent"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v5_review_annotation_sources_must_match_conflict_assessments():
+    report = _avp9_report()
+    report["tools"][0]["review_sources"]["annotation_conflicts"] = [
+        "readOnlyHint"
+    ]
+
+    with pytest.raises(DiffError, match="review_sources are inconsistent"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "error"),
+    (
+        ("review_required", 1, "review_required must be a boolean"),
+        ("arguments", "bidWei", "review source arguments must be an array"),
+        ("schema", 0, "review source schema must be a boolean"),
+        (
+            "annotation_conflicts",
+            "readOnlyHint",
+            "review source annotation conflicts must be an array",
+        ),
+    ),
+)
+def test_v5_review_aggregate_rejects_wrong_types(path, value, error):
+    report = _avp9_report()
+    if path == "review_required":
+        report["tools"][0][path] = value
+    else:
+        report["tools"][0]["review_sources"][path] = value
+
+    with pytest.raises(DiffError, match=error):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v4_report_cannot_smuggle_v5_aggregate_fields():
+    report = _avp9_report()
+    report["report_version"] = 4
+    report["summary"].pop("review_required_tools")
+
+    with pytest.raises(DiffError, match="unsupported fields"):
+        diff_reports(report, copy.deepcopy(report))
 
 
 def test_annotation_evidence_change_is_a_semantic_review_even_without_conflict():
@@ -2866,6 +3063,8 @@ def test_text_diff_escapes_terminal_and_bidi_controls():
         for argument in after["tools"][0]["arguments"]
         if argument["name"] == hostile_argument
     )["type"] = hostile_type
+    _refresh_report_summary(before)
+    _refresh_report_summary(after)
 
     rendered = render_text(diff_reports(before, after))
 
@@ -3713,6 +3912,7 @@ def test_clearing_schema_review_requirement_still_requires_review(tmp_path):
     assert before["tools"][0]["schema_review_required"] is True
     after["tools"][0]["schema_review_required"] = False
     after["summary"]["schema_review_required_tools"] = 0
+    _refresh_report_summary(after)
 
     diff = diff_reports(before, after)
     change = next(

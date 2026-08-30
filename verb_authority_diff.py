@@ -25,8 +25,11 @@ from verb_authority_scan import (
     MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
     MAX_SCAN_ENUM_MEMBERS,
     MAX_SCAN_TOOL_DEFINITIONS,
+    REPORT_VERSION,
     SchemaError,
     _summary_requires_review,
+    _tool_review_required,
+    _tool_review_sources,
     canonical_decimal_text,
     is_branch_selector_name,
     is_report_shaped_document,
@@ -37,7 +40,12 @@ from verb_authority_scan import (
 
 
 DIFF_VERSION = 2
-_SUPPORTED_REPORT_VERSION = 4
+_SUPPORTED_REPORT_VERSION = 5
+_COMPATIBLE_REPORT_VERSIONS = frozenset({4, 5})
+if REPORT_VERSION != _SUPPORTED_REPORT_VERSION:
+    raise RuntimeError(
+        "scanner and Authority Diff current report versions are out of sync"
+    )
 
 _CLASSIFICATION_ORDER = {
     "authority_increase": 0,
@@ -734,38 +742,113 @@ def _validate_branch_risk(
             )
 
 
+def _validate_or_derive_tool_review(
+    tool: dict[str, Any], *, name: str, report_version: int
+) -> None:
+    expected_review_sources = _tool_review_sources(
+        arguments=tool["arguments"],
+        schema_review_required=tool["schema_review_required"],
+        risk_review_required=tool["risk_review_required"],
+        risk_conflict=tool["risk_conflict"],
+        annotation_assessments=tool["annotation_assessments"],
+        branch_risk_review_required=tool["branch_risk_review_required"],
+    )
+    expected_review_required = _tool_review_required(expected_review_sources)
+    if report_version == 4:
+        # Report v4 did not expose the aggregate. Keep the caller-owned report
+        # unchanged; _index_report derives the same fields in its internal
+        # normalized representation when observational comparison needs them.
+        return
+
+    if "review_required" not in tool:
+        raise DiffError(f"tool '{name}' is missing review_required")
+    if "review_sources" not in tool:
+        raise DiffError(f"tool '{name}' is missing review_sources")
+    review_required = _require_bool(
+        tool["review_required"], field=f"tool '{name}' review_required"
+    )
+    review_sources = _require_object(
+        tool["review_sources"], field=f"tool '{name}' review sources"
+    )
+    source_fields = {
+        "arguments",
+        "schema",
+        "risk",
+        "risk_conflict",
+        "annotation_conflicts",
+        "branch_risk",
+    }
+    _reject_unknown_fields(
+        review_sources,
+        allowed=source_fields,
+        field=f"tool '{name}' review sources",
+    )
+    if not source_fields.issubset(review_sources):
+        missing = sorted(source_fields - set(review_sources))
+        raise DiffError(
+            f"tool '{name}' review sources are missing required fields: "
+            + ", ".join(missing)
+        )
+    _require_string_array(
+        review_sources["arguments"],
+        field=f"tool '{name}' review source arguments",
+    )
+    _require_string_array(
+        review_sources["annotation_conflicts"],
+        field=f"tool '{name}' review source annotation conflicts",
+    )
+    for boolean_source in (
+        "schema",
+        "risk",
+        "risk_conflict",
+        "branch_risk",
+    ):
+        _require_bool(
+            review_sources[boolean_source],
+            field=f"tool '{name}' review source {boolean_source}",
+        )
+    if review_sources != expected_review_sources:
+        raise DiffError(f"tool '{name}' review_sources are inconsistent")
+    if review_required is not expected_review_required:
+        raise DiffError(f"tool '{name}' review_required is inconsistent")
+
+
 def _validate_report_tool(
     value: Any,
     *,
     seen: set[str],
     require_fingerprints: bool,
+    report_version: int,
 ) -> tuple[str, set[str]]:
     tool = _require_object(value, field="report tool")
+    allowed_fields = {
+        "name",
+        "risk",
+        "risk_source",
+        "risk_evidence",
+        "inferred_risk",
+        "risk_inference",
+        "declared_risk",
+        "risk_conflict",
+        "risk_review_required",
+        "needs_confirmation",
+        "schema_closes_unknown_arguments",
+        "schema_review_required",
+        "annotation_assessments",
+        "annotation_conflicts",
+        "branch_risk",
+        "branch_risk_review_required",
+        "arguments",
+        "schema_material_fingerprint_sha256",
+        "unmodeled_schema_fingerprint_sha256",
+        "source_id",
+        "source_url",
+    }
+    if report_version >= 5:
+        allowed_fields.update({"review_required", "review_sources"})
     _reject_unknown_fields(
         tool,
-        allowed={
-            "name",
-            "risk",
-            "risk_source",
-            "risk_evidence",
-            "inferred_risk",
-            "risk_inference",
-            "declared_risk",
-            "risk_conflict",
-            "risk_review_required",
-            "needs_confirmation",
-            "schema_closes_unknown_arguments",
-            "schema_review_required",
-            "annotation_assessments",
-            "annotation_conflicts",
-            "branch_risk",
-            "branch_risk_review_required",
-            "arguments",
-            "schema_material_fingerprint_sha256",
-            "unmodeled_schema_fingerprint_sha256",
-            "source_id",
-            "source_url",
-        },
+        allowed=allowed_fields,
         field="report tool",
     )
     name = _require_text(tool.get("name"), field="report tool name")
@@ -1332,11 +1415,12 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         )
     if (
         type(report_version) is not int
-        or report_version != _SUPPORTED_REPORT_VERSION
+        or report_version not in _COMPATIBLE_REPORT_VERSIONS
     ):
         raise DiffError(
             f"{label} uses unsupported report version "
-            f"{report_version!r}; expected {_SUPPORTED_REPORT_VERSION}"
+            f"{report_version!r}; expected one of "
+            + ", ".join(str(version) for version in sorted(_COMPATIBLE_REPORT_VERSIONS))
         )
     _reject_unknown_fields(
         report,
@@ -1434,6 +1518,8 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         "schema_review_required_tools",
         "branch_risk_review_required_tools",
     }
+    if report_version >= 5:
+        required_summary_fields.add("review_required_tools")
     _reject_unknown_fields(
         summary,
         allowed=required_summary_fields,
@@ -1463,6 +1549,7 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
             raw_tool,
             seen=tool_names,
             require_fingerprints=not names_redacted,
+            report_version=report_version,
         )
         report_tools[tool_name] = raw_tool
         report_arguments[tool_name] = {
@@ -1545,6 +1632,21 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
         raise DiffError(
             f"{label} exposes declared risk without declared control metadata"
         )
+
+    for tool in tools:
+        _validate_or_derive_tool_review(
+            tool,
+            name=tool["name"],
+            report_version=report_version,
+        )
+    if report_version >= 5:
+        expected_review_required_tools = sum(
+            tool["review_required"] is True for tool in tools
+        )
+        if summary["review_required_tools"] != expected_review_required_tools:
+            raise DiffError(
+                f"{label} summary.review_required_tools does not match its tools"
+            )
 
     _validate_report_cardinalities(
         tools,
@@ -1703,6 +1805,21 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "unmodeled_schema_fingerprint_sha256"
                 ],
             }
+        review_sources = raw_tool.get("review_sources")
+        if review_sources is None:
+            review_sources = _tool_review_sources(
+                arguments=raw_tool["arguments"],
+                schema_review_required=raw_tool["schema_review_required"],
+                risk_review_required=raw_tool["risk_review_required"],
+                risk_conflict=raw_tool["risk_conflict"],
+                annotation_assessments=raw_tool["annotation_assessments"],
+                branch_risk_review_required=raw_tool[
+                    "branch_risk_review_required"
+                ],
+            )
+        review_required = raw_tool.get("review_required")
+        if review_required is None:
+            review_required = _tool_review_required(review_sources)
         indexed[name] = {
             "risk": raw_tool.get("risk"),
             "risk_source": raw_tool.get("risk_source"),
@@ -1712,6 +1829,8 @@ def _index_report(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "declared_risk": raw_tool.get("declared_risk"),
             "risk_conflict": raw_tool.get("risk_conflict"),
             "risk_review_required": raw_tool.get("risk_review_required"),
+            "review_required": review_required,
+            "review_sources": review_sources,
             "needs_confirmation": raw_tool.get("needs_confirmation"),
             "annotation_assessments": raw_tool["annotation_assessments"],
             "annotation_conflicts": raw_tool["annotation_conflicts"],
