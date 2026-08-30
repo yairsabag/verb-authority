@@ -5,9 +5,13 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.0-beta.12] - 2026-08-30
+
 ### Scanner report v5
 
-- Prepare the v0.10.0-beta.12 scanner contract by bumping named and redacted
+- Publish the v0.10.0-beta.12 scanner contract by bumping named and redacted
   reports from v4 to v5. Add a derived `review_required` boolean and structured
   `review_sources` index to every tool, covering flagged arguments plus schema,
   risk, risk-conflict, MCP annotation-conflict, and selector-branch review
@@ -746,7 +750,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.11...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.12...HEAD
+[0.10.0-beta.12]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12
 [0.10.0-beta.11]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11
 [0.10.0-beta.10]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10
 [0.10.0-beta.9]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9
