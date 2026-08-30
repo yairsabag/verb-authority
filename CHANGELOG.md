@@ -746,7 +746,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.10...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.11...HEAD
+[0.10.0-beta.11]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11
 [0.10.0-beta.10]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10
 [0.10.0-beta.9]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9
 [0.10.0-beta.8]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8

@@ -54,14 +54,14 @@ Verb Authority is not published on PyPI. Install the latest published
 prerelease directly from GitHub:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.10"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.11"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.10 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10)
+The [beta.11 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
@@ -936,7 +936,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.10
+- uses: yairsabag/verb-authority@v0.10.0-beta.11
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -962,7 +962,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.10
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.11
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
