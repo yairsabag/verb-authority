@@ -5,7 +5,17 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### External regression evidence
+
+- Preserve Sankalp Gilda's external two-arm Playwright `browser_tabs` fixture,
+  including the unchanged beta.10 and beta.11 reports and their SHA-256
+  manifest. Record the Apache-2.0 upstream source, immutable Playwright MCP
+  commit, independent byte-for-byte scanner reproduction, and the limits of
+  the contributor-attested capture chronology.
+- Extend the derived regression to verify the frozen bundle before use and to
+  pin report v5's tool-level `review_required` aggregate and structured sources
+  on the same real schema. Keep the full external evidence repository-only so
+  Python distributions remain within the existing release archive contract.
 
 ## [0.10.0-beta.12] - 2026-08-30
 

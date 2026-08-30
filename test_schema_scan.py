@@ -1,8 +1,10 @@
 import copy
+import hashlib
 import io
 import json
+import os
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -3822,3 +3824,218 @@ def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):
 def test_rejects_documents_without_tools():
     with pytest.raises(SchemaError, match="no recognizable"):
         parse_tool_definitions({"not_tools": []})
+
+
+def _playwright_browser_tabs_fixture():
+    root = (
+        Path(__file__).parent
+        / "fixtures"
+        / "external"
+        / "sankalp-gilda"
+        / "playwright-browser-tabs"
+    )
+    frozen = root / "frozen"
+    if not frozen.is_dir():
+        pytest.skip("external frozen evidence is repository-only")
+    return root, frozen
+
+
+def _verify_playwright_browser_tabs_frozen_inputs(frozen, expected):
+    integrity = expected["frozen_integrity"]
+    manifest = frozen / "MANIFEST.sha256"
+    assert manifest.is_file() and not manifest.is_symlink()
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == integrity[
+        "manifest_sha256"
+    ]
+    commands = frozen / "COMMANDS.md"
+    assert commands.is_file() and not commands.is_symlink()
+    assert hashlib.sha256(commands.read_bytes()).hexdigest() == integrity[
+        "commands_sha256"
+    ]
+
+    recorded = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, name = line.split(maxsplit=1)
+        name = name.strip()
+        path = PurePosixPath(name)
+        assert not path.is_absolute() and len(path.parts) == 1
+        assert name not in {".", ".."} and "\\" not in name
+        assert name not in recorded, f"duplicate frozen manifest member: {name}"
+        assert len(digest) == 64 and all(
+            character in "0123456789abcdef" for character in digest
+        )
+        recorded[name] = digest
+
+    assert list(recorded) == integrity["manifest_members"]
+    for name, digest in recorded.items():
+        member = frozen / name
+        assert member.is_file() and not member.is_symlink()
+        actual = hashlib.sha256(member.read_bytes()).hexdigest()
+        assert actual == digest, f"{name} no longer matches the frozen manifest"
+
+    assert (
+        recorded["tools-list.json"]
+        == "1e615213d0fcc71246febecd281ce85fb11fc8cce3e8f636d9fbc255021a2c44"
+    )
+
+
+def test_playwright_browser_tabs_frozen_inputs_are_unmodified():
+    """The manifest is the fixture's own tripwire, so check it before using it.
+
+    A regression case whose inputs drifted proves nothing about the release it
+    names, and a drifted input fails in exactly the same way as a real
+    regression. Reading the manifest first tells those two apart.
+    """
+    root, frozen = _playwright_browser_tabs_fixture()
+    expected = json.loads((root / "EXPECTED.json").read_text(encoding="utf-8"))
+    _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+
+
+@pytest.mark.parametrize(
+    "member",
+    ("../escape.json", "/absolute.json", "nested/file.json", "nested\\file.json"),
+)
+def test_playwright_frozen_manifest_rejects_unsafe_member_paths(tmp_path, member):
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    commands = frozen / "COMMANDS.md"
+    commands.write_bytes(b"")
+    manifest = frozen / "MANIFEST.sha256"
+    manifest.write_text(f"{'0' * 64}  {member}\n", encoding="utf-8")
+    expected = {
+        "frozen_integrity": {
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "commands_sha256": hashlib.sha256(commands.read_bytes()).hexdigest(),
+            "manifest_members": [member],
+        }
+    }
+
+    with pytest.raises(AssertionError):
+        _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+
+
+def test_playwright_browser_tabs_external_regression():
+    """Pin the two behaviours 0.10.0b11 established, on externally frozen bytes.
+
+    Two arms, because one is ambiguous. With nothing declared every tool sits
+    behind an unknown tier and requires confirmation, which is fail-safe and
+    hides what the scanner concluded per argument. Declaring the tool a write
+    removes that cover. A scanner that is correct and one that is merely
+    fail-safe agree on arm 1 and differ on arm 2.
+    """
+    root, frozen = _playwright_browser_tabs_fixture()
+    expected = json.loads((root / "EXPECTED.json").read_text(encoding="utf-8"))
+    _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+    schema = json.loads((frozen / "tools-list.json").read_text(encoding="utf-8"))
+    controls = json.loads((frozen / "controls.json").read_text(encoding="utf-8"))
+
+    def subject(report):
+        for tool in report["tools"]:
+            if tool["name"] == expected["tool"]:
+                return tool
+        raise AssertionError(f"{expected['tool']} absent from the report")
+
+    def arguments(tool):
+        return {argument["name"]: argument for argument in tool["arguments"]}
+
+    superseded = expected["superseded"]
+    beta10_undeclared = json.loads(
+        (frozen / "report-0.10.0b10-undeclared.json").read_text(encoding="utf-8")
+    )
+    beta10_declared = json.loads(
+        (frozen / "report-0.10.0b10-declared-write.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert beta10_undeclared["summary"]["annotation_conflicts"] == superseded[
+        "undeclared_annotation_conflicts_total"
+    ]
+    assert beta10_declared["summary"]["annotation_conflicts"] == superseded[
+        "declared_write_annotation_conflicts_total"
+    ]
+    beta10_arguments = arguments(subject(beta10_declared))
+    for name, want in superseded["declared_write_arguments"].items():
+        argument = beta10_arguments[name]
+        assert argument["policy"] == want["policy"], name
+        assert argument["review_required"] is want["review_required"], name
+        assert argument["confidence"] == want["confidence"], name
+
+    undeclared = scan_documents([schema])
+    declared = scan_documents([schema], control_declarations=controls)
+
+    # Arm 1. The count is the assertion: 23 of 23 tools reporting a conflict is
+    # indistinguishable from none of them doing so, because a correct hint and a
+    # wrong one produced the same string.
+    assert (
+        undeclared["summary"]["annotation_conflicts"]
+        == expected["undeclared"]["annotation_conflicts_total"]
+    )
+    undeclared_arguments = arguments(subject(undeclared))
+    for name, want in expected["undeclared"]["arguments"].items():
+        assert undeclared_arguments[name]["policy"] == want["policy"]
+        assert undeclared_arguments[name]["review_required"] is want["review_required"]
+
+    # Arm 2. An argument whose value selects the operation must stay
+    # consequential, whatever its type says.
+    arm2 = expected["declared_write"]
+    tool = subject(declared)
+    assert declared["summary"]["annotation_conflicts"] == arm2["annotation_conflicts_total"]
+    assert tool["annotation_conflicts"] == arm2["annotation_conflicts_on_subject"]
+    assert tool["risk"] == arm2["risk"]
+    assert tool["needs_confirmation"] is arm2["needs_confirmation"]
+
+    states = {
+        assessment["annotation"]: assessment["state"]
+        for assessment in tool["annotation_assessments"]
+    }
+    assert states == arm2["annotation_states"]
+
+    declared_arguments = arguments(tool)
+    for name, want in arm2["arguments"].items():
+        argument = declared_arguments[name]
+        assert argument["policy"] == want["policy"], name
+        assert argument["review_required"] is want["review_required"], name
+        assert argument["confidence"] == want["confidence"], name
+
+    # schema_review_required remains the narrow schema-structure source. Report
+    # v5 also exposes one tool-wide aggregate and its complete source index.
+    current = expected["current_report_v5"]
+    assert declared["report_version"] == current["report_version"]
+    assert declared["summary"]["review_required_tools"] == current[
+        "summary_review_required_tools"
+    ]
+    assert tool["schema_review_required"] is current["schema_review_required"]
+    assert tool["review_required"] is current["review_required"]
+    assert tool["review_sources"] == current["review_sources"]
+
+    # The process exit remains the CI enforcement path for any review source.
+    assert scanner.main(
+        [
+            "--format",
+            "json",
+            "--controls",
+            str(frozen / "controls.json"),
+            "--fail-on-review",
+            "--output",
+            os.devnull,
+            str(frozen / "tools-list.json"),
+        ]
+    ) == arm2["fail_on_review_exit_status"]
+
+    # The one surviving conflict is this fixture's own under-declaration, not a
+    # scanner defect. Declaring the tier the hint asserts clears it.
+    probe_controls = json.loads(
+        (root / "probe-controls-destructive.json").read_text(encoding="utf-8")
+    )
+    probe = scan_documents([schema], control_declarations=probe_controls)
+    probe_expected = expected["declared_destructive_probe"]
+    assert (
+        probe["summary"]["annotation_conflicts"]
+        == probe_expected["annotation_conflicts_total"]
+    )
+    assert {
+        assessment["annotation"]: assessment["state"]
+        for assessment in subject(probe)["annotation_assessments"]
+    } == probe_expected["annotation_states"]

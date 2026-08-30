@@ -1,0 +1,76 @@
+{
+  "fixture": "playwright-browser-tabs",
+  "tool": "browser_tabs",
+  "source_schema": "frozen/tools-list.json",
+  "source_controls": "frozen/controls.json",
+  "established_at_version": "0.10.0b11",
+  "claim_boundary": "An argument whose value selects the operation is treated as consequential regardless of its type, and an annotation hint is only reported as conflicting when it actually disagrees with established risk.",
+  "frozen_integrity": {
+    "manifest_sha256": "5afddcdf1ddec08068f33e2e9868936372a7af947c515821467b073c659a5534",
+    "commands_sha256": "f0761debc4a044aedeb62f8cb1e295d32d5744cdffd05674a198f053d0021898",
+    "manifest_members": [
+      "tools-list.json",
+      "controls.json",
+      "report-0.10.0b10-declared-write.json",
+      "report-0.10.0b10-undeclared.json",
+      "report-0.10.0b11-declared-write.json",
+      "report-0.10.0b11-undeclared.json"
+    ]
+  },
+  "undeclared": {
+    "annotation_conflicts_total": 0,
+    "arguments": {
+      "action": {"policy": "trusted_fixed", "review_required": true},
+      "index": {"policy": "trusted_fixed", "review_required": true},
+      "url": {"policy": "trusted_fixed", "review_required": false}
+    }
+  },
+  "declared_write": {
+    "annotation_conflicts_total": 1,
+    "annotation_conflicts_on_subject": ["destructiveHint=true conflicts with effective risk"],
+    "annotation_states": {
+      "readOnlyHint": "consistent",
+      "destructiveHint": "conflict",
+      "openWorldHint": "unresolved"
+    },
+    "needs_confirmation": false,
+    "risk": "write",
+    "fail_on_review_exit_status": 2,
+    "arguments": {
+      "action": {"policy": "trusted_fixed", "review_required": true, "confidence": "uncertain"},
+      "index": {"policy": "trusted_fixed", "review_required": true, "confidence": "uncertain"},
+      "url": {"policy": "trusted_fixed", "review_required": false, "confidence": "high"}
+    }
+  },
+  "declared_destructive_probe": {
+    "annotation_conflicts_total": 0,
+    "annotation_states": {
+      "readOnlyHint": "consistent",
+      "destructiveHint": "consistent",
+      "openWorldHint": "unresolved"
+    }
+  },
+  "current_report_v5": {
+    "report_version": 5,
+    "summary_review_required_tools": 23,
+    "schema_review_required": false,
+    "review_required": true,
+    "review_sources": {
+      "arguments": ["action", "index"],
+      "schema": false,
+      "risk": false,
+      "risk_conflict": false,
+      "annotation_conflicts": ["destructiveHint"],
+      "branch_risk": true
+    }
+  },
+  "superseded": {
+    "version": "0.10.0b10",
+    "undeclared_annotation_conflicts_total": 23,
+    "declared_write_annotation_conflicts_total": 23,
+    "declared_write_arguments": {
+      "action": {"policy": "typed_bounded", "review_required": false, "confidence": "high"},
+      "index": {"policy": "typed_bounded", "review_required": false, "confidence": "high"}
+    }
+  }
+}

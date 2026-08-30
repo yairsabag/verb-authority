@@ -1,4 +1,4 @@
-recursive-include fixtures *.json *.md
+include fixtures/*.json fixtures/*.md
 recursive-include benchmarks *.py *.json *.md
 recursive-include docs *.md *.png
 recursive-include atlas *.md *.json
