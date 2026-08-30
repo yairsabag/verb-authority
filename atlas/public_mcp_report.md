@@ -17,6 +17,7 @@
 | Protected (`trusted_fixed`) | 13 |
 | Data-fillable | 1 |
 | Parameters requiring review | 9 |
+| Tools requiring review | 10 |
 | Schemas requiring review | 5 |
 | Tools requiring confirmation | 10 |
 | Tool risks requiring review | 10 |
@@ -33,6 +34,23 @@ Names redacted: `no`
 |---|---|
 | official-mcp-filesystem-reference | https&#58;//github.com/modelcontextprotocol/servers/blob/599dafc1054550a6eeb8&#8204;7a6545c1e1b03b3ca827/src/filesystem/index.ts |
 | official-mcp-memory-reference | https&#58;//github.com/modelcontextprotocol/servers/blob/599dafc1054550a6eeb8&#8204;7a6545c1e1b03b3ca827/src/memory/index.ts |
+
+## Tool review summary
+
+> Static review debt is separate from runtime confirmation.
+
+| Tool | Review required | Arguments | Schema | Risk | Risk conflict | Annotation conflicts | Branch risk |
+|---|---|---|---|---|---|---|---|
+| create_entities | yes | entities | yes | yes | no | — | no |
+| add_observations | yes | observations | yes | yes | no | — | no |
+| delete_entities | yes | entityNames | yes | yes | no | — | no |
+| read_graph | yes | — | no | yes | no | — | no |
+| search_nodes | yes | query | no | yes | no | — | no |
+| open_nodes | yes | names | yes | yes | no | — | no |
+| read_text_file | yes | tail, head | no | yes | no | — | no |
+| write_file | yes | — | no | yes | no | — | no |
+| edit_file | yes | edits, dryRun | yes | yes | no | — | no |
+| get_file_info | yes | — | no | yes | no | — | no |
 
 ## Tool risk evidence
 

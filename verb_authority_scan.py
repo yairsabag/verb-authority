@@ -40,7 +40,7 @@ from verb_authority import (
 )
 
 
-REPORT_VERSION = 4
+REPORT_VERSION = 5
 CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
@@ -192,6 +192,8 @@ _REPORT_TOOL_SENTINEL_KEYS = frozenset(
         "risk_inference",
         "risk_conflict",
         "risk_review_required",
+        "review_required",
+        "review_sources",
         "needs_confirmation",
         "schema_review_required",
         "annotation_assessments",
@@ -2103,6 +2105,53 @@ def _annotation_conflicts(
     ]
 
 
+def _tool_review_sources(
+    *,
+    arguments: list[dict[str, Any]],
+    schema_review_required: bool,
+    risk_review_required: bool,
+    risk_conflict: bool,
+    annotation_assessments: list[dict[str, Any]],
+    branch_risk_review_required: bool,
+) -> dict[str, Any]:
+    """Index every existing static-review obligation for one tool.
+
+    This is deliberately derived from evidence already present in the report.
+    Runtime confirmation is a separate execution requirement and is not review
+    debt merely because a well-classified consequential action needs approval.
+    """
+
+    return {
+        "arguments": [
+            argument["name"]
+            for argument in arguments
+            if argument["review_required"] is True
+        ],
+        "schema": schema_review_required,
+        "risk": risk_review_required,
+        "risk_conflict": risk_conflict,
+        "annotation_conflicts": [
+            assessment["annotation"]
+            for assessment in annotation_assessments
+            if assessment["state"] == "conflict"
+        ],
+        "branch_risk": branch_risk_review_required,
+    }
+
+
+def _tool_review_required(review_sources: dict[str, Any]) -> bool:
+    return any(
+        (
+            review_sources["arguments"],
+            review_sources["schema"],
+            review_sources["risk"],
+            review_sources["risk_conflict"],
+            review_sources["annotation_conflicts"],
+            review_sources["branch_risk"],
+        )
+    )
+
+
 def _worst_branch_risk(branches: dict[str, Any]) -> Risk:
     return max(
         (Risk(case["risk"]["tier"]) for case in branches["cases"]),
@@ -2484,6 +2533,7 @@ def _scan_definitions_bounded(
         "protected_parameters": 0,
         "data_fillable_parameters": 0,
         "review_required": 0,
+        "review_required_tools": 0,
         "schema_review_required_tools": 0,
         "confirmation_required_tools": 0,
         "risk_review_required_tools": 0,
@@ -2629,6 +2679,17 @@ def _scan_definitions_bounded(
         counts["risk_review_required_tools"] += int(risk_review_required)
         counts["confirmation_required_tools"] += int(needs_confirmation)
 
+        review_sources = _tool_review_sources(
+            arguments=arguments,
+            schema_review_required=schema_review_required,
+            risk_review_required=risk_review_required,
+            risk_conflict=risk_conflict,
+            annotation_assessments=annotation_assessments,
+            branch_risk_review_required=branch_review_required,
+        )
+        tool_review_required = _tool_review_required(review_sources)
+        counts["review_required_tools"] += int(tool_review_required)
+
         tool_report: dict[str, Any] = {
             "name": display_tool,
             "risk": risk.value,
@@ -2647,6 +2708,8 @@ def _scan_definitions_bounded(
             "declared_risk": declared_risk,
             "risk_conflict": risk_conflict,
             "risk_review_required": risk_review_required,
+            "review_required": tool_review_required,
+            "review_sources": review_sources,
             "needs_confirmation": needs_confirmation,
             "branch_risk": branch_report,
             "branch_risk_review_required": branch_review_required,
@@ -2891,6 +2954,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| Protected (`trusted_fixed`) | {summary['protected_parameters']} |",
         f"| Data-fillable | {summary['data_fillable_parameters']} |",
         f"| Parameters requiring review | {summary['review_required']} |",
+        f"| Tools requiring review | {summary['review_required_tools']} |",
         f"| Schemas requiring review | {summary.get('schema_review_required_tools', 0)} |",
         f"| Tools requiring confirmation | {summary['confirmation_required_tools']} |",
         f"| Tool risks requiring review | {summary['risk_review_required_tools']} |",
@@ -2914,6 +2978,39 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"| {_markdown_cell(source_id)} | {_markdown_cell(source_url)} |"
             )
+    lines.extend(
+        [
+            "",
+            "## Tool review summary",
+            "",
+            "> Static review debt is separate from runtime confirmation.",
+            "",
+            "| Tool | Review required | Arguments | Schema | Risk | Risk conflict | "
+            "Annotation conflicts | Branch risk |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for tool in report["tools"]:
+        review_sources = tool["review_sources"]
+        lines.append(
+            "| {tool} | {required} | {arguments} | {schema} | {risk} | "
+            "{risk_conflict} | {annotations} | {branch_risk} |".format(
+                tool=_markdown_cell(tool["name"]),
+                required="yes" if tool["review_required"] else "no",
+                arguments=_markdown_cell(
+                    ", ".join(review_sources["arguments"]) or "—"
+                ),
+                schema="yes" if review_sources["schema"] else "no",
+                risk="yes" if review_sources["risk"] else "no",
+                risk_conflict=(
+                    "yes" if review_sources["risk_conflict"] else "no"
+                ),
+                annotations=_markdown_cell(
+                    ", ".join(review_sources["annotation_conflicts"]) or "—"
+                ),
+                branch_risk="yes" if review_sources["branch_risk"] else "no",
+            )
+        )
     lines.extend(
         [
             "",
@@ -3143,9 +3240,10 @@ def _summary_requires_review(summary: dict[str, Any]) -> bool:
     """Return whether a scanner summary carries any advertised review debt."""
 
     return any(
-        summary[field]
+        summary.get(field, 0)
         for field in (
             "review_required",
+            "review_required_tools",
             "schema_review_required_tools",
             "risk_review_required_tools",
             "risk_conflicts",

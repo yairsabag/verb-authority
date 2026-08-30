@@ -43,7 +43,7 @@ def _constraint_schema(maximum, max_length, enum):
     }
 
 
-def test_report_v4_preserves_constraints_without_disclosing_enum_members():
+def test_report_v5_preserves_constraints_without_disclosing_enum_members():
     document = _constraint_schema(100, 40, ["safe", "reviewed"])
 
     report = scan_documents([document])
@@ -51,8 +51,8 @@ def test_report_v4_preserves_constraints_without_disclosing_enum_members():
         argument["name"]: argument for argument in report["tools"][0]["arguments"]
     }
 
-    assert REPORT_VERSION == 4
-    assert report["report_version"] == 4
+    assert REPORT_VERSION == 5
+    assert report["report_version"] == 5
     assert arguments["amount"]["constraints"] == {"maximum": 100}
     assert arguments["message"]["constraints"] == {"max_length": 40}
     enum = arguments["mode"]["constraints"]["enum"]
@@ -576,6 +576,50 @@ def test_report_header_sentinel_on_collection_entry_never_becomes_raw_schema(
 
     with pytest.raises(SchemaError, match="report-shaped"):
         parse_tool_definitions(document)
+
+
+@pytest.mark.parametrize(
+    ("sentinel", "value"),
+    (("review_required", True), ("review_sources", {})),
+)
+@pytest.mark.parametrize(
+    "envelope",
+    ("direct-list", "tools", "result.tools", "sources.tools"),
+)
+def test_v5_tool_review_sentinels_never_become_raw_schema(
+    envelope, sentinel, value
+):
+    hybrid = _collision_mcp_tool("operate")
+    hybrid[sentinel] = value
+
+    with pytest.raises(SchemaError, match="report-shaped"):
+        parse_tool_definitions(_wrap_collection_entry(envelope, hybrid))
+
+
+def test_v5_review_names_inside_input_schema_remain_ordinary_arguments():
+    document = {
+        "tools": [
+            {
+                "name": "record_review",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "review_required": {"type": "boolean"},
+                        "review_sources": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+    definitions = parse_tool_definitions(document)
+
+    assert [definition.name for definition in definitions] == ["record_review"]
+    assert set(definitions[0].input_schema["properties"]) == {
+        "review_required",
+        "review_sources",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1188,6 +1232,7 @@ def test_scans_mcp_tools_list_result():
         "protected_parameters": 1,
         "data_fillable_parameters": 1,
         "review_required": 0,
+        "review_required_tools": 1,
         "schema_review_required_tools": 0,
         "confirmation_required_tools": 1,
         "risk_review_required_tools": 1,
@@ -1248,7 +1293,20 @@ def test_scans_openai_and_anthropic_exports_together():
 )
 def test_avp9_bid_name_mutations_are_only_advisory_until_declared(name):
     report = scan_documents(
-        [{"tools": [{"name": name, "inputSchema": {"properties": {}}}]}]
+        [
+            {
+                "tools": [
+                    {
+                        "name": name,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
     )
     tool = report["tools"][0]
 
@@ -1275,7 +1333,20 @@ def test_avp9_evaluation_names_do_not_trigger_code_exec_substrings(name):
 
 def test_avp9_eval_complete_token_is_advisory_code_exec_evidence():
     tool = scan_documents(
-        [{"tools": [{"name": "eval", "inputSchema": {"properties": {}}}]}]
+        [
+            {
+                "tools": [
+                    {
+                        "name": "eval",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
     )["tools"][0]
 
     assert tool["inferred_risk"] == "code_exec"
@@ -1284,6 +1355,15 @@ def test_avp9_eval_complete_token_is_advisory_code_exec_evidence():
     assert tool["risk_source"] == "safe_default"
     assert tool["risk_review_required"] is True
     assert tool["needs_confirmation"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"] == {
+        "arguments": [],
+        "schema": False,
+        "risk": True,
+        "risk_conflict": False,
+        "annotation_conflicts": [],
+        "branch_risk": False,
+    }
 
 
 def test_descriptions_and_parameter_names_do_not_author_risk():
@@ -1314,9 +1394,15 @@ def test_descriptions_and_parameter_names_do_not_author_risk():
 def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
     document = {
         "tools": [
-            {"name": "place_bid", "inputSchema": {"properties": {}}},
-            {"name": "evaluate", "inputSchema": {"properties": {}}},
-            {"name": "chain_index", "inputSchema": {"properties": {}}},
+            {
+                "name": name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+            for name in ("place_bid", "evaluate", "chain_index")
         ]
     }
     controls = {
@@ -1356,7 +1442,24 @@ def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
     assert tools["chain_index"]["risk"] == "read_only"
     assert tools["chain_index"]["needs_confirmation"] is False
     assert all(not tool["risk_review_required"] for tool in tools.values())
+    assert all(not tool["review_required"] for tool in tools.values())
+    assert all(
+        tool["review_sources"]
+        == {
+            "arguments": [],
+            "schema": False,
+            "risk": False,
+            "risk_conflict": False,
+            "annotation_conflicts": [],
+            "branch_risk": False,
+        }
+        for tool in tools.values()
+    )
+    # Runtime confirmation is an execution control, not static review debt.
+    assert tools["place_bid"]["needs_confirmation"] is True
+    assert tools["place_bid"]["review_required"] is False
     assert report["summary"]["risk_review_required_tools"] == 0
+    assert report["summary"]["review_required_tools"] == 0
 
 
 def test_synthetic_browser_tabs_locks_operation_selector_and_unbounded_index():
@@ -1407,7 +1510,17 @@ def test_synthetic_browser_tabs_locks_operation_selector_and_unbounded_index():
         for assessment in tool["annotation_assessments"]
     }
 
-    assert report["report_version"] == 4
+    assert report["report_version"] == 5
+    assert tool["review_required"] is True
+    assert tool["review_sources"] == {
+        "arguments": ["action", "index"],
+        "schema": False,
+        "risk": False,
+        "risk_conflict": False,
+        "annotation_conflicts": [],
+        "branch_risk": True,
+    }
+    assert report["summary"]["review_required_tools"] == 1
     for name in ("action", "index"):
         assert arguments[name]["policy"] == "trusted_fixed"
         assert arguments[name]["confidence"] == "uncertain"
@@ -1585,6 +1698,10 @@ def test_redacted_branch_report_redacts_selector_and_active_argument_names():
     branch = tool["branch_risk"]
 
     assert tool["name"] == "tool_001"
+    assert tool["review_sources"]["arguments"] == [
+        "param_001",
+        "param_002",
+    ]
     assert branch["selector"] == "param_001"
     assert all(
         set(case["active_arguments"]) <= {"param_001", "param_002", "param_003"}
@@ -2024,6 +2141,7 @@ def test_unknown_risk_keeps_mcp_annotations_unresolved_not_conflicting():
     assert tool["risk"] == "unknown"
     assert tool["annotation_conflicts"] == []
     assert report["summary"]["annotation_conflicts"] == 0
+    assert tool["review_sources"]["annotation_conflicts"] == []
     assert {name: assessment["state"] for name, assessment in assessments.items()} == {
         "readOnlyHint": "unresolved",
         "destructiveHint": "unresolved",
@@ -2250,6 +2368,10 @@ def test_destructive_hint_false_conflicts_with_declared_destructive_risk():
         "destructiveHint": "conflict",
     }
     assert report["summary"]["annotation_conflicts"] == 1
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["annotation_conflicts"] == [
+        "destructiveHint"
+    ]
     assert tool["needs_confirmation"] is True
 
 
@@ -2283,6 +2405,9 @@ def test_declared_lower_risk_conflict_keeps_confirmation_fail_safe():
     assert tool["declared_risk"]["evidence"] == "declared"
     assert tool["risk_conflict"] is True
     assert tool["risk_review_required"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["risk"] is True
+    assert tool["review_sources"]["risk_conflict"] is True
     assert tool["needs_confirmation"] is True
     assert "| purchase_bid | unknown | conflict_safe_default |" in render_markdown(
         report
@@ -2336,6 +2461,7 @@ def test_public_atlas_baseline_is_reproducible():
         "protected_parameters": 13,
         "data_fillable_parameters": 1,
         "review_required": 9,
+        "review_required_tools": 10,
         "schema_review_required_tools": 5,
         "confirmation_required_tools": 10,
         "risk_review_required_tools": 10,
@@ -2562,6 +2688,8 @@ def test_unexposed_control_on_open_schema_requires_schema_review():
 
     assert report["tools"][0]["schema_closes_unknown_arguments"] is False
     assert report["tools"][0]["schema_review_required"] is True
+    assert report["tools"][0]["review_required"] is True
+    assert report["tools"][0]["review_sources"]["schema"] is True
     assert report["summary"]["schema_review_required_tools"] == 1
 
 
@@ -2951,6 +3079,7 @@ def test_cli_fail_on_review_checks_branch_debt_directly(tmp_path, monkeypatch):
         report = real_scan_documents(*args, **kwargs)
         for field in (
             "review_required",
+            "review_required_tools",
             "schema_review_required_tools",
             "risk_review_required_tools",
             "risk_conflicts",

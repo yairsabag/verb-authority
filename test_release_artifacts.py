@@ -1381,7 +1381,7 @@ def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
     config = release_verifier._project_release_config(
         repository / "pyproject.toml"
     )
-    assert config.version == "0.10.0b11"
+    assert config.version == "0.10.0b12"
     assert config.dependencies == ()
     assert config.optional_dependencies["pydantic"] == (
         "pydantic-ai-slim==2.35.0",

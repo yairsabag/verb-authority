@@ -103,7 +103,7 @@ def _installed_identity(
                 not location.is_relative_to(forbidden_root),
                 f"{module.__name__} imported from forbidden source root: {location}",
             )
-    _check(REPORT_VERSION == 4, "installed scanner is not report v4")
+    _check(REPORT_VERSION == 5, "installed scanner is not report v5")
     _check(DIFF_VERSION == 2, "installed Authority Diff is not diff v2")
 
 
@@ -2080,8 +2080,8 @@ def _mcp_annotation_assessment_contract() -> None:
         },
     )
     _check(
-        report["report_version"] == 4,
-        "MCP annotation evidence was not emitted in report v4",
+        report["report_version"] == 5,
+        "MCP annotation evidence was not emitted in report v5",
     )
     tools = {tool["name"]: tool for tool in report["tools"]}
     read_assessments = {
@@ -2136,6 +2136,119 @@ def _mcp_annotation_assessment_contract() -> None:
     )
 
 
+def _tool_review_aggregate_contract() -> None:
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        },
+                        "index": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes_tab_state"],
+                }
+            }
+        },
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    _check(
+        report["report_version"] == 5
+        and tool["review_required"] is True
+        and tool["review_sources"]
+        == {
+            "arguments": ["action", "index"],
+            "schema": False,
+            "risk": False,
+            "risk_conflict": False,
+            "annotation_conflicts": [],
+            "branch_risk": True,
+        }
+        and report["summary"]["review_required_tools"] == 1,
+        "installed scanner lost the report-v5 tool review aggregate",
+    )
+    _check(
+        "## Tool review summary" in render_markdown(report),
+        "installed Markdown report omitted the tool review summary",
+    )
+
+    forged = copy.deepcopy(report)
+    forged["tools"][0]["review_required"] = False
+    try:
+        diff_reports(forged, copy.deepcopy(forged))
+    except DiffError as exc:
+        _check(
+            "review_required is inconsistent" in str(exc),
+            "installed diff reported the wrong aggregate-forgery boundary",
+        )
+    else:
+        raise AssertionError("installed diff accepted a forged review aggregate")
+
+    legacy = copy.deepcopy(report)
+    legacy["report_version"] = 4
+    legacy["summary"].pop("review_required_tools")
+    for legacy_tool in legacy["tools"]:
+        legacy_tool.pop("review_required")
+        legacy_tool.pop("review_sources")
+    frozen_legacy = copy.deepcopy(legacy)
+    legacy_diff = diff_reports(legacy, report)
+    _check(
+        legacy_diff["changes"] == [] and legacy == frozen_legacy,
+        "installed diff did not preserve v4-to-v5 observational compatibility",
+    )
+
+    confirmation_only = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "erase_store",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ],
+        control_declarations={
+            "version": 1,
+            "tools": {
+                "erase_store": {
+                    "risk": {
+                        "tier": "destructive",
+                        "evidence": "observed",
+                        "effects": ["deletes_store"],
+                    }
+                }
+            },
+        },
+    )["tools"][0]
+    _check(
+        confirmation_only["needs_confirmation"] is True
+        and confirmation_only["review_required"] is False,
+        "installed scanner conflated runtime confirmation with static review debt",
+    )
+
+
 def _constraint_diff_and_migration() -> None:
     before_document = _constraint_document(100, 40, ["safe"])
     after_document = _constraint_document(
@@ -2143,14 +2256,14 @@ def _constraint_diff_and_migration() -> None:
     )
     before = scan_documents([before_document])
     after = scan_documents([after_document])
-    _check(before["report_version"] == 4, "scanner did not produce report v4")
+    _check(before["report_version"] == 5, "scanner did not produce report v5")
     privacy = before["privacy"]
     _check(
         privacy["examples_included"] is False
         and privacy["defaults_included"] is False
         and privacy["runtime_values_included"] is False
         and "examples_or_values_included" not in privacy,
-        "report v4 privacy fields do not separately exclude values",
+        "report v5 privacy fields do not separately exclude values",
     )
     _check(
         privacy["schema_material_fingerprints_included"] is True
@@ -4067,6 +4180,26 @@ def _daybreak_release_candidate_regressions() -> None:
         verb_authority.unicodedata = original_unicode
 
 
+def _refresh_tool_review_aggregate(report: dict) -> None:
+    for tool in report["tools"]:
+        tool["review_sources"] = verb_authority_scan._tool_review_sources(
+            arguments=tool["arguments"],
+            schema_review_required=tool["schema_review_required"],
+            risk_review_required=tool["risk_review_required"],
+            risk_conflict=tool["risk_conflict"],
+            annotation_assessments=tool["annotation_assessments"],
+            branch_risk_review_required=tool[
+                "branch_risk_review_required"
+            ],
+        )
+        tool["review_required"] = verb_authority_scan._tool_review_required(
+            tool["review_sources"]
+        )
+    report["summary"]["review_required_tools"] = sum(
+        tool["review_required"] is True for tool in report["tools"]
+    )
+
+
 def _schema_review_diff_fail_closed() -> None:
     """Pin report observation, raw-only enforcement, and mandatory fields."""
 
@@ -4086,6 +4219,7 @@ def _schema_review_diff_fail_closed() -> None:
     explicit_false = copy.deepcopy(before)
     explicit_false["tools"][0]["schema_review_required"] = False
     explicit_false["summary"]["schema_review_required_tools"] = 0
+    _refresh_tool_review_aggregate(explicit_false)
     explicit_diff = diff_reports(before, explicit_false)
     explicit_change = next(
         change
@@ -4220,7 +4354,7 @@ def _daybreak_final_p3_regressions() -> None:
             "installed empty-report rejection omitted rescan guidance",
         )
     else:
-        raise AssertionError("installed diff accepted a zero-tool v4 report")
+        raise AssertionError("installed diff accepted a zero-tool v5 report")
 
     schema = {
         "tools": [
@@ -4445,6 +4579,7 @@ def main() -> int:
         _async_rejection,
         _unicode_homograph_rejection,
         _mcp_annotation_assessment_contract,
+        _tool_review_aggregate_contract,
         _constraint_diff_and_migration,
         _scanner_resource_boundaries,
         _daybreak_scanner_diff_regressions,
@@ -4458,8 +4593,8 @@ def main() -> int:
         check()
     print(
         "installed-wheel smoke: "
-        f"{args.expected_version}; all audited blocker families + report v4 "
-        "+ legacy-v3 rejection + diff thresholds passed"
+        f"{args.expected_version}; all audited blocker families + report v5 "
+        "+ v4 compatibility + legacy-v3 rejection + diff thresholds passed"
     )
     return 0
 

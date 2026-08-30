@@ -5,6 +5,28 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Scanner report v5
+
+- Prepare the v0.10.0-beta.12 scanner contract by bumping named and redacted
+  reports from v4 to v5. Add a derived `review_required` boolean and structured
+  `review_sources` index to every tool, covering flagged arguments plus schema,
+  risk, risk-conflict, MCP annotation-conflict, and selector-branch review
+  obligations already represented elsewhere in the report.
+- Keep `summary.review_required` as the number of flagged arguments and add
+  `summary.review_required_tools` as the number of tools with any static review
+  debt. Keep that aggregate distinct from `needs_confirmation`, which remains
+  a runtime approval requirement and does not by itself mean that policy or
+  schema review is outstanding.
+- Validate every v5 aggregate and its summary counter against the underlying
+  evidence when Authority Diff imports a report. Continue to accept complete
+  v4 reports for observational comparison by deriving the aggregate only in an
+  internal normalized index, without mutating or rewriting caller-owned input.
+  Diff output remains format v2, so a v4-to-v5 comparison with unchanged
+  semantics has no synthetic change. Report v3 remains rejected and must be
+  regenerated from raw inputs with the v5 scanner.
+
+## [0.10.0-beta.11] - 2026-08-27
+
 ### Exact selector branch risk
 
 - Add a deliberately narrow runtime model for one exact scalar enum selector.
@@ -724,7 +746,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.10...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.11...HEAD
+[0.10.0-beta.11]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11
 [0.10.0-beta.10]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10
 [0.10.0-beta.9]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.9
 [0.10.0-beta.8]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.8
