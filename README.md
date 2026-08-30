@@ -54,14 +54,14 @@ Verb Authority is not published on PyPI. Install the latest published
 prerelease directly from GitHub:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.11"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.12"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority
 ```
 
 The second command runs the built-in demo. The package has no runtime
 dependencies and keeps the existing `verb_authority.py` module and import API.
 
-The [beta.11 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11)
+The [beta.12 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
@@ -316,8 +316,8 @@ boundary, not an inference that the request was user-authorized.
 
 ## Pydantic AI 2.35 runtime adapter
 
-The beta.11 release includes a deliberately narrow Pydantic AI
-adapter. It routes every supported tool invocation through the existing
+The optional Pydantic AI adapter, introduced in beta.11, is deliberately
+narrow. It routes every supported tool invocation through the existing
 `GuardedToolRunner`; Pydantic performs schema generation and argument
 validation, but the registered Pydantic callable is a fresh, permanently inert
 function. The schema source is not retained as an execution target. The exact
@@ -411,7 +411,7 @@ still use `sink=False` when the model is intentionally allowed to choose the
 selector. The selected branch then controls effective risk, active arguments,
 and deferred-confirmation metadata, and approval is bound to that exact branch.
 
-This beta.11 Pydantic adapter supports branch risk only when every selector
+The current Pydantic adapter supports branch risk only when every selector
 case shares one model-visible active-argument shape. A session rejects
 branch-varying `active_args` during construction instead of failing later at
 invocation. The core gate and scanner do support branch-varying active
@@ -936,7 +936,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.11
+- uses: yairsabag/verb-authority@v0.10.0-beta.12
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -962,7 +962,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.11
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.12
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
@@ -1269,12 +1269,11 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release, and v0.10.0-beta.11 is the latest
-published prerelease. This source tree contains the beta.11 safe-default
-scanner fixes, exact one-selector branch risk, and first optional Pydantic AI
-runtime adapter, and prepares v0.10.0-beta.12 with the report v5 tool-level
-review aggregate. The beta.7, beta.8, and beta.9 version identifiers were
-withheld and are not reused.
+v0.9.0 is the latest stable release, and v0.10.0-beta.12 is the latest
+published prerelease. It contains the beta.11 safe-default scanner fixes,
+exact one-selector branch risk, and first optional Pydantic AI runtime adapter,
+plus the report v5 tool-level review aggregate. The beta.7, beta.8, and beta.9
+version identifiers were withheld and are not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and
