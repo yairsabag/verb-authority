@@ -5,13 +5,29 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.0-beta.13] - 2026-08-30
+
+### 60-second demo
+
+- Add an offline `verb_authority quickstart` path that scans one exported MCP
+  tool schema, prints the inferred per-argument authority, and blocks an
+  untrusted recipient before execution. A safe local implementation and
+  invocation counter prove the blocked call never reaches the tool while the
+  approved control executes exactly once. The trusted runtime registration
+  also carries and enforces the schema's `maxLength` bound.
+
 ### External regression evidence
 
-- Preserve Sankalp Gilda's external two-arm Playwright `browser_tabs` fixture,
-  including the unchanged beta.10 and beta.11 reports and their SHA-256
-  manifest. Record the Apache-2.0 upstream source, immutable Playwright MCP
-  commit, independent byte-for-byte scanner reproduction, and the limits of
-  the contributor-attested capture chronology.
+- Strengthen Verb Authority through external adversarial testing. A frozen MCP
+  fixture exposed an ambiguous-argument edge case; the policy was corrected
+  and permanently covered by regression tests.
+- Preserve Sankalp Gilda's technical contribution of the external two-arm
+  Playwright `browser_tabs` fixture, including the unchanged beta.10 and
+  beta.11 reports and their SHA-256 manifest. Record the Apache-2.0 upstream
+  source, immutable Playwright MCP commit, independent byte-for-byte scanner
+  reproduction, and the limits of the contributor-attested capture chronology.
 - Extend the derived regression to verify the frozen bundle before use and to
   pin report v5's tool-level `review_required` aggregate and structured sources
   on the same real schema. Keep the full external evidence repository-only so
@@ -760,7 +776,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.12...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.13...HEAD
+[0.10.0-beta.13]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13
 [0.10.0-beta.12]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12
 [0.10.0-beta.11]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11
 [0.10.0-beta.10]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.10
