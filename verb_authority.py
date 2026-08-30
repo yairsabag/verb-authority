@@ -4245,6 +4245,172 @@ class GuardedToolRunner:
 
 
 # === demo =================================================================
+def quickstart_demo() -> None:
+    """Show the schema-to-enforcement path without network or side effects."""
+
+    body_max_length = 2000
+
+    # This is the same MCP tools/list shape that an application can export for
+    # review.  The sidecar supplies trusted application evidence about what the
+    # tool does; the scanner never treats the tool description as authority.
+    schema = {
+        "tools": [
+            {
+                "name": "send_email",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "to": {"type": "string", "format": "email"},
+                        "body": {
+                            "type": "string",
+                            "maxLength": body_max_length,
+                        },
+                    },
+                    "required": ["to", "body"],
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "send_email": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["sends an email to an external recipient"],
+                }
+            }
+        },
+    }
+
+    # Import lazily so the core gate remains usable without loading the local
+    # schema scanner until this demo (or the scan command) is requested.
+    from verb_authority_scan import scan_documents
+
+    report = scan_documents([schema], control_declarations=controls)
+    scanned_tool = report["tools"][0]
+    scanned_arguments = {
+        argument["name"]: argument for argument in scanned_tool["arguments"]
+    }
+
+    # Trusted application registration is the runtime boundary.  The schema
+    # scan is a review aid; it is not silently promoted into trusted config.
+    local_invocations: list[dict[str, str]] = []
+
+    def record_local_email(to: str, body: str) -> dict[str, Any]:
+        """Record a safe local invocation; never contact an email service."""
+
+        local_invocations.append({"to": to, "body": body})
+        return {"status": "recorded-locally"}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "send_email",
+            [
+                Param("to", "email"),
+                Param("body", "string", max_len=body_max_length),
+            ],
+            fn=record_local_email,
+            risk=Risk.WRITE,
+        )
+    )
+    policy_set = build_policy(registry)
+    runner = GuardedToolRunner(registry, policy_set)
+
+    approved_recipient = "alice@company.com"
+    attacker_recipient = "attacker@evil.com"
+    attacker_call = {
+        "name": "send_email",
+        "input": {"to": attacker_recipient, "body": "Meeting summary"},
+    }
+    blocked = runner.run(
+        attacker_call,
+        trusted_args={"to": approved_recipient},
+    )
+    blocked_invocations = len(local_invocations)
+    overlong = runner.run(
+        {
+            "name": "send_email",
+            "input": {
+                "to": approved_recipient,
+                "body": "x" * (body_max_length + 1),
+            },
+        },
+        trusted_args={"to": approved_recipient},
+    )
+    overlong_invocations = len(local_invocations)
+    allowed = runner.run(
+        {
+            "name": "send_email",
+            "input": {"to": approved_recipient, "body": "Meeting summary"},
+        },
+        trusted_args={"to": approved_recipient},
+    )
+    allowed_invocations = len(local_invocations)
+
+    # Keep the demo executable as a regression, not just presentation copy.
+    if scanned_arguments["to"]["policy"] != "trusted_fixed":
+        raise RuntimeError("quickstart recipient authority regression")
+    if scanned_arguments["body"]["policy"] != "outbound_payload":
+        raise RuntimeError("quickstart body authority regression")
+    if scanned_arguments["body"].get("constraints") != {
+        "max_length": body_max_length
+    }:
+        raise RuntimeError("quickstart schema constraint regression")
+    if blocked.decision.allow or blocked.invoked or blocked_invocations != 0:
+        raise RuntimeError("quickstart blocked call reached the local tool")
+    if (
+        not allowed.decision.allow
+        or not allowed.invoked
+        or not allowed.executed
+        or allowed_invocations != 1
+    ):
+        raise RuntimeError("quickstart approved call did not execute exactly once")
+    if (
+        overlong.decision.allow
+        or overlong.invoked
+        or overlong_invocations != 0
+        or overlong.decision.reason
+        != "param 'body' failed its type/bounds check"
+    ):
+        raise RuntimeError("quickstart maxLength was not enforced before execution")
+
+    print("Verb Authority: SCHEMA -> AUTHORITY -> GATE")
+    print("Offline demo: no network, no model, no email is sent.\n")
+    print("1) SCAN THE EXPORTED TOOL SCHEMA")
+    print(f"   send_email.to    -> {scanned_arguments['to']['policy']}")
+    print(f"   send_email.body  -> {scanned_arguments['body']['policy']}")
+    print("\n2) MODEL PROPOSES AN UNTRUSTED DESTINATION")
+    print(f"   to={attacker_recipient!r}")
+    print(f"   trusted recipient={approved_recipient!r}")
+    print("\n3) GATE RUNS IMMEDIATELY BEFORE EXECUTION")
+    print(
+        f"   {'BLOCKED' if not blocked.decision.allow else 'ALLOWED'} - "
+        f"{blocked.decision.reason}"
+    )
+    print(f"   local tool invocations={blocked_invocations}")
+    print("\n4) THE SCHEMA LIMIT IS ALSO ENFORCED AT RUNTIME")
+    print(
+        f"   body length={body_max_length + 1}; "
+        f"registered maxLength={body_max_length}"
+    )
+    print(
+        f"   {'BLOCKED' if not overlong.decision.allow else 'ALLOWED'} - "
+        f"{overlong.decision.reason}"
+    )
+    print(f"   local tool invocations={overlong_invocations}")
+    print("\n5) CONTROL: THE APPROVED DESTINATION")
+    print(
+        f"   {'ALLOWED' if allowed.decision.allow else 'BLOCKED'} - "
+        f"{allowed.decision.reason}"
+    )
+    print(f"   local tool invocations={allowed_invocations}")
+    print("\nThe demo tool only records local invocations; it never sends email.")
+
+
 def demo() -> None:
     reg = Registry()
     reg.add(Tool("send_email", [
@@ -4292,6 +4458,16 @@ def demo() -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the demo, local schema scanner, or authority-diff command."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "quickstart":
+        if len(argv) != 1:
+            print(
+                "usage: env -u PYTHONPATH -u PYTHONHOME python -I -m "
+                "verb_authority quickstart",
+                file=sys.stderr,
+            )
+            return 2
+        quickstart_demo()
+        return 0
     if argv and argv[0] == "scan":
         from verb_authority_scan import main as scan_main
 
@@ -4303,7 +4479,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv:
         print(
             "usage: env -u PYTHONPATH -u PYTHONHOME python -I -m "
-            "verb_authority [scan|diff ...]",
+            "verb_authority [quickstart|scan|diff ...]",
             file=sys.stderr,
         )
         return 2

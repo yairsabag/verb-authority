@@ -54,14 +54,15 @@ Verb Authority is not published on PyPI. Install the latest published
 prerelease directly from GitHub:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.12"
-env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.13"
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
 ```
 
-The second command runs the built-in demo. The package has no runtime
-dependencies and keeps the existing `verb_authority.py` module and import API.
+The second command runs the offline schema-to-gate quickstart. The package has
+no runtime dependencies and keeps the existing `verb_authority.py` module and
+import API.
 
-The [beta.12 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12)
+The [beta.13 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
@@ -84,6 +85,21 @@ python -I -m pip install .
 ```
 
 ## 60-second quickstart
+
+After installing beta.13 or the current checkout, run the complete
+schema-to-gate path with one command:
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
+```
+
+The demo scans an exported `send_email` schema, reports `to` as
+`trusted_fixed` and `body` as `outbound_payload`, then blocks an
+attacker-authored recipient before a safe local tool implementation runs. Its
+invocation counter remains at zero for the blocked call and reaches one only
+for the application-approved recipient. An overlong-body case proves the
+schema's `maxLength` is registered and enforced at runtime without another
+invocation. The local implementation records calls in memory; no email is sent.
 
 The gate accepts a normalized tool call shaped as `{"name": ..., "input":
 ...}`. Provider-specific tool-call objects should be converted to that small
@@ -936,7 +952,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.12
+- uses: yairsabag/verb-authority@v0.10.0-beta.13
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -962,7 +978,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.12
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.13
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
@@ -1187,6 +1203,7 @@ python -m pytest -v
 Additional executable evaluations are intentionally kept as small scripts:
 
 ```bash
+python -I -m verb_authority quickstart  # schema -> report -> blocked call
 python validate_v01.py   # 11 schemas / 31 parameters; 0 silent-unsafe outcomes
 python chain_demo.py     # laundering without vs. with the ledger
 python adversarial.py    # known successes and failures by attack family
@@ -1269,11 +1286,12 @@ those deeper systems rather than this module.
 
 ## Project status
 
-v0.9.0 is the latest stable release, and v0.10.0-beta.12 is the latest
-published prerelease. It contains the beta.11 safe-default scanner fixes,
-exact one-selector branch risk, and first optional Pydantic AI runtime adapter,
-plus the report v5 tool-level review aggregate. The beta.7, beta.8, and beta.9
-version identifiers were withheld and are not reused.
+v0.9.0 is the latest stable release, and v0.10.0-beta.13 is the latest
+published prerelease. It adds the offline schema-to-gate quickstart with
+observable pre-execution invocation proof and runtime enforcement of the
+registered schema length bound. It also preserves the external frozen-fixture
+regression evidence added after beta.12. The beta.7, beta.8, and beta.9 version
+identifiers were withheld and are not reused.
 This remains early, research-grade work and is not described as
 production-ready. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes and

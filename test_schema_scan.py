@@ -3821,6 +3821,25 @@ def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):
     assert "usage:" in capsys.readouterr().err
 
 
+def test_quickstart_demo_connects_schema_report_to_gate(capsys):
+    assert verb_authority.main(["quickstart"]) == 0
+
+    output = capsys.readouterr().out
+    assert "SCHEMA -> AUTHORITY -> GATE" in output
+    assert "send_email.to    -> trusted_fixed" in output
+    assert "send_email.body  -> outbound_payload" in output
+    assert "BLOCKED - param 'to' is a locked sink" in output
+    assert "ALLOWED - within authority" in output
+    assert output.count("local tool invocations=0") == 2
+    assert output.count("local tool invocations=1") == 1
+    assert "body length=2001; registered maxLength=2000" in output
+    assert "BLOCKED - param 'body' failed its type/bounds check" in output
+    assert "never sends email" in output
+
+    assert verb_authority.main(["quickstart", "extra"]) == 2
+    assert "verb_authority quickstart" in capsys.readouterr().err
+
+
 def test_rejects_documents_without_tools():
     with pytest.raises(SchemaError, match="no recognizable"):
         parse_tool_definitions({"not_tools": []})
