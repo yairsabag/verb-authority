@@ -1,0 +1,411 @@
+name: Publish an existing release to TestPyPI and PyPI
+
+# This workflow backfills an already-built GitHub Release. The release workflow
+# built and tested these bytes; rebuilding here would break artifact identity.
+# The PEP 740 attestation identifies publication by this default-branch
+# workflow. The checks below—not the attestation alone—bind those bytes to the
+# requested release tag and source commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing, non-draft GitHub Release tag to publish
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: package-index-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Stage the exact distributions already built for the release tag
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      package_version: ${{ steps.identity.outputs.package_version }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      wheel_sha256: ${{ steps.identity.outputs.wheel_sha256 }}
+      sdist_sha256: ${{ steps.identity.outputs.sdist_sha256 }}
+
+    steps:
+      - name: Check out the requested release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Bind the release, tag, project version, and source commit
+        id: bind
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]
+          source_commit=$(git rev-parse --verify 'HEAD^{commit}')
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+
+          release_record=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
+            --jq '[.tag_name, (.draft | tostring)] | @tsv')
+          printf -v expected_release '%s\tfalse' "$RELEASE_TAG"
+          test "$release_record" = "$expected_release"
+
+          remote_tag_commit=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/commits/tags/$RELEASE_TAG" \
+            --jq '.sha')
+          test "$remote_tag_commit" = "$source_commit"
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/environments/testpypi" >/dev/null
+          required_reviewers=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/environments/pypi" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')
+          test "$required_reviewers" -gt 0
+
+          python -I scripts/verify_release_artifacts.py tag \
+            --project pyproject.toml \
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$source_commit"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Download the existing GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GH_REPO" \
+            --pattern '*.whl' \
+            --pattern '*.tar.gz' \
+            --pattern 'SHA256SUMS' \
+            --dir release-assets
+
+      - name: Verify the exact release file set and remote digests
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ steps.bind.outputs.source_commit }}
+        run: |
+          shopt -s nullglob dotglob
+          entries=(release-assets/*)
+          wheels=(release-assets/*.whl)
+          sdists=(release-assets/*.tar.gz)
+          test "${#entries[@]}" -eq 3
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            test -f "$candidate"
+            test ! -L "$candidate"
+          done
+
+          expected_checksums=$(mktemp)
+          (
+            cd release-assets
+            LC_ALL=C sha256sum -- \
+              "$(basename "${wheels[0]}")" \
+              "$(basename "${sdists[0]}")"
+          ) > "$expected_checksums"
+          cmp -s "$expected_checksums" release-assets/SHA256SUMS
+
+          expected_assets=$(mktemp)
+          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+            name=$(basename "$candidate")
+            size=$(stat -c %s -- "$candidate")
+            digest=$(sha256sum -- "$candidate")
+            digest=${digest%% *}
+            printf '%s\t%s\tsha256:%s\tuploaded\n' \
+              "$name" "$size" "$digest"
+          done | LC_ALL=C sort > "$expected_assets"
+
+          remote_assets=$(mktemp)
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --paginate \
+            "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
+            --jq '.assets[] | [.name, (.size | tostring), .digest, .state] | @tsv' \
+            | LC_ALL=C sort > "$remote_assets"
+          cmp -s "$expected_assets" "$remote_assets"
+
+          wheel_sha256=$(sha256sum -- "${wheels[0]}")
+          wheel_sha256=${wheel_sha256%% *}
+          sdist_sha256=$(sha256sum -- "${sdists[0]}")
+          sdist_sha256=${sdist_sha256%% *}
+
+          verify_dist=$(mktemp -d)
+          install -m 0644 -- "${wheels[0]}" "$verify_dist/$(basename "${wheels[0]}")"
+          install -m 0644 -- "${sdists[0]}" "$verify_dist/$(basename "${sdists[0]}")"
+          python -I scripts/verify_release_artifacts.py artifacts \
+            --project pyproject.toml \
+            --dist "$verify_dist" \
+            --tag "$RELEASE_TAG" \
+            --repository "${{ github.workspace }}" \
+            --source-commit "$SOURCE_COMMIT"
+
+          post_verify_wheel_sha256=$(sha256sum -- "${wheels[0]}")
+          post_verify_wheel_sha256=${post_verify_wheel_sha256%% *}
+          post_verify_sdist_sha256=$(sha256sum -- "${sdists[0]}")
+          post_verify_sdist_sha256=${post_verify_sdist_sha256%% *}
+          test "$post_verify_wheel_sha256" = "$wheel_sha256"
+          test "$post_verify_sdist_sha256" = "$sdist_sha256"
+
+          package_version=$(python -I -c \
+            'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' \
+            pyproject.toml)
+          printf 'package_version=%s\n' "$package_version" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'wheel_sha256=%s\n' "$wheel_sha256" >> "$GITHUB_OUTPUT"
+          printf 'sdist_sha256=%s\n' "$sdist_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Check package metadata and long-description rendering
+        run: |
+          python -m pip install "twine>=6,<8"
+          python -m twine check \
+            release-assets/*.whl \
+            release-assets/*.tar.gz
+
+      - name: Stage only the wheel and source distribution
+        env:
+          WHEEL_SHA256: ${{ steps.identity.outputs.wheel_sha256 }}
+          SDIST_SHA256: ${{ steps.identity.outputs.sdist_sha256 }}
+        run: |
+          mkdir pypi-dist
+          install -m 0644 -- release-assets/*.whl pypi-dist/
+          install -m 0644 -- release-assets/*.tar.gz pypi-dist/
+          staged_wheels=(pypi-dist/*.whl)
+          staged_sdists=(pypi-dist/*.tar.gz)
+          test "${#staged_wheels[@]}" -eq 1
+          test "${#staged_sdists[@]}" -eq 1
+          staged_wheel_sha256=$(sha256sum -- "${staged_wheels[0]}")
+          staged_wheel_sha256=${staged_wheel_sha256%% *}
+          staged_sdist_sha256=$(sha256sum -- "${staged_sdists[0]}")
+          staged_sdist_sha256=${staged_sdist_sha256%% *}
+          test "$staged_wheel_sha256" = "$WHEEL_SHA256"
+          test "$staged_sdist_sha256" = "$SDIST_SHA256"
+
+      - name: Preserve the immutable package-index candidate
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-distributions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pypi-dist/
+          if-no-files-found: error
+          # Leave enough time for the protected production environment's
+          # manual approval without losing the exact candidate.
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  publish_testpypi:
+    name: Publish the exact candidate to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/verb-authority
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download the immutable candidate by artifact ID
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: dist
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Publish to TestPyPI with OIDC and attestations
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          attestations: true
+          print-hash: true
+          # A rerun may encounter the same immutable TestPyPI version. The next
+          # job still requires both remote hashes to match the staged release.
+          skip-existing: true
+
+  verify_testpypi:
+    name: Verify TestPyPI bytes and installed quickstart
+    needs: [build, publish_testpypi]
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Match TestPyPI files to the staged release and run quickstart
+        env:
+          PACKAGE_VERSION: ${{ needs.build.outputs.package_version }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel_sha256 }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist_sha256 }}
+        run: |
+          python -I - "$PACKAGE_VERSION" "$WHEEL_SHA256" "$SDIST_SHA256" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          version, wheel_digest, sdist_digest = sys.argv[1:]
+          endpoint = f"https://test.pypi.org/pypi/verb-authority/{version}/json"
+          expected = {
+              f"verb_authority-{version}-py3-none-any.whl": wheel_digest,
+              f"verb_authority-{version}.tar.gz": sdist_digest,
+          }
+          for attempt in range(18):
+              try:
+                  with urllib.request.urlopen(endpoint, timeout=20) as response:
+                      metadata = json.load(response)
+                  records = {item["filename"]: item for item in metadata["urls"]}
+                  if set(records) == set(expected):
+                      break
+              except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+                  pass
+              if attempt == 17:
+                  raise SystemExit("TestPyPI did not expose the exact release file set")
+              time.sleep(10)
+
+          output = pathlib.Path("testpypi-dist")
+          output.mkdir()
+          for filename, digest in expected.items():
+              record = records[filename]
+              if record["digests"]["sha256"] != digest:
+                  raise SystemExit(f"TestPyPI digest mismatch for {filename}")
+              payload = urllib.request.urlopen(record["url"], timeout=30).read()
+              if hashlib.sha256(payload).hexdigest() != digest:
+                  raise SystemExit(f"downloaded digest mismatch for {filename}")
+              (output / filename).write_bytes(payload)
+          PY
+          python -I -m pip install --no-deps --force-reinstall \
+            testpypi-dist/*.whl
+          python -I -c \
+            'import importlib.metadata, os; assert importlib.metadata.version("verb-authority") == os.environ["PACKAGE_VERSION"]'
+          python -I -m verb_authority quickstart
+
+  publish_pypi:
+    name: Publish the TestPyPI-verified candidate to PyPI
+    needs: [build, verify_testpypi]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/verb-authority
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download the same immutable candidate by artifact ID
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: dist
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Publish to PyPI with OIDC and attestations
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          attestations: true
+          print-hash: true
+
+  verify_pypi:
+    name: Verify PyPI bytes and installed quickstart
+    needs: [build, publish_pypi]
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Match PyPI files to the staged release and run quickstart
+        env:
+          PACKAGE_VERSION: ${{ needs.build.outputs.package_version }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel_sha256 }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist_sha256 }}
+        run: |
+          python -I - "$PACKAGE_VERSION" "$WHEEL_SHA256" "$SDIST_SHA256" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          version, wheel_digest, sdist_digest = sys.argv[1:]
+          endpoint = f"https://pypi.org/pypi/verb-authority/{version}/json"
+          expected = {
+              f"verb_authority-{version}-py3-none-any.whl": wheel_digest,
+              f"verb_authority-{version}.tar.gz": sdist_digest,
+          }
+          for attempt in range(18):
+              try:
+                  with urllib.request.urlopen(endpoint, timeout=20) as response:
+                      metadata = json.load(response)
+                  records = {item["filename"]: item for item in metadata["urls"]}
+                  if set(records) == set(expected):
+                      break
+              except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+                  pass
+              if attempt == 17:
+                  raise SystemExit("PyPI did not expose the exact release file set")
+              time.sleep(10)
+
+          output = pathlib.Path("pypi-dist")
+          output.mkdir()
+          for filename, digest in expected.items():
+              record = records[filename]
+              if record["digests"]["sha256"] != digest:
+                  raise SystemExit(f"PyPI digest mismatch for {filename}")
+              payload = urllib.request.urlopen(record["url"], timeout=30).read()
+              if hashlib.sha256(payload).hexdigest() != digest:
+                  raise SystemExit(f"downloaded digest mismatch for {filename}")
+              (output / filename).write_bytes(payload)
+          PY
+          python -I -m pip install --no-deps --force-reinstall pypi-dist/*.whl
+          python -I -c \
+            'import importlib.metadata, os; assert importlib.metadata.version("verb-authority") == os.environ["PACKAGE_VERSION"]'
+          python -I -m verb_authority quickstart

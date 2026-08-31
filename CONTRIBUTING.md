@@ -8,6 +8,9 @@ Focused contributions are welcome, especially:
 - documentation corrections and precise related-work citations; and
 - small changes that preserve the module's drop-in API.
 
+Participation is governed by the project
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 For sensitive findings, follow [`SECURITY.md`](SECURITY.md) before opening a
 public issue.
 
@@ -54,3 +57,49 @@ examples.
 Atlas additions must be reproducible and neutral. Preserve input types and MCP
 annotations, record manual normalization, and describe results as inference
 findings rather than vulnerabilities in the upstream project.
+
+## Add a public or redacted schema fixture
+
+Start with the smallest case that preserves the behavior. Prefer an immutable
+public source URL. If the original is private, contribute only a reduced or
+redacted derivative that you have the right to publish; do not imply that a
+derivative is the original evidence.
+
+Use this layout for an external evidence bundle:
+
+```text
+fixtures/external/<contributor>/<case>/
+├── README.md
+├── PROVENANCE.md
+├── EXPECTED.json
+└── frozen/
+    ├── tools-list.json
+    ├── controls.json          # when used
+    ├── COMMANDS.md
+    └── MANIFEST.sha256
+```
+
+Keep contributor-supplied originals byte-for-byte under `frozen/`. Put reduced
+CI inputs, probes, and oracles outside that directory and label them as derived.
+Do not rewrite a frozen artifact to make a test convenient.
+
+`PROVENANCE.md` should record:
+
+- contributor name and requested attribution;
+- upstream project, immutable version or commit, and license;
+- capture/export command and relevant environment facts;
+- which expectation was fixed before which run;
+- SHA-256 coverage and what the manifest does **not** prove; and
+- permission to include the contributed material under this repository's
+  Apache-2.0 license.
+
+For a reduced public fixture, add a short transformation log and ensure the
+reduction still fails against the affected version before it passes against the
+fix. A regression must state the narrow claim it pins; it is not a general
+vulnerability claim about the upstream tool.
+
+JavaScript and TypeScript projects do not need MCP or a Python application to
+contribute scanner evidence. See
+[`docs/javascript-typescript.md`](docs/javascript-typescript.md) for exporting
+OpenAI, Anthropic, or MCP JSON from a JS codebase. The runtime gate itself
+remains Python-only in this beta.
