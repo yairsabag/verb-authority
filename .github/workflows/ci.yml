@@ -226,7 +226,7 @@ jobs:
             -mindepth 1 -maxdepth 1 -type d -print -quit)
           test -n "$sdist_root"
           test -f "$sdist_root/LANDSCAPE.md"
-          test -f "$sdist_root/docs/assets/social-preview.png"
+          test -f "$sdist_root/docs/assets/social-preview.jpg"
           test -f "$sdist_root/pydantic_ai_demo.py"
           test -f "$sdist_root/scripts/installed_pydantic_smoke.py"
           test -f "$sdist_root/scripts/installed_wheel_smoke.py"

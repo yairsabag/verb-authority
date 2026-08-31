@@ -1345,6 +1345,10 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
             "70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3",
             "v8.0.0",
         ),
+        "pypa/gh-action-pypi-publish": (
+            "dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+            "v1.14.2",
+        ),
     }
     observed = set()
     workflow_directory = repository / ".github/workflows"
