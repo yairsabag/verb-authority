@@ -101,14 +101,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
         run: |
-          mkdir release-assets
+          mkdir -- "$RELEASE_ASSETS_DIR"
           gh release download "$RELEASE_TAG" \
             --repo "$GH_REPO" \
             --pattern '*.whl' \
             --pattern '*.tar.gz' \
             --pattern 'SHA256SUMS' \
-            --dir release-assets
+            --dir "$RELEASE_ASSETS_DIR"
 
       - name: Verify the exact release file set and remote digests
         id: identity
@@ -117,30 +118,37 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_COMMIT: ${{ steps.bind.outputs.source_commit }}
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
         run: |
           shopt -s nullglob dotglob
-          entries=(release-assets/*)
-          wheels=(release-assets/*.whl)
-          sdists=(release-assets/*.tar.gz)
+          entries=("$RELEASE_ASSETS_DIR"/*)
+          wheels=("$RELEASE_ASSETS_DIR"/*.whl)
+          sdists=("$RELEASE_ASSETS_DIR"/*.tar.gz)
           test "${#entries[@]}" -eq 3
           test "${#wheels[@]}" -eq 1
           test "${#sdists[@]}" -eq 1
-          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+          for candidate in \
+            "${wheels[0]}" \
+            "${sdists[0]}" \
+            "$RELEASE_ASSETS_DIR/SHA256SUMS"; do
             test -f "$candidate"
             test ! -L "$candidate"
           done
 
           expected_checksums=$(mktemp)
           (
-            cd release-assets
+            cd "$RELEASE_ASSETS_DIR"
             LC_ALL=C sha256sum -- \
               "$(basename "${wheels[0]}")" \
               "$(basename "${sdists[0]}")"
           ) > "$expected_checksums"
-          cmp -s "$expected_checksums" release-assets/SHA256SUMS
+          cmp -s "$expected_checksums" "$RELEASE_ASSETS_DIR/SHA256SUMS"
 
           expected_assets=$(mktemp)
-          for candidate in "${wheels[0]}" "${sdists[0]}" release-assets/SHA256SUMS; do
+          for candidate in \
+            "${wheels[0]}" \
+            "${sdists[0]}" \
+            "$RELEASE_ASSETS_DIR/SHA256SUMS"; do
             name=$(basename "$candidate")
             size=$(stat -c %s -- "$candidate")
             digest=$(sha256sum -- "$candidate")
@@ -190,22 +198,36 @@ jobs:
           printf 'sdist_sha256=%s\n' "$sdist_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Check package metadata and long-description rendering
+        env:
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
         run: |
           python -m pip install "twine>=6,<8"
+          shopt -s nullglob
+          wheels=("$RELEASE_ASSETS_DIR"/*.whl)
+          sdists=("$RELEASE_ASSETS_DIR"/*.tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
           python -m twine check \
-            release-assets/*.whl \
-            release-assets/*.tar.gz
+            "${wheels[0]}" \
+            "${sdists[0]}"
 
       - name: Stage only the wheel and source distribution
         env:
           WHEEL_SHA256: ${{ steps.identity.outputs.wheel_sha256 }}
           SDIST_SHA256: ${{ steps.identity.outputs.sdist_sha256 }}
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
+          PYPI_DIST_DIR: ${{ runner.temp }}/pypi-dist
         run: |
-          mkdir pypi-dist
-          install -m 0644 -- release-assets/*.whl pypi-dist/
-          install -m 0644 -- release-assets/*.tar.gz pypi-dist/
-          staged_wheels=(pypi-dist/*.whl)
-          staged_sdists=(pypi-dist/*.tar.gz)
+          shopt -s nullglob
+          release_wheels=("$RELEASE_ASSETS_DIR"/*.whl)
+          release_sdists=("$RELEASE_ASSETS_DIR"/*.tar.gz)
+          test "${#release_wheels[@]}" -eq 1
+          test "${#release_sdists[@]}" -eq 1
+          mkdir -- "$PYPI_DIST_DIR"
+          install -m 0644 -- "${release_wheels[0]}" "$PYPI_DIST_DIR/"
+          install -m 0644 -- "${release_sdists[0]}" "$PYPI_DIST_DIR/"
+          staged_wheels=("$PYPI_DIST_DIR"/*.whl)
+          staged_sdists=("$PYPI_DIST_DIR"/*.tar.gz)
           test "${#staged_wheels[@]}" -eq 1
           test "${#staged_sdists[@]}" -eq 1
           staged_wheel_sha256=$(sha256sum -- "${staged_wheels[0]}")
@@ -220,7 +242,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pypi-distributions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: pypi-dist/
+          path: ${{ runner.temp }}/pypi-dist/
           if-no-files-found: error
           # Leave enough time for the protected production environment's
           # manual approval without losing the exact candidate.
