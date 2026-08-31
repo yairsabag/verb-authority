@@ -3834,6 +3834,8 @@ def test_quickstart_demo_connects_schema_report_to_gate(capsys):
     assert output.count("local tool invocations=1") == 1
     assert "body length=2001; registered maxLength=2000" in output
     assert "BLOCKED - param 'body' failed its type/bounds check" in output
+    assert "CONTROL: APPLICATION-SUPPLIED TRUSTED RECIPIENT" in output
+    assert "APPROVED DESTINATION" not in output
     assert "never sends email" in output
 
     assert verb_authority.main(["quickstart", "extra"]) == 2

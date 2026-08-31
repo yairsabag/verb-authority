@@ -1,6 +1,7 @@
 # Verb Authority
 
 [![CI](https://github.com/yairsabag/verb-authority/actions/workflows/ci.yml/badge.svg)](https://github.com/yairsabag/verb-authority/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/verb-authority)](https://pypi.org/project/verb-authority/)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776AB.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/yairsabag/verb-authority/blob/main/LICENSE)
 
@@ -24,13 +25,18 @@ Verb Authority scans exported tool schemas, produces a reviewable
 per-argument authority map, and provides a small local runtime gate. It does
 not invoke tools while scanning and does not upload schemas.
 
-## Install beta.13
+## Install beta.14
 
-PyPI publishing is being prepared but is not live yet. Install the public
-beta.13 tag from GitHub:
+Install the dependency-free core from PyPI:
 
 ~~~bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.13"
+python -m pip install "verb-authority==0.10.0b14"
+~~~
+
+Or install the same release tag directly from GitHub:
+
+~~~bash
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.14"
 ~~~
 
 The dependency-free core supports Python 3.10 through 3.14. See
@@ -197,13 +203,13 @@ catalog resolution, selector branches, and the pinned Pydantic AI adapter.
 
 ## Pydantic AI
 
-Beta.13 includes an optional, narrowly pinned Pydantic AI adapter. It keeps
+Beta.14 includes an optional, narrowly pinned Pydantic AI adapter. It keeps
 protected values out of the model-visible function or resolves model-visible
 keys through an application-owned catalog before entering
 `GuardedToolRunner`.
 
 ~~~bash
-python -I -m pip install "verb-authority[pydantic] @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.13"
+python -m pip install "verb-authority[pydantic]==0.10.0b14"
 ~~~
 
 The adapter supports only the audited local, synchronous paths documented for
@@ -211,7 +217,7 @@ the pinned dependency versions. Unsupported remote, runtime-added, streaming,
 async, realtime, and native execution paths fail closed. See
 [Pydantic AI 2.35 runtime adapter](https://github.com/yairsabag/verb-authority/blob/main/docs/runtime-gate.md#pydantic-ai-235-runtime-adapter).
 
-No JavaScript/TypeScript runtime adapter is published in beta.13. JavaScript
+No JavaScript/TypeScript runtime adapter is published in beta.14. JavaScript
 applications may export JSON schemas for an offline scan, but runtime
 enforcement must sit in a trusted server-side boundary rather than a browser
 bundle. See the [JavaScript and TypeScript evaluation path](https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md).
@@ -231,7 +237,7 @@ Or use the composite GitHub Action:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.13
+- uses: yairsabag/verb-authority@v0.10.0-beta.14
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -318,12 +324,12 @@ Public case material is preserved separately from CI reductions:
 - [executable demos](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/index.md#evidence-and-demos).
 
 `v0.9.0` is the latest stable release.
-`v0.10.0-beta.13` is the latest public prerelease and the demo-ready build.
-Beta.13 adds the offline schema-to-gate quickstart, observable
-pre-execution invocation proof, and runtime enforcement of the registered
-schema length bound. It retains the frozen external regression evidence added
-after beta.12. The beta.7, beta.8, and beta.9 identifiers were withheld and
-will not be reused.
+`v0.10.0-beta.14` is the latest public prerelease and the first PyPI
+distribution. Beta.14 makes the existing schema-to-gate behavior easier to
+install, evaluate, and integrate without changing the security promise or
+policy-inference behavior. It retains the beta.13 offline quickstart and frozen
+external regression evidence. The beta.7, beta.8, and beta.9 identifiers were
+withheld and will not be reused.
 This remains early, research-grade work and is not described as
 production-ready.
 

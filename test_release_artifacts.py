@@ -211,6 +211,7 @@ def _write_wheel(
     internal_dist_info_name: str | None = None,
     wheel_dist_info_name: str | None = None,
     include_wheel_metadata: bool = True,
+    additional_members: dict[str, bytes] | None = None,
 ) -> Path:
     wheel_path = dist / f"{ARTIFACT_NAME}-{filename_version}-{suffix}.whl"
     expected_dist_info_name = (
@@ -251,6 +252,9 @@ def _write_wheel(
     members[f"{metadata_dist_info_name}/top_level.txt"] = (
         "".join(f"{module}\n" for module in sorted(MODULES))
     ).encode("utf-8")
+    for member, payload in (additional_members or {}).items():
+        assert member not in members
+        members[member] = payload
     record_name = f"{metadata_dist_info_name}/RECORD"
     record_rows = []
     for member, payload in members.items():
@@ -556,6 +560,49 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
         wheel.parent,
         "v0.10.0-beta.10",
     ) == (wheel, sdist)
+
+
+def test_documentation_data_files_are_verified_inside_the_wheel(tmp_path):
+    project_path = _write_project(tmp_path)
+    with project_path.open("a", encoding="utf-8") as project:
+        project.write(
+            '\n[tool.setuptools.data-files]\n'
+            '"share/doc/verb-authority" = ["LICENSE"]\n'
+        )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    data_member = (
+        f"{ARTIFACT_NAME}-{PROJECT_VERSION}.data/data/"
+        "share/doc/verb-authority/LICENSE"
+    )
+    license_payload = (tmp_path / "LICENSE").read_bytes()
+    wheel = _write_wheel(
+        dist,
+        additional_members={data_member: license_payload},
+    )
+    sdist = _write_sdist(dist)
+
+    assert verify_artifacts(project_path, dist) == (wheel, sdist)
+
+    _rewrite_wheel(
+        wheel,
+        changes={data_member: b"x" * len(license_payload)},
+        refresh_record=True,
+    )
+    with pytest.raises(VerificationError, match="wheel data payload"):
+        verify_artifacts(project_path, dist)
+
+
+def test_wheel_data_files_cannot_escape_the_documentation_root(tmp_path):
+    project_path = _write_project(tmp_path)
+    with project_path.open("a", encoding="utf-8") as project:
+        project.write(
+            '\n[tool.setuptools.data-files]\n'
+            '"bin" = ["LICENSE"]\n'
+        )
+
+    with pytest.raises(VerificationError, match="documentation root"):
+        release_verifier._project_release_config(project_path)
 
 
 #: The sdist contract in ``scripts/verify_release_artifacts.py`` requires mode
@@ -1385,13 +1432,22 @@ def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
     config = release_verifier._project_release_config(
         repository / "pyproject.toml"
     )
-    assert config.version == "0.10.0b13"
+    assert config.version == "0.10.0b14"
     assert config.dependencies == ()
     assert config.optional_dependencies["pydantic"] == (
         "pydantic-ai-slim==2.35.0",
         "pydantic==2.13.4",
     )
     assert "verb_authority_pydantic" in config.modules
+    assert "share/doc/verb-authority/README.md" in config.wheel_data_payloads
+    assert (
+        "share/doc/verb-authority/docs/runtime-gate.md"
+        in config.wheel_data_payloads
+    )
+    assert (
+        "share/doc/verb-authority/docs/assets/social-preview.jpg"
+        in config.wheel_data_payloads
+    )
     assert (
         "scripts/installed_pydantic_smoke.py"
         in config.sdist_source_payloads

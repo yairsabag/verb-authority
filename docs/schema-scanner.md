@@ -383,7 +383,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.13
+- uses: yairsabag/verb-authority@v0.10.0-beta.14
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -409,7 +409,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.13
+Both inputs accept only the exact strings `"true"` or `"false"`. The beta.14
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing

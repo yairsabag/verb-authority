@@ -4320,7 +4320,7 @@ def quickstart_demo() -> None:
     policy_set = build_policy(registry)
     runner = GuardedToolRunner(registry, policy_set)
 
-    approved_recipient = "alice@company.com"
+    application_recipient = "alice@company.com"
     attacker_recipient = "attacker@evil.com"
     attacker_call = {
         "name": "send_email",
@@ -4328,26 +4328,26 @@ def quickstart_demo() -> None:
     }
     blocked = runner.run(
         attacker_call,
-        trusted_args={"to": approved_recipient},
+        trusted_args={"to": application_recipient},
     )
     blocked_invocations = len(local_invocations)
     overlong = runner.run(
         {
             "name": "send_email",
             "input": {
-                "to": approved_recipient,
+                "to": application_recipient,
                 "body": "x" * (body_max_length + 1),
             },
         },
-        trusted_args={"to": approved_recipient},
+        trusted_args={"to": application_recipient},
     )
     overlong_invocations = len(local_invocations)
     allowed = runner.run(
         {
             "name": "send_email",
-            "input": {"to": approved_recipient, "body": "Meeting summary"},
+            "input": {"to": application_recipient, "body": "Meeting summary"},
         },
-        trusted_args={"to": approved_recipient},
+        trusted_args={"to": application_recipient},
     )
     allowed_invocations = len(local_invocations)
 
@@ -4368,7 +4368,9 @@ def quickstart_demo() -> None:
         or not allowed.executed
         or allowed_invocations != 1
     ):
-        raise RuntimeError("quickstart approved call did not execute exactly once")
+        raise RuntimeError(
+            "quickstart application-supplied call did not execute exactly once"
+        )
     if (
         overlong.decision.allow
         or overlong.invoked
@@ -4385,7 +4387,7 @@ def quickstart_demo() -> None:
     print(f"   send_email.body  -> {scanned_arguments['body']['policy']}")
     print("\n2) MODEL PROPOSES AN UNTRUSTED DESTINATION")
     print(f"   to={attacker_recipient!r}")
-    print(f"   trusted recipient={approved_recipient!r}")
+    print(f"   application-supplied trusted recipient={application_recipient!r}")
     print("\n3) GATE RUNS IMMEDIATELY BEFORE EXECUTION")
     print(
         f"   {'BLOCKED' if not blocked.decision.allow else 'ALLOWED'} - "
@@ -4402,7 +4404,7 @@ def quickstart_demo() -> None:
         f"{overlong.decision.reason}"
     )
     print(f"   local tool invocations={overlong_invocations}")
-    print("\n5) CONTROL: THE APPROVED DESTINATION")
+    print("\n5) CONTROL: APPLICATION-SUPPLIED TRUSTED RECIPIENT")
     print(
         f"   {'ALLOWED' if allowed.decision.allow else 'BLOCKED'} - "
         f"{allowed.decision.reason}"

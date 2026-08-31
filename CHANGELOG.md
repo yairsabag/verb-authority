@@ -7,6 +7,36 @@ dates are added when a GitHub release is actually published.
 
 _No unreleased changes._
 
+## [0.10.0-beta.14] - 2026-08-31
+
+### Onboarding and distribution
+
+- Make PyPI the primary one-command installation path and prepare Beta 14 as
+  the first PyPI distribution, while keeping the immutable GitHub tag as a
+  secondary installation option.
+- Replace the long-form landing page with a focused two-minute path from the
+  `send_email(to, body)` boundary through installation, offline quickstart,
+  real-schema scanning, runtime enforcement, documented limits, and the
+  public schema clinic in Issue #7. Move the complete technical contracts into
+  linked documentation rather than removing them.
+- Add a practical JavaScript and TypeScript evaluation path: export the exact
+  JSON tool schema, scan it locally or in CI, and keep runtime enforcement in
+  trusted server code. Continue to state explicitly that Beta 14 has no npm
+  package or JavaScript runtime adapter.
+- Add focused contributor guidance, a code of conduct, package metadata links,
+  and a repository social-preview asset for a clearer public project surface.
+- Add a TestPyPI-first Trusted Publishing workflow that uses GitHub Actions
+  OIDC and attestations, preserves the exact GitHub Release wheel and sdist,
+  verifies remote hashes and installed quickstart behavior, and requires a
+  protected production environment before PyPI publication.
+
+### Security promise
+
+- Do not change policy inference, runtime enforcement, or the promise boundary.
+  The enforced claim remains per-argument provenance before execution; Verb
+  Authority is not business authorization or complete prompt-injection
+  protection.
+
 ## [0.10.0-beta.13] - 2026-08-30
 
 ### 60-second demo
@@ -15,8 +45,9 @@ _No unreleased changes._
   tool schema, prints the inferred per-argument authority, and blocks an
   untrusted recipient before execution. A safe local implementation and
   invocation counter prove the blocked call never reaches the tool while the
-  approved control executes exactly once. The trusted runtime registration
-  also carries and enforces the schema's `maxLength` bound.
+  application-supplied trusted control executes exactly once. The trusted
+  runtime registration also carries and enforces the schema's `maxLength`
+  bound.
 
 ### External regression evidence
 
@@ -776,7 +807,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.13...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.14...HEAD
+[0.10.0-beta.14]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.14
 [0.10.0-beta.13]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13
 [0.10.0-beta.12]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12
 [0.10.0-beta.11]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.11
