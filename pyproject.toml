@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verb-authority"
-version = "0.10.0b13"
+version = "0.10.0b14"
 description = "Prevent untrusted data from authoring protected tool-call arguments."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -61,6 +61,28 @@ py-modules = [
   "verb_authority_scan",
   "verb_authority_diff",
   "verb_authority_pydantic",
+]
+
+[tool.setuptools.data-files]
+"share/doc/verb-authority" = [
+  "README.md",
+  "CHANGELOG.md",
+]
+"share/doc/verb-authority/docs" = [
+  "docs/README.md",
+  "docs/javascript-typescript.md",
+  "docs/limits-and-boundaries.md",
+  "docs/runtime-gate.md",
+  "docs/schema-scanner.md",
+  "docs/security-model.md",
+]
+"share/doc/verb-authority/docs/case-studies" = [
+  "docs/case-studies/external-beta-risk-evidence.md",
+  "docs/case-studies/index.md",
+]
+"share/doc/verb-authority/docs/assets" = [
+  "docs/assets/README.md",
+  "docs/assets/social-preview.jpg",
 ]
 
 [tool.pytest.ini_options]

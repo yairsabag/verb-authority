@@ -7,19 +7,24 @@ trusted-choice behavior, and the pinned Pydantic AI adapter boundary.
 
 ## Install
 
-Verb Authority is not published on PyPI. Install the latest published
-prerelease directly from GitHub:
+Install the latest published prerelease from PyPI:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.13"
+python -m pip install "verb-authority==0.10.0b14"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
+```
+
+Or install the same release tag directly from GitHub:
+
+```bash
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.14"
 ```
 
 The second command runs the offline schema-to-gate quickstart. The package has
 no runtime dependencies and keeps the existing `verb_authority.py` module and
 import API.
 
-The [beta.13 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13)
+The [beta.14 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.14)
 also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
@@ -43,7 +48,7 @@ python -I -m pip install .
 
 ## 60-second quickstart
 
-After installing beta.13 or the current checkout, run the complete
+After installing beta.14 or the current checkout, run the complete
 schema-to-gate path with one command:
 
 ```bash

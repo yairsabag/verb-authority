@@ -58,14 +58,13 @@ like this:
 ]
 ```
 
-Install the published Beta 13 tag into a disposable Python environment, then
-scan the JSON without changing the JavaScript application:
+Install Beta 14 into a disposable Python environment, then scan the JSON
+without changing the JavaScript application:
 
 ```bash
 python -m venv .verb-authority-venv
 . .verb-authority-venv/bin/activate
-python -I -m pip install \
-  "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.13"
+python -m pip install "verb-authority==0.10.0b14"
 env -u PYTHONPATH -u PYTHONHOME \
   python -I -m verb_authority scan tools.json --output authority-report.md
 ```
@@ -116,7 +115,7 @@ steps:
   - uses: actions/setup-python@v5
     with:
       python-version: "3.12"
-  - uses: yairsabag/verb-authority@v0.10.0-beta.13
+  - uses: yairsabag/verb-authority@v0.10.0-beta.14
     with:
       before: security/tool-schemas/main.json
       after: security/tool-schemas/pr.json
