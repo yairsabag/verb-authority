@@ -1427,6 +1427,51 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
     assert observed == set(expected)
 
 
+def test_package_index_publish_stages_candidates_outside_the_checkout():
+    repository = Path(__file__).resolve().parent
+    text = (
+        repository / ".github/workflows/publish-to-pypi.yml"
+    ).read_text(encoding="utf-8")
+    build = text.split("\n  build:\n", 1)[1].split(
+        "\n  publish_testpypi:\n", 1
+    )[0]
+    build_header = build.split("\n    steps:\n", 1)[0]
+
+    assert "runner.temp" not in build_header
+    assert (
+        build.count(
+            "RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets"
+        )
+        == 4
+    )
+    assert build.count("PYPI_DIST_DIR: ${{ runner.temp }}/pypi-dist") == 1
+    assert 'mkdir -- "$RELEASE_ASSETS_DIR"' in build
+    assert '--dir "$RELEASE_ASSETS_DIR"' in build
+    assert 'entries=("$RELEASE_ASSETS_DIR"/*)' in build
+    assert 'wheels=("$RELEASE_ASSETS_DIR"/*.whl)' in build
+    assert 'sdists=("$RELEASE_ASSETS_DIR"/*.tar.gz)' in build
+    assert '"$RELEASE_ASSETS_DIR/SHA256SUMS"' in build
+    assert 'mkdir -- "$PYPI_DIST_DIR"' in build
+    assert 'staged_wheels=("$PYPI_DIST_DIR"/*.whl)' in build
+    assert 'staged_sdists=("$PYPI_DIST_DIR"/*.tar.gz)' in build
+    assert "path: ${{ runner.temp }}/pypi-dist/" in build
+    assert '--repository "${{ github.workspace }}"' in build
+
+    for checkout_relative_path in (
+        "mkdir release-assets",
+        "--dir release-assets",
+        "entries=(release-assets/*)",
+        "wheels=(release-assets/*.whl)",
+        "sdists=(release-assets/*.tar.gz)",
+        "release-assets/SHA256SUMS",
+        "mkdir pypi-dist",
+        "staged_wheels=(pypi-dist/*.whl)",
+        "staged_sdists=(pypi-dist/*.tar.gz)",
+        "path: pypi-dist/",
+    ):
+        assert checkout_relative_path not in build
+
+
 def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
     repository = Path(__file__).resolve().parent
     config = release_verifier._project_release_config(
