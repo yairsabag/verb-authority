@@ -1,7 +1,7 @@
 # Verb Authority
 
 [![CI](https://github.com/yairsabag/verb-authority/actions/workflows/ci.yml/badge.svg)](https://github.com/yairsabag/verb-authority/actions/workflows/ci.yml)
-[![PyPI version](https://img.shields.io/pypi/v/verb-authority)](https://pypi.org/project/verb-authority/)
+[![PyPI version](https://img.shields.io/pypi/v/verb-authority?include_prereleases=true)](https://pypi.org/project/verb-authority/)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776AB.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/yairsabag/verb-authority/blob/main/LICENSE)
 
