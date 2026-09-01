@@ -55,6 +55,39 @@ jobs:
       - name: Run the Pydantic AI integration contract
         run: python -m pytest -v test_pydantic_ai_integration.py
 
+  node-prototype:
+    name: Experimental Node ${{ matrix.node-version }} runtime
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Install locked development dependencies
+        working-directory: packages/node
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run the complete source-prototype contract
+        working-directory: packages/node
+        run: npm run check
+
+      - name: Run the offline TypeScript quickstart
+        working-directory: packages/node
+        run: npm run quickstart
+
   package:
     name: Build and smoke-test distribution
     runs-on: ubuntu-latest

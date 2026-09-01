@@ -1384,6 +1384,10 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
             "5fda3b95a4ea91299a34e894583c3862153e4b97",
             "v7.0.0",
         ),
+        "actions/setup-node": (
+            "820762786026740c76f36085b0efc47a31fe5020",
+            "v7.0.0",
+        ),
         "actions/upload-artifact": (
             "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             "v7.0.1",
@@ -1425,6 +1429,55 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
                 assert "persist-credentials: false" in checkout_block
             observed.add(action)
     assert observed == set(expected)
+
+
+def test_node_prototype_ci_is_isolated_from_python_release_artifacts():
+    repository = Path(__file__).resolve().parent
+    config = release_verifier._project_release_config(
+        repository / "pyproject.toml"
+    )
+    ci = (repository / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    node_job = ci.split("\n  node-prototype:\n", 1)[1].split(
+        "\n  package:\n", 1
+    )[0]
+
+    assert 'node-version: ["22", "24"]' in node_job
+    assert (
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        in node_job
+    )
+    assert "package-manager-cache: false" in node_job
+    assert node_job.count("working-directory: packages/node") == 3
+    assert "npm ci --ignore-scripts --no-audit --no-fund" in node_job
+    assert "run: npm run check" in node_job
+    assert "run: npm run quickstart" in node_job
+    assert "upload-artifact" not in node_job
+    assert "download-artifact" not in node_job
+    assert "npm publish" not in node_job
+
+    release_workflows = "\n".join(
+        (
+            (repository / ".github/workflows/release.yml").read_text(
+                encoding="utf-8"
+            ),
+            (repository / ".github/workflows/publish-to-pypi.yml").read_text(
+                encoding="utf-8"
+            ),
+        )
+    )
+    assert "actions/setup-node" not in release_workflows
+    assert "packages/node" not in release_workflows
+    assert "packages/node" not in (repository / "MANIFEST.in").read_text(
+        encoding="utf-8"
+    )
+    assert not any(
+        member == "packages/node" or member.startswith("packages/node/")
+        for member in config.sdist_source_payloads
+    )
+    assert not any(
+        member == "packages/node" or member.startswith("packages/node/")
+        for member in config.wheel_data_payloads
+    )
 
 
 def test_package_index_publish_stages_candidates_outside_the_checkout():

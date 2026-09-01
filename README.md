@@ -217,10 +217,14 @@ the pinned dependency versions. Unsupported remote, runtime-added, streaming,
 async, realtime, and native execution paths fail closed. See
 [Pydantic AI 2.35 runtime adapter](https://github.com/yairsabag/verb-authority/blob/main/docs/runtime-gate.md#pydantic-ai-235-runtime-adapter).
 
-No JavaScript/TypeScript runtime adapter is published in beta.14. JavaScript
-applications may export JSON schemas for an offline scan, but runtime
-enforcement must sit in a trusted server-side boundary rather than a browser
-bundle. See the [JavaScript and TypeScript evaluation path](https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md).
+No JavaScript/TypeScript runtime adapter is published in beta.14 or on npm.
+JavaScript applications may export JSON schemas for an offline scan. This
+repository also contains an
+[unpublished server-side TypeScript prototype](https://github.com/yairsabag/verb-authority/tree/main/packages/node)
+for design-partner testing without Python; it uses explicit trusted policy
+registration and does not port schema inference. Runtime enforcement must sit
+in trusted server code rather than a browser bundle. See the
+[JavaScript and TypeScript evaluation path](https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md).
 
 ## Catch authority drift in CI
 
