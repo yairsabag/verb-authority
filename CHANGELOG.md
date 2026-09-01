@@ -5,7 +5,11 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Development
+
+- Include `setuptools>=77` in the `dev` extra so a clean
+  `pip install ".[dev]"` environment can run the intentional no-isolation
+  release-archive contract test.
 
 ## [0.10.0-beta.14] - 2026-08-31
 
