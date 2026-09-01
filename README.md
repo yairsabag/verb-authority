@@ -220,7 +220,9 @@ async, realtime, and native execution paths fail closed. See
 No JavaScript/TypeScript runtime adapter is published in beta.14. JavaScript
 applications may export JSON schemas for an offline scan, but runtime
 enforcement must sit in a trusted server-side boundary rather than a browser
-bundle. See the [JavaScript and TypeScript evaluation path](https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md).
+bundle. See the [JavaScript and TypeScript evaluation path][js-ts-evaluation].
+
+[js-ts-evaluation]: https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md
 
 ## Catch authority drift in CI
 
