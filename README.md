@@ -291,6 +291,8 @@ full [Authority Diff contract](https://github.com/yairsabag/verb-authority/blob/
 - The gate provides argument-integrity control, not confidentiality, secret
   tracking, or model-output filtering.
 - Any execution route that bypasses the gate is outside the guarantee.
+- No real incident is claimed covered without an exact replay and regression;
+  see the [incident coverage matrix](https://github.com/yairsabag/verb-authority/blob/main/LANDSCAPE.md#real-incidents-and-control-coverage).
 
 Read [Limits and boundaries](https://github.com/yairsabag/verb-authority/blob/main/docs/limits-and-boundaries.md) before using a
 report or allowed decision as security evidence.
@@ -329,7 +331,7 @@ See [Security model](https://github.com/yairsabag/verb-authority/blob/main/docs/
 - [Schema scanner, control evidence, privacy, and Authority Diff](https://github.com/yairsabag/verb-authority/blob/main/docs/schema-scanner.md)
 - [Limits and boundaries](https://github.com/yairsabag/verb-authority/blob/main/docs/limits-and-boundaries.md)
 - [Case studies and executable evidence](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/index.md)
-- [Research landscape and citations](https://github.com/yairsabag/verb-authority/blob/main/LANDSCAPE.md)
+- [Research/product landscape, citations, and incident coverage](https://github.com/yairsabag/verb-authority/blob/main/LANDSCAPE.md)
 - [Fixture contribution layout](https://github.com/yairsabag/verb-authority/blob/main/fixtures/README.md)
 - [Security reporting](https://github.com/yairsabag/verb-authority/blob/main/SECURITY.md)
 - [Changelog](https://github.com/yairsabag/verb-authority/blob/main/CHANGELOG.md)
