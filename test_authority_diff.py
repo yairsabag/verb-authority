@@ -96,8 +96,26 @@ def _refresh_report_summary(report):
         )
 
 
-def _as_v4_report(report):
+_REMEDIATION_FIELDS = (
+    "remediation_status",
+    "preferred_remediation",
+    "fallback_remediation",
+    "remediation_review_reason",
+)
+
+
+def _as_v5_report(report):
     legacy = copy.deepcopy(report)
+    legacy["report_version"] = 5
+    for tool in legacy["tools"]:
+        for argument in tool["arguments"]:
+            for field in _REMEDIATION_FIELDS:
+                argument.pop(field, None)
+    return legacy
+
+
+def _as_v4_report(report):
+    legacy = _as_v5_report(report)
     legacy["report_version"] = 4
     legacy["summary"].pop("review_required_tools")
     for tool in legacy["tools"]:
@@ -630,7 +648,7 @@ def test_malformed_v4_constraint_metadata_is_rejected():
         diff_reports(report, copy.deepcopy(report))
 
 
-def test_v5_annotation_assessments_are_accepted_when_scanner_coherent():
+def test_v6_annotation_assessments_are_accepted_when_scanner_coherent():
     report = _annotation_report(
         {
             "readOnlyHint": False,
@@ -642,11 +660,31 @@ def test_v5_annotation_assessments_are_accepted_when_scanner_coherent():
 
     diff = diff_reports(report, copy.deepcopy(report))
 
-    assert report["report_version"] == 5
+    assert report["report_version"] == 6
     assert diff["changes"] == []
 
 
-def test_v4_report_compares_with_v5_without_mutating_legacy_input():
+def test_v5_report_compares_with_v6_without_mutating_legacy_input():
+    current = _avp9_report()
+    legacy = _as_v5_report(current)
+    frozen_legacy = copy.deepcopy(legacy)
+
+    first = diff_reports(legacy, current)
+    second = diff_reports(legacy, current)
+
+    assert first["changes"] == []
+    assert second["changes"] == []
+    assert legacy == frozen_legacy
+    assert legacy["report_version"] == 5
+    assert all(
+        field not in argument
+        for tool in legacy["tools"]
+        for argument in tool["arguments"]
+        for field in _REMEDIATION_FIELDS
+    )
+
+
+def test_v4_report_compares_with_v6_without_mutating_legacy_input():
     current = _avp9_report()
     legacy = _as_v4_report(current)
     frozen_legacy = copy.deepcopy(legacy)
@@ -660,6 +698,232 @@ def test_v4_report_compares_with_v5_without_mutating_legacy_input():
     assert legacy["report_version"] == 4
     assert "review_required_tools" not in legacy["summary"]
     assert "review_required" not in legacy["tools"][0]
+
+
+@pytest.mark.parametrize("field", _REMEDIATION_FIELDS)
+def test_v6_trusted_fixed_remediation_fields_are_mandatory(field):
+    report = _avp9_report()
+    argument = next(
+        argument
+        for tool in report["tools"]
+        for argument in tool["arguments"]
+        if argument["policy"] == "trusted_fixed"
+    )
+    argument.pop(field)
+
+    with pytest.raises(DiffError, match="missing remediation fields"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("remediation_status", "review_required"),
+        ("preferred_remediation", "invent_a_trusted_source"),
+        ("fallback_remediation", "accept_model_value"),
+        ("remediation_review_reason", "authority_inference_requires_review"),
+    ),
+)
+def test_v6_recommended_remediation_cannot_be_forged(field, value):
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                            "required": ["to", "body"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    argument = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "to"
+    )
+    assert argument["remediation_status"] == "recommended"
+    argument[field] = value
+
+    with pytest.raises(DiffError, match="inconsistent remediation guidance"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v6_review_remediation_distinguishes_selector_from_authority_review():
+    report = _two_review_argument_report()
+    arguments = {
+        argument["name"]: argument
+        for argument in report["tools"][0]["arguments"]
+    }
+
+    assert arguments["action"]["remediation_status"] == "review_required"
+    assert arguments["action"]["preferred_remediation"] is None
+    assert arguments["action"]["fallback_remediation"] is None
+    assert (
+        arguments["action"]["remediation_review_reason"]
+        == "selector_semantics_require_review"
+    )
+    assert (
+        arguments["index"]["remediation_review_reason"]
+        == "authority_inference_requires_review"
+    )
+    assert diff_reports(report, copy.deepcopy(report))["changes"] == []
+
+
+def test_v6_selector_remediation_reason_cannot_be_attached_to_non_selector():
+    report = _two_review_argument_report()
+    index = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "index"
+    )
+    index["remediation_review_reason"] = "selector_semantics_require_review"
+
+    with pytest.raises(
+        DiffError, match="inconsistent remediation review reason"
+    ):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v6_selector_remediation_reason_cannot_be_downgraded():
+    report = _two_review_argument_report()
+    action = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "action"
+    )
+    action["remediation_review_reason"] = (
+        "authority_inference_requires_review"
+    )
+
+    with pytest.raises(
+        DiffError, match="inconsistent remediation review reason"
+    ):
+        diff_reports(report, copy.deepcopy(report))
+
+
+@pytest.mark.parametrize("invalid_reason", (None, [], {}))
+def test_v6_remediation_review_reason_rejects_wrong_types(invalid_reason):
+    report = _two_review_argument_report()
+    action = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "action"
+    )
+    action["remediation_review_reason"] = invalid_reason
+
+    with pytest.raises(DiffError, match="remediation review reason"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v6_remediation_validation_replays_shared_normalization_budget(
+    monkeypatch,
+):
+    monkeypatch.setattr(verb_authority, "MAX_NFKC_OPERATION_CHARS", 8)
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "éaaa",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "öbbb",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "tabs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "ａｃｔｉｏｎ": {
+                                    "type": "string",
+                                    "enum": ["list", "close"],
+                                }
+                            },
+                        },
+                    },
+                ]
+            }
+        ]
+    )
+    action = report["tools"][-1]["arguments"][0]
+
+    assert action["policy"] == "trusted_fixed"
+    assert action["review_required"] is True
+    assert (
+        action["remediation_review_reason"]
+        == "authority_inference_requires_review"
+    )
+    assert diff_reports(report, copy.deepcopy(report))["changes"] == []
+
+
+def test_v6_non_protected_argument_cannot_expose_remediation_guidance():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string"},
+                                "body": {
+                                    "type": "string",
+                                    "description": "Message body to send",
+                                },
+                            },
+                            "required": ["to", "body"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    argument = next(
+        argument
+        for argument in report["tools"][0]["arguments"]
+        if argument["name"] == "body"
+    )
+    assert argument["policy"] != "trusted_fixed"
+    argument.update(
+        {
+            "remediation_status": "recommended",
+            "preferred_remediation": (
+                "remove_from_model_schema_and_inject_from_application"
+            ),
+            "fallback_remediation": "bind_trusted_value_at_runtime",
+            "remediation_review_reason": None,
+        }
+    )
+
+    with pytest.raises(DiffError, match="inapplicable remediation guidance"):
+        diff_reports(report, copy.deepcopy(report))
+
+
+def test_v5_report_cannot_smuggle_v6_remediation_fields():
+    report = _as_v5_report(_avp9_report())
+    report["tools"][0]["arguments"][0]["remediation_status"] = "recommended"
+
+    with pytest.raises(DiffError, match="unsupported fields"):
+        diff_reports(report, copy.deepcopy(report))
 
 
 @pytest.mark.parametrize("field", ("review_required", "review_sources"))
@@ -771,9 +1035,14 @@ def test_v5_review_aggregate_rejects_wrong_types(path, value, error):
 
 
 def test_v4_report_cannot_smuggle_v5_aggregate_fields():
-    report = _avp9_report()
-    report["report_version"] = 4
-    report["summary"].pop("review_required_tools")
+    current = _avp9_report()
+    report = _as_v4_report(current)
+    report["tools"][0]["review_required"] = current["tools"][0][
+        "review_required"
+    ]
+    report["tools"][0]["review_sources"] = copy.deepcopy(
+        current["tools"][0]["review_sources"]
+    )
 
     with pytest.raises(DiffError, match="unsupported fields"):
         diff_reports(report, copy.deepcopy(report))

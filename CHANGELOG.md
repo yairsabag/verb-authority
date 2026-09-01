@@ -5,6 +5,25 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+### Scanner report v6
+
+- Add advisory, machine-readable remediation metadata to every
+  `trusted_fixed` argument. An argument with no scanner review requirement
+  recommends removing it from the model-visible schema and injecting it from
+  independently trusted application state, with exact runtime binding through
+  `trusted_args` as the compatibility path.
+- Keep uncertain protected arguments non-actionable: their remediation actions
+  remain `null`, and the report distinguishes selector-semantics review from
+  ordinary authority-inference review. Non-protected arguments receive no
+  remediation fields.
+- Validate the complete remediation tuple when Authority Diff imports a v6
+  report while continuing to accept complete v4 and v5 reports for
+  observational comparison. Remediation is derived guidance and does not
+  create semantic drift in a legacy-to-v6 comparison.
+- Document the preferred `send_reply(body)` application pattern and an
+  optional schema-projection design. No projection API, wrapper generation,
+  trusted-value inference, deployment behavior, or runtime promise is added.
+
 ### Development
 
 - Include `setuptools>=77` in the `dev` extra so a clean

@@ -34,7 +34,7 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority scan tools.json \
 ```
 
 MCP tool annotations are server-supplied, unverified hints, not enforcement
-evidence. Report v5 retains each recognized boolean hint in a structured
+evidence. Report v6 retains each recognized boolean hint in a structured
 `annotation_assessments` entry with its value, comparison source and value,
 and explicit `trust: "unverified_hint"`. The assessment state is `consistent`
 when a hint agrees with established effective-risk evidence, `conflict` when
@@ -64,7 +64,12 @@ enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
 reports before indexing them. An over-limit CLI input exits with status 2 and
 is not partially scanned or compared.
 
-Named JSON reports use report format v5. For the constraints understood by
+**Unreleased source note:** the published beta.14 package emits report v5 and
+does not contain remediation fields. Report v6 below is the contract of this
+unreleased source checkout and will apply only when a release that includes it
+is published.
+
+Named JSON reports use report format v6. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a
 SHA-256 fingerprint for each enum member. Raw enum members are omitted, but
 hashes of low-entropy values are dictionary-guessable and repeated hashes are
@@ -76,29 +81,72 @@ reports also include per-tool and per-argument
 `unmodeled_schema_fingerprint_sha256` commitments. These exact schema hashes
 can likewise be dictionary-guessed or correlated.
 
-Report v5 also provides one explicit review aggregate per tool. Its
-`review_required` boolean is derived from `review_sources`, which identifies
-flagged argument names in `arguments` plus the `schema`, `risk`,
+Report v6 retains the explicit review aggregate introduced in v5 for each
+tool. Its `review_required` boolean is derived from `review_sources`, which
+identifies flagged argument names in `arguments` plus the `schema`, `risk`,
 `risk_conflict`, `annotation_conflicts`, and `branch_risk` sources already
 present elsewhere in the report. `summary.review_required` remains the number
-of flagged arguments; the new `summary.review_required_tools` counts tools
+of flagged arguments; `summary.review_required_tools` counts tools
 with any of those review obligations. This static review debt is deliberately
 separate from `needs_confirmation`: a well-classified consequential call can
 require runtime approval without needing policy review.
 
-When Authority Diff imports a named v4 or v5 report, it recomputes summary
+Report v6 also attaches remediation metadata to each `trusted_fixed`
+argument. When that argument has `review_required: false`, the JSON contract
+is:
+
+```json
+{
+  "remediation_status": "recommended",
+  "preferred_remediation": "remove_from_model_schema_and_inject_from_application",
+  "fallback_remediation": "bind_trusted_value_at_runtime",
+  "remediation_review_reason": null
+}
+```
+
+When the same authority result still has `review_required: true`, the scanner
+does not turn an uncertain classification into implementation advice:
+
+```json
+{
+  "remediation_status": "review_required",
+  "preferred_remediation": null,
+  "fallback_remediation": null,
+  "remediation_review_reason": "selector_semantics_require_review"
+}
+```
+
+The review reason is `selector_semantics_require_review` when an enum argument
+has a selector-like name and may represent an operation the model is intended
+to choose. For other uncertain protected arguments it is
+`authority_inference_requires_review`. Every `trusted_fixed` argument includes
+`remediation_review_reason`; recommended rows use `null`.
+
+Markdown reports render equivalent human-readable status, remedy identifiers
+when present, and the review reason. These fields are advisory: they do not
+prove that independently trusted application state
+exists, remove an argument from a provider schema, create a wrapper, bind a
+runtime value, or change gate behavior. A `recommended` result applies only
+after the developer verifies that trusted application code can supply the
+value independently of untrusted content. The application must review and
+implement either path. See the optional
+[schema-projection design proposal](schema-projection-design.md).
+
+When Authority Diff imports a named v4, v5, or v6 report, it recomputes summary
 counters and reconciles the complete risk tuple (declaration, advisory
 inference, conflict, effective tier, evidence, review, and confirmation) before
 comparing it. It also checks the stable argument policy/confidence/review
 combinations, preserves the scanner's declaration-verification warning, and
 refuses an open schema with declared unexposed controls unless schema review
 remains explicit.
-For v5 it additionally requires the per-tool review aggregate and its summary
-counter to match the underlying evidence exactly. A complete v4 report remains
-accepted for observational comparison; Authority Diff derives the aggregate
-only in its internal comparison index and neither mutates nor rewrites the
-caller's report. This catches internally impossible or partially edited
-reports. The unkeyed SHA-256 fields are content commitments, not
+For v5 and v6 it additionally requires the per-tool review aggregate and its
+summary counter to match the underlying evidence exactly. For v6 it also
+validates each `trusted_fixed` remediation tuple against the argument's review
+state. Complete v4 and v5 reports remain accepted for observational
+comparison; Authority Diff derives only missing presentation metadata in its
+internal comparison index and neither mutates nor rewrites the caller's
+report. This catches internally impossible or partially edited reports. The
+unkeyed SHA-256 fields are content commitments, not
 authentication: a party
 that can replace an entire stored report can fabricate a different coherent
 report and matching hashes. For an untrusted pull request or artifact, rescan
@@ -127,7 +175,7 @@ but low-entropy values such as `close` are dictionary-guessable. They remain in
 both named and name-redacted reports, and the `privacy` object says so
 explicitly.
 
-The v5 `privacy` object retains the machine-readable contract introduced in
+The v6 `privacy` object retains the machine-readable contract introduced in
 v4. It keeps separate `examples_included: false`,
 `defaults_included: false`, and
 `runtime_values_included: false` fields rather than the old combined
@@ -143,7 +191,7 @@ three booleans to `false` and use the scope
 Use `--fail-on-review` in CI to return a non-zero status when ambiguous risks,
 arguments, likely operation selectors without branch evidence, risk conflicts,
 MCP annotation conflicts, or unresolved JSON Schema composition need attention.
-The v5 per-tool aggregate is an index over those existing obligations, not a
+The v6 per-tool aggregate is an index over those existing obligations, not a
 new inference or a substitute for inspecting their underlying evidence.
 The scanner does not resolve `$ref`, `allOf`,
 `anyOf`, `oneOf`, or conditional/dependent schemas. It instead sets
@@ -162,8 +210,8 @@ aid, not a vulnerability verdict; the scanner does not inspect tool
 implementations or verify the surrounding application's authorization and
 provenance wiring.
 
-Both schema-review fields are mandatory in imported v4 and v5 reports. In v5,
-each tool's `review_required` and `review_sources` fields and
+Both schema-review fields are mandatory in imported v4, v5, and v6 reports. In
+v5 and v6, each tool's `review_required` and `review_sources` fields and
 `summary.review_required_tools` are also mandatory and must be coherent with
 the underlying argument, schema, risk, annotation, and branch evidence. A
 report that omits any required field must be regenerated from the original
@@ -330,14 +378,16 @@ Example output:
 
 Without a failure threshold, the command also accepts two non-redacted JSON
 reports for observational comparison. Diff output format v2 is paired with
-scanner report format v5 and accepts complete report v4 or v5 inputs. For a v4
-input, Authority Diff derives the v5 tool-level review aggregate only in its
-internal index; it does not mutate or rewrite the supplied report, and this
-derived presentation field does not create a semantic diff by itself. Report
-v3 did not preserve the structured provenance and assessment state of MCP
+scanner report format v6 and accepts complete report v4, v5, or v6 inputs. For
+a v4 input, Authority Diff derives the later tool-level review aggregate only
+in its internal index; it does not mutate or rewrite the supplied report, and
+this derived presentation field does not create a semantic diff by itself.
+For v4 and v5 inputs, absent v6 remediation metadata is not invented as
+implementation evidence and does not create a semantic diff. Report v3 did
+not preserve the structured provenance and assessment state of MCP
 annotation hints, so it is rejected rather than upgraded by inference. Report
 v2 also omitted constraint values and cannot be migrated without inventing
-evidence. Rescan the original raw schema with the v5 scanner before comparing
+evidence. Rescan the original raw schema with the v6 scanner before comparing
 it. When implementation controls are part of a
 raw-schema comparison, pass the sidecars with `--before-controls` and
 `--after-controls`. Control evidence remains visibly author-supplied; a diff
@@ -349,7 +399,7 @@ sentinels hidden inside a direct tool list, `tools`, `result.tools`, or an Atlas
 Intermediate, unpublished v4 reports that predate the mandatory
 `schema_review_required` and `summary.schema_review_required_tools` fields must
 also be rescanned rather than compared under an optimistic default.
-Imported v4 and v5 reports must contain at least one tool, matching the
+Imported v4, v5, and v6 reports must contain at least one tool, matching the
 scanner's own output boundary; a fabricated empty report is rejected with
 rescan guidance.
 They must also preserve scanner-normalized declaration text and canonical
@@ -415,7 +465,7 @@ pin in the example above supports both thresholds. The action removes
 and comparison, preventing modules in the consumer checkout from shadowing
 `pip` or the installed Verb Authority package.
 
-The v5 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
+The v6 comparison orders `maximum`, `maxLength`, and enum changes. Widening or
 removing one is an authority increase; tightening one is a protection
 increase; and enum replacements without a strict subset relationship require
 review. Any effective risk-tier change also requires review; tiers are not

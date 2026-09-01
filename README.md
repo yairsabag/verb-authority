@@ -106,6 +106,29 @@ Both fields are strings, but they carry different authority:
 Verb Authority makes that distinction explicit and checks it immediately
 before execution.
 
+### Preferred remediation: keep protected arguments out of the model schema
+
+When the application already owns the recipient, prefer exposing a smaller
+tool to the model:
+
+~~~text
+# Canonical tool registered by the application
+send_email(to: str, body: str)
+
+# Conceptual model-visible interface
+send_reply(body: str)
+~~~
+
+The application restores `to` from state established independently of
+untrusted content; the canonical registration and implementation stay intact.
+`send_reply` is a conceptual interface, not a beta.14 wrapper or alias API.
+
+If the schema cannot change, materialize the application-owned value in the
+canonical call and pass the same exact value in `trusted_args`. It verifies a
+match; it never inserts or overwrites input. See the complete
+[runtime contract](https://github.com/yairsabag/verb-authority/blob/main/docs/runtime-gate.md#preferred-remediation-remove-protected-arguments-from-model-view)
+and the optional [projection design][schema-projection-design].
+
 ## Scan a real MCP schema
 
 Export the `tools/list` JSON your client already receives. Then run:
@@ -223,6 +246,7 @@ enforcement must sit in a trusted server-side boundary rather than a browser
 bundle. See the [JavaScript and TypeScript evaluation path][js-ts-evaluation].
 
 [js-ts-evaluation]: https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md
+[schema-projection-design]: https://github.com/yairsabag/verb-authority/blob/main/docs/schema-projection-design.md
 
 ## Catch authority drift in CI
 

@@ -18,14 +18,20 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from verb_authority import infer_risk
+from verb_authority import _PolicyInferenceContext, infer_risk
 from verb_authority_scan import (
     CONTROL_VERIFICATION_NOTICE,
+    FALLBACK_TRUSTED_FIXED_REMEDIATION,
     MAX_SCAN_ARGUMENTS,
     MAX_SCAN_CONTROL_COLLECTION_MEMBERS,
     MAX_SCAN_ENUM_MEMBERS,
     MAX_SCAN_TOOL_DEFINITIONS,
+    PREFERRED_TRUSTED_FIXED_REMEDIATION,
     REPORT_VERSION,
+    REMEDIATION_REVIEW_REASON_AUTHORITY,
+    REMEDIATION_REVIEW_REASON_SELECTOR,
+    REMEDIATION_STATUS_RECOMMENDED,
+    REMEDIATION_STATUS_REVIEW_REQUIRED,
     SchemaError,
     _summary_requires_review,
     _tool_review_required,
@@ -40,8 +46,8 @@ from verb_authority_scan import (
 
 
 DIFF_VERSION = 2
-_SUPPORTED_REPORT_VERSION = 5
-_COMPATIBLE_REPORT_VERSIONS = frozenset({4, 5})
+_SUPPORTED_REPORT_VERSION = 6
+_COMPATIBLE_REPORT_VERSIONS = frozenset({4, 5, 6})
 if REPORT_VERSION != _SUPPORTED_REPORT_VERSION:
     raise RuntimeError(
         "scanner and Authority Diff current report versions are out of sync"
@@ -352,25 +358,38 @@ def _validate_report_argument(
     seen: set[str],
     require_fingerprints: bool,
     effective_risk: str,
+    report_version: int,
+    inference_context: _PolicyInferenceContext,
 ) -> None:
     argument = _require_object(value, field=f"tool '{tool}' argument")
+    allowed_fields = {
+        "name",
+        "type",
+        "required",
+        "policy",
+        "confidence",
+        "review_required",
+        "reason",
+        "constraints",
+        "schema_material_fingerprint_sha256",
+        "unmodeled_schema_fingerprint_sha256",
+    }
+    if report_version >= 6:
+        allowed_fields.update(
+            {
+                "remediation_status",
+                "preferred_remediation",
+                "fallback_remediation",
+                "remediation_review_reason",
+            }
+        )
     _reject_unknown_fields(
         argument,
-        allowed={
-            "name",
-            "type",
-            "required",
-            "policy",
-            "confidence",
-            "review_required",
-            "reason",
-            "constraints",
-            "schema_material_fingerprint_sha256",
-            "unmodeled_schema_fingerprint_sha256",
-        },
+        allowed=allowed_fields,
         field=f"tool '{tool}' argument",
     )
     name = _require_text(argument.get("name"), field=f"tool '{tool}' argument name")
+    inference_context.normalize_identifier(name)
     if name in seen:
         raise DiffError(f"report contains duplicate argument name: {tool}.{name}")
     seen.add(name)
@@ -401,6 +420,80 @@ def _validate_report_argument(
     if not inference_coherent:
         raise DiffError(
             f"argument {tool}.{name} has inconsistent policy inference"
+        )
+    remediation_fields = {
+        "remediation_status",
+        "preferred_remediation",
+        "fallback_remediation",
+        "remediation_review_reason",
+    }
+    present_remediation_fields = remediation_fields.intersection(argument)
+    if report_version >= 6 and policy == "trusted_fixed":
+        missing = remediation_fields - set(argument)
+        if missing:
+            raise DiffError(
+                f"argument {tool}.{name} is missing remediation fields: "
+                + ", ".join(sorted(missing))
+            )
+        expected_remediation = (
+            {
+                "remediation_status": REMEDIATION_STATUS_REVIEW_REQUIRED,
+                "preferred_remediation": None,
+                "fallback_remediation": None,
+                "remediation_review_reason": argument.get(
+                    "remediation_review_reason"
+                ),
+            }
+            if review_required
+            else {
+                "remediation_status": REMEDIATION_STATUS_RECOMMENDED,
+                "preferred_remediation": PREFERRED_TRUSTED_FIXED_REMEDIATION,
+                "fallback_remediation": FALLBACK_TRUSTED_FIXED_REMEDIATION,
+                "remediation_review_reason": None,
+            }
+        )
+        if any(
+            argument[field] != expected_value
+            for field, expected_value in expected_remediation.items()
+        ):
+            raise DiffError(
+                f"argument {tool}.{name} has inconsistent remediation guidance"
+            )
+        if review_required:
+            review_reason = _require_text(
+                argument["remediation_review_reason"],
+                field=f"argument {tool}.{name} remediation review reason",
+            )
+            if review_reason not in {
+                REMEDIATION_REVIEW_REASON_AUTHORITY,
+                REMEDIATION_REVIEW_REASON_SELECTOR,
+            }:
+                raise DiffError(
+                    f"argument {tool}.{name} has invalid remediation review reason"
+                )
+            expected_review_reason = (
+                REMEDIATION_REVIEW_REASON_SELECTOR
+                if (
+                    argument["type"] == "enum"
+                    and is_branch_selector_name(name, inference_context)
+                )
+                else REMEDIATION_REVIEW_REASON_AUTHORITY
+            )
+            if require_fingerprints and review_reason != expected_review_reason:
+                raise DiffError(
+                    f"argument {tool}.{name} has inconsistent remediation review reason"
+                )
+            if (
+                not require_fingerprints
+                and review_reason == REMEDIATION_REVIEW_REASON_SELECTOR
+                and argument["type"] != "enum"
+            ):
+                raise DiffError(
+                    f"argument {tool}.{name} has inconsistent selector remediation"
+                )
+    elif present_remediation_fields:
+        raise DiffError(
+            f"argument {tool}.{name} exposes inapplicable remediation guidance"
         )
     _require_text(argument.get("reason"), field=f"argument {tool}.{name}.reason")
     _validated_constraints(argument.get("constraints"), tool=tool, argument=name)
@@ -573,6 +666,7 @@ def _validate_branch_risk(
     name: str,
     argument_names: set[str],
     names_redacted: bool,
+    inference_context: _PolicyInferenceContext,
 ) -> None:
     branch_review = _require_bool(
         tool.get("branch_risk_review_required"),
@@ -585,7 +679,9 @@ def _validate_branch_risk(
                 argument.get("type") == "enum"
                 and argument.get("policy") == "trusted_fixed"
                 and argument.get("confidence") == "uncertain"
-                and is_branch_selector_name(argument["name"])
+                and is_branch_selector_name(
+                    argument["name"], inference_context
+                )
                 for argument in tool["arguments"]
             )
             and tool["risk"] != "read_only"
@@ -819,6 +915,7 @@ def _validate_report_tool(
     seen: set[str],
     require_fingerprints: bool,
     report_version: int,
+    inference_context: _PolicyInferenceContext,
 ) -> tuple[str, set[str]]:
     tool = _require_object(value, field="report tool")
     allowed_fields = {
@@ -852,6 +949,7 @@ def _validate_report_tool(
         field="report tool",
     )
     name = _require_text(tool.get("name"), field="report tool name")
+    inference_context.normalize_identifier(name)
     if name in seen:
         raise DiffError(f"report contains duplicate tool name: {name}")
     seen.add(name)
@@ -971,12 +1069,15 @@ def _validate_report_tool(
             seen=argument_names,
             require_fingerprints=require_fingerprints,
             effective_risk=argument_inference_risk,
+            report_version=report_version,
+            inference_context=inference_context,
         )
     _validate_branch_risk(
         tool,
         name=name,
         argument_names=argument_names,
         names_redacted=not require_fingerprints,
+        inference_context=inference_context,
     )
     _validate_annotation_assessments(tool, name=name)
     if tool["branch_risk"] is None:
@@ -1544,12 +1645,14 @@ def _validate_report(report: Any, *, label: str) -> dict[str, Any]:
     tool_names: set[str] = set()
     report_tools: dict[str, dict[str, Any]] = {}
     report_arguments: dict[str, dict[str, dict[str, Any]]] = {}
+    inference_context = _PolicyInferenceContext()
     for raw_tool in tools:
         tool_name, argument_names = _validate_report_tool(
             raw_tool,
             seen=tool_names,
             require_fingerprints=not names_redacted,
             report_version=report_version,
+            inference_context=inference_context,
         )
         report_tools[tool_name] = raw_tool
         report_arguments[tool_name] = {

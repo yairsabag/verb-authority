@@ -9,6 +9,9 @@ Use these focused references for the complete contracts:
   assumptions, selector branches, and related research;
 - [`runtime-gate.md`](runtime-gate.md) — installation, registration, dispatch,
   confirmation binding, ledger behavior, and the Pydantic AI adapter;
+- [`schema-projection-design.md`](schema-projection-design.md) — design-only
+  proposal for removing protected arguments from the model-visible schema
+  while preserving the canonical registered tool;
 - [`schema-scanner.md`](schema-scanner.md) — supported schema shapes, reports,
   controls, redaction, and Authority Diff;
 - [`javascript-typescript.md`](javascript-typescript.md) — what JS/TS teams can

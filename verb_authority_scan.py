@@ -40,7 +40,7 @@ from verb_authority import (
 )
 
 
-REPORT_VERSION = 5
+REPORT_VERSION = 6
 CONTROL_DECLARATION_VERSION = 1
 CONTROL_AUTHORITIES = frozenset({"constrained", "free", "locked"})
 CONTROL_EVIDENCE = frozenset({"observed", "declared", "attested"})
@@ -67,6 +67,15 @@ CONTROL_VERIFICATION_NOTICE = (
     "labels and operational statuses are preserved but are not independently "
     "verified by this scanner."
 )
+
+REMEDIATION_STATUS_RECOMMENDED = "recommended"
+REMEDIATION_STATUS_REVIEW_REQUIRED = "review_required"
+REMEDIATION_REVIEW_REASON_SELECTOR = "selector_semantics_require_review"
+REMEDIATION_REVIEW_REASON_AUTHORITY = "authority_inference_requires_review"
+PREFERRED_TRUSTED_FIXED_REMEDIATION = (
+    "remove_from_model_schema_and_inject_from_application"
+)
+FALLBACK_TRUSTED_FIXED_REMEDIATION = "bind_trusted_value_at_runtime"
 
 _MCP_BOOLEAN_TOOL_ANNOTATIONS = (
     "readOnlyHint",
@@ -2152,6 +2161,46 @@ def _tool_review_required(review_sources: dict[str, Any]) -> bool:
     )
 
 
+def _trusted_fixed_remediation(
+    policy: Policy,
+    *,
+    review_required: bool,
+    param: Param,
+    inference_context: _PolicyInferenceContext,
+) -> dict[str, Any]:
+    """Return deterministic advisory remediation for a protected argument.
+
+    A high-confidence ``trusted_fixed`` inference can explain the two standard
+    integration paths.  An uncertain argument must be reviewed first: in
+    particular, a selector the model legitimately needs to choose must not be
+    projected away merely because the scanner kept it locked by default.
+    """
+
+    if policy is not Policy.TRUSTED_FIXED:
+        return {}
+    if review_required:
+        review_reason = (
+            REMEDIATION_REVIEW_REASON_SELECTOR
+            if (
+                param.type == "enum"
+                and is_branch_selector_name(param.name, inference_context)
+            )
+            else REMEDIATION_REVIEW_REASON_AUTHORITY
+        )
+        return {
+            "remediation_status": REMEDIATION_STATUS_REVIEW_REQUIRED,
+            "preferred_remediation": None,
+            "fallback_remediation": None,
+            "remediation_review_reason": review_reason,
+        }
+    return {
+        "remediation_status": REMEDIATION_STATUS_RECOMMENDED,
+        "preferred_remediation": PREFERRED_TRUSTED_FIXED_REMEDIATION,
+        "fallback_remediation": FALLBACK_TRUSTED_FIXED_REMEDIATION,
+        "remediation_review_reason": None,
+    }
+
+
 def _worst_branch_risk(branches: dict[str, Any]) -> Risk:
     return max(
         (Risk(case["risk"]["tier"]) for case in branches["cases"]),
@@ -2626,6 +2675,14 @@ def _scan_definitions_bounded(
                     param, final_policy, confidence, inference_risk
                 ),
             }
+            argument.update(
+                _trusted_fixed_remediation(
+                    final_policy,
+                    review_required=needs_review,
+                    param=param,
+                    inference_context=inference_context,
+                )
+            )
             constraints = _normalized_constraints(
                 properties.get(param.name), redact_values=redact_names
             )
@@ -3181,6 +3238,39 @@ def render_markdown(report: dict[str, Any]) -> str:
                         details=_markdown_cell(_control_details(argument)),
                     )
                 )
+    protected_arguments = [
+        (tool, argument)
+        for tool in report["tools"]
+        for argument in tool["arguments"]
+        if argument["policy"] == "trusted_fixed"
+    ]
+    if protected_arguments:
+        lines.extend(
+            [
+                "",
+                "## Remediation guidance",
+                "",
+                "> Advisory only: the report does not change a model schema, prove that",
+                "> trusted application state exists, or deploy a runtime integration.",
+                "",
+                "| Tool | Argument | Status | Preferred remediation | Fallback remediation | Review reason |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for tool, argument in protected_arguments:
+            preferred = argument["preferred_remediation"] or "—"
+            fallback = argument["fallback_remediation"] or "—"
+            review_reason = argument["remediation_review_reason"] or "—"
+            lines.append(
+                "| {tool} | {argument} | {status} | {preferred} | {fallback} | {review_reason} |".format(
+                    tool=_markdown_cell(tool["name"]),
+                    argument=_markdown_cell(argument["name"]),
+                    status=_markdown_cell(argument["remediation_status"]),
+                    preferred=_markdown_cell(preferred),
+                    fallback=_markdown_cell(fallback),
+                    review_reason=_markdown_cell(review_reason),
+                )
+            )
     lines.extend(
         [
             "",
@@ -3227,6 +3317,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "requires review and runtime confirmation. This report is not a",
             "vulnerability verdict, does not inspect tool implementations, and does not prove",
             "that the surrounding application supplies correct provenance or authorization.",
+            "Remediation guidance is advisory and never rewrites a model-visible schema,",
+            "discovers a trusted value source, or changes runtime registration. A protected",
+            "argument whose authority is uncertain must be reviewed before choosing a fix.",
             "References and composed/conditional schemas are not resolved; when present,",
             "the report marks the tool for schema review instead of claiming complete coverage.",
             "Review every flagged argument against the real tool semantics before deployment.",
