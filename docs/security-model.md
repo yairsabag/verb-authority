@@ -41,21 +41,22 @@ containers (including empty ones), and several lexical disguises. It does
 reconstruction—for example,
 turning “attacker at evil dot com” into an address. A developer can also defeat
 the guarantee by marking untrusted input as trusted without using the ledger.
-Systems such as CaMeL and FIDES use interpreter- or planner-level
+Systems such as CaMeL and FIDES use interpreter- or framework-level
 information-flow tracking to cover that deeper boundary.
 
 ## What the gate does
 
-The dependency-free core remains one importable module with five cooperating
+The dependency-free core remains one importable module with six cooperating
 pieces. The optional Pydantic adapter is a separate module and extra:
 
 - **Per-parameter policies.** Sensitive sinks such as recipients, URLs,
   accounts, paths, and commands default to `trusted_fixed`; bounded values are
   type-checked; free-text bodies are treated as outbound payloads.
-- **Safe-by-default inference.** Policies are inferred from the existing tool
-  schema. Ambiguous parameters on consequential tools stay locked and appear in
-  a one-time review queue. Authority-bearing names are evaluated before broad
-  numeric or payload rules: an integer `account_id` and a string `reply_to`
+- **Conservative, review-first inference.** Policies are proposed from the
+  existing tool schema. Ambiguous parameters on consequential tools stay
+  locked and appear in a one-time review queue. Authority-bearing names are
+  evaluated before broad numeric or payload rules: an integer `account_id` and
+  a string `reply_to`
   remain locked, while an ambiguous `message_id` remains locked for review.
   A raw `maxLength`, enum membership, numeric type, or boolean type constrains
   representation but does not by itself grant the model authority to author an
@@ -117,31 +118,51 @@ and action-instance authorization.
 
 ## Related work and positioning
 
-Verb Authority is a minimal, drop-in experiment inspired by Google DeepMind's
-**CaMeL** (“Defeating Prompt Injections by Design,” arXiv:2503.18813,
-Apache-2.0). It trades CaMeL's interpreter-level soundness for adoption in an
-existing tool loop.
+Verb Authority is one small implementation in a broader family of structural
+agent controls. It is not the only pre-execution gate, argument-level system,
+schema-to-policy proposal, or provenance mechanism. Its current product
+hypothesis is narrower: a deterministic local scan that exposes evidence and
+uncertainty, followed by a small portable runtime boundary.
 
-The closest structural approaches make different tradeoffs:
+Important overlaps and differences include:
 
-- **PACT** is the closest published research neighbor: it assigns semantic
-  argument roles, tracks provenance across replanning, and checks role-specific
-  trust contracts. Verb Authority is a smaller executable prototype and does
-  not establish research novelty over PACT.
-- **CaMeL** tracks taint through a custom interpreter.
-- **FIDES** propagates content-level integrity and confidentiality labels
-  through Agent Framework middleware and enforces policy at sensitive tools.
-- **Progent** enforces a policy over tool calls; it is complementary to this
-  project's value-provenance question.
-- **NeuroTaint** performs semantic taint analysis offline rather than blocking
-  calls at runtime.
-- Detector-based guardrails classify content or intent and can be layered with
-  this approach, but they provide a different kind of control.
+- **Amazon Bedrock AgentCore Policy** is a GA policy platform whose Gateway can
+  enforce declared tool and argument conditions. **Dogwood** temporal policies
+  can bind an argument exactly to a prior tool output and enforce sequencing,
+  approval, and freshness. AWS does not document automatic inference that an
+  argument such as `to` is a protected sink. Once the policy is correctly
+  declared, however, its structured temporal binding is stronger than this
+  project's lexical ledger for that workflow.
+- **PACT**, **CXI**, and **ROPE** are among the closest research neighbors.
+  PACT synthesizes draft argument roles from tool metadata, tracks cross-step
+  provenance, and checks role-specific contracts. CXI binds field authority,
+  exact-effect authorization, and invocation authority to the same action
+  manifest. ROPE performs deterministic origin checks over audited sensitive
+  parameters. Verb Authority does not establish
+  research novelty over them or reproduce their evaluations.
+- **CaMeL** tracks information flow through a custom interpreter. **FIDES** is
+  an experimental Microsoft Agent Framework feature that propagates
+  content-level integrity and confidentiality labels to sensitive tools.
+  Both require deeper runtime integration than this boundary gate and cover
+  transformations or confidentiality that it does not.
+- **AgentLock** is an active pre-action authorization implementation with
+  caller-recorded session provenance and opt-in parameter lineage. It requires
+  trusted policy registration rather than inferring the same authority map
+  from a raw schema.
+- **AgentWard** scans MCP and Python tools, generates reviewable policy, and
+  enforces tool and per-argument constraints through a proxy. Its public
+  documentation does not describe the same value-origin lineage contract, but
+  its scanning and enforcement surfaces overlap substantially.
+- **Progent** enforces policies over tool calls and arguments. **NeuroTaint**
+  performs semantic taint analysis offline rather than blocking calls at
+  runtime. Detector-based guardrails classify content or intent and can be
+  layered with structural controls.
 
-[`LANDSCAPE.md`](../LANDSCAPE.md) contains the detailed field map, citations, and
-the places where this project does less than the research systems. If you need
-sound transformation tracking or confidentiality enforcement, choose one of
-those deeper systems rather than this module.
+[`LANDSCAPE.md`](../LANDSCAPE.md) contains the dated comparison, primary
+sources, real-incident coverage matrix, and places where this project does less
+than adjacent systems. If you need sound transformation tracking,
+confidentiality enforcement, general temporal authorization, or managed
+gateway policy, choose a system that provides that stronger boundary.
 
 ## Continue reading
 
