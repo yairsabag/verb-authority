@@ -224,7 +224,9 @@ repository also contains an
 for design-partner testing without Python; it uses explicit trusted policy
 registration and does not port schema inference. Runtime enforcement must sit
 in trusted server code rather than a browser bundle. See the
-[JavaScript and TypeScript evaluation path](https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md).
+[JavaScript and TypeScript evaluation path][js-ts-evaluation].
+
+[js-ts-evaluation]: https://github.com/yairsabag/verb-authority/blob/main/docs/javascript-typescript.md
 
 ## Catch authority drift in CI
 
