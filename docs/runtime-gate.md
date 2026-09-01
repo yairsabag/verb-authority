@@ -97,6 +97,40 @@ print(decision.allow)   # False
 print(decision.reason)  # param 'to' is a locked sink; data may not author it
 ```
 
+## Preferred remediation: remove protected arguments from model view
+
+When trusted application state already determines a protected value, the
+preferred integration is to omit that argument from the model-visible schema:
+
+```text
+# Canonical registered tool and implementation
+send_email(to: str, body: str)
+
+# Conceptual model-visible interface
+send_reply(body: str)
+```
+
+The application maps `send_reply` back to the canonical `send_email` tool and
+restores `to` only from trusted application state established independently of
+untrusted content. Copying a recipient from a webpage,
+retrieved document, model response, or untrusted tool result into session
+state does not make it trusted. The canonical registration and callable stay
+unchanged and remain the only executable tool.
+
+`send_reply` is a conceptual interface name, not a beta.14 wrapper or alias
+API. Applications can build that mapping with framework-native context
+injection. Beta.14's narrowly scoped Pydantic AI adapter, documented below,
+supports omitting the protected argument while retaining the canonical
+model-visible tool name. It does not publish a generic projection API. The
+[schema-projection design proposal](schema-projection-design.md) describes a
+possible explicit, fail-closed API without promising automatic wrappers or
+deployment. When changing the model-visible schema is not practical, retain
+the canonical schema and use the compatibility path: materialize the exact
+application-owned value in the canonical call input and pass the same value
+through `trusted_args` on every guarded invocation. `trusted_args` never
+inserts or overwrites an argument; it establishes provenance only for an exact
+matching input value.
+
 `dispatch` is a decision-only API. Call it immediately before tool execution,
 execute only when `decision.allow` is true, and request human approval when
 `decision.needs_confirm` is true. A direct-dispatch integration owns the

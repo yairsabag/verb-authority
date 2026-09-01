@@ -45,7 +45,7 @@ def _constraint_schema(maximum, max_length, enum):
     }
 
 
-def test_report_v5_preserves_constraints_without_disclosing_enum_members():
+def test_report_v6_preserves_constraints_without_disclosing_enum_members():
     document = _constraint_schema(100, 40, ["safe", "reviewed"])
 
     report = scan_documents([document])
@@ -53,8 +53,8 @@ def test_report_v5_preserves_constraints_without_disclosing_enum_members():
         argument["name"]: argument for argument in report["tools"][0]["arguments"]
     }
 
-    assert REPORT_VERSION == 5
-    assert report["report_version"] == 5
+    assert REPORT_VERSION == 6
+    assert report["report_version"] == 6
     assert arguments["amount"]["constraints"] == {"maximum": 100}
     assert arguments["message"]["constraints"] == {"max_length": 40}
     enum = arguments["mode"]["constraints"]["enum"]
@@ -85,6 +85,70 @@ def test_report_v5_preserves_constraints_without_disclosing_enum_members():
     assert "maximum: 100" in markdown
     assert "max length: 40" in markdown
     assert "enum: 2 fingerprinted member(s)" in markdown
+
+
+def test_report_v6_emits_actionable_remediation_only_for_protected_arguments():
+    document = {
+        "tools": [
+            {
+                "name": "send_email",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "body": {"type": "string", "maxLength": 2000},
+                    },
+                    "required": ["to", "body"],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+    report = scan_documents([document])
+    arguments = {
+        argument["name"]: argument
+        for argument in report["tools"][0]["arguments"]
+    }
+    recipient = arguments["to"]
+    assert recipient["policy"] == "trusted_fixed"
+    assert recipient["review_required"] is False
+    assert recipient["remediation_status"] == "recommended"
+    assert recipient["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert recipient["fallback_remediation"] == (
+        "bind_trusted_value_at_runtime"
+    )
+    assert recipient["remediation_review_reason"] is None
+
+    remediation_fields = {
+        "remediation_status",
+        "preferred_remediation",
+        "fallback_remediation",
+        "remediation_review_reason",
+    }
+    assert arguments["body"]["policy"] == "outbound_payload"
+    assert not remediation_fields.intersection(arguments["body"])
+
+    markdown = render_markdown(report)
+    assert "## Remediation guidance" in markdown
+    assert "remove_from_model_schema_and_inject_from_application" in markdown
+    assert "bind_trusted_value_at_runtime" in markdown
+    assert "the report does not change a model schema" in markdown
+
+    redacted = scan_documents([document], redact_names=True)
+    redacted_protected = next(
+        argument
+        for argument in redacted["tools"][0]["arguments"]
+        if argument["policy"] == "trusted_fixed"
+    )
+    assert redacted_protected["name"] == "param_001"
+    assert redacted_protected["remediation_status"] == "recommended"
+    assert redacted_protected["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert "send_email" not in json.dumps(redacted, sort_keys=True)
 
 
 def test_direct_float_and_equivalent_json_decimal_share_fingerprints(tmp_path):
@@ -1512,7 +1576,7 @@ def test_synthetic_browser_tabs_locks_operation_selector_and_unbounded_index():
         for assessment in tool["annotation_assessments"]
     }
 
-    assert report["report_version"] == 5
+    assert report["report_version"] == 6
     assert tool["review_required"] is True
     assert tool["review_sources"] == {
         "arguments": ["action", "index"],
@@ -1527,9 +1591,53 @@ def test_synthetic_browser_tabs_locks_operation_selector_and_unbounded_index():
         assert arguments[name]["policy"] == "trusted_fixed"
         assert arguments[name]["confidence"] == "uncertain"
         assert arguments[name]["review_required"] is True
+        assert arguments[name]["remediation_status"] == "review_required"
+        assert arguments[name]["preferred_remediation"] is None
+        assert arguments[name]["fallback_remediation"] is None
+    assert arguments["action"]["remediation_review_reason"] == (
+        "selector_semantics_require_review"
+    )
+    assert arguments["index"]["remediation_review_reason"] == (
+        "authority_inference_requires_review"
+    )
     assert arguments["url"]["policy"] == "trusted_fixed"
     assert arguments["url"]["confidence"] == "high"
     assert arguments["url"]["review_required"] is False
+    assert arguments["url"]["remediation_status"] == "recommended"
+    assert arguments["url"]["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert arguments["url"]["fallback_remediation"] == (
+        "bind_trusted_value_at_runtime"
+    )
+    assert arguments["url"]["remediation_review_reason"] is None
+    markdown = render_markdown(report)
+    assert (
+        "| browser_tabs | action | review_required | — | — | "
+        "selector_semantics_require_review |"
+    ) in markdown
+    assert (
+        "| browser_tabs | index | review_required | — | — | "
+        "authority_inference_requires_review |"
+    ) in markdown
+
+    redacted = scan_documents(
+        [document],
+        control_declarations=controls,
+        redact_names=True,
+    )
+    redacted_selector = redacted["tools"][0]["arguments"][0]
+    assert redacted_selector["name"] == "param_001"
+    assert redacted_selector["remediation_status"] == "review_required"
+    assert redacted_selector["preferred_remediation"] is None
+    assert redacted_selector["fallback_remediation"] is None
+    assert redacted_selector["remediation_review_reason"] == (
+        "selector_semantics_require_review"
+    )
+    serialized_redacted = json.dumps(redacted, sort_keys=True)
+    assert "browser_tabs" not in serialized_redacted
+    assert '"action"' not in serialized_redacted
+
     assert tool["risk"] == "write"
     assert tool["needs_confirmation"] is False
     assert tool["branch_risk"] is None
@@ -4020,10 +4128,12 @@ def test_playwright_browser_tabs_external_regression():
         assert argument["review_required"] is want["review_required"], name
         assert argument["confidence"] == want["confidence"], name
 
-    # schema_review_required remains the narrow schema-structure source. Report
-    # v5 also exposes one tool-wide aggregate and its complete source index.
+    # schema_review_required remains the narrow schema-structure source. The
+    # external expectation preserves report v5 as historical evidence; the
+    # live scanner now emits v6 while retaining the same review aggregate.
     current = expected["current_report_v5"]
-    assert declared["report_version"] == current["report_version"]
+    assert current["report_version"] == 5
+    assert declared["report_version"] == REPORT_VERSION == 6
     assert declared["summary"]["review_required_tools"] == current[
         "summary_review_required_tools"
     ]

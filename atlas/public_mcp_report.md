@@ -110,6 +110,27 @@ Names redacted: `no`
 | get_file_info | readOnlyHint | true | unresolved | effective_risk | unknown |
 | get_file_info | openWorldHint | false | unresolved | none | — |
 
+## Remediation guidance
+
+> Advisory only: the report does not change a model schema, prove that
+> trusted application state exists, or deploy a runtime integration.
+
+| Tool | Argument | Status | Preferred remediation | Fallback remediation | Review reason |
+|---|---|---|---|---|---|
+| create_entities | entities | review_required | — | — | authority_inference_requires_review |
+| add_observations | observations | review_required | — | — | authority_inference_requires_review |
+| delete_entities | entityNames | review_required | — | — | authority_inference_requires_review |
+| search_nodes | query | review_required | — | — | authority_inference_requires_review |
+| open_nodes | names | review_required | — | — | authority_inference_requires_review |
+| read_text_file | path | recommended | remove_from_model_schema_and_inject_from_application | bind_trusted_value_at_runtime | — |
+| read_text_file | tail | review_required | — | — | authority_inference_requires_review |
+| read_text_file | head | review_required | — | — | authority_inference_requires_review |
+| write_file | path | recommended | remove_from_model_schema_and_inject_from_application | bind_trusted_value_at_runtime | — |
+| edit_file | path | recommended | remove_from_model_schema_and_inject_from_application | bind_trusted_value_at_runtime | — |
+| edit_file | edits | review_required | — | — | authority_inference_requires_review |
+| edit_file | dryRun | review_required | — | — | authority_inference_requires_review |
+| get_file_info | path | recommended | remove_from_model_schema_and_inject_from_application | bind_trusted_value_at_runtime | — |
+
 ## Findings
 
 | Tool | Risk | Argument | Type | Required | Constraints | Policy | Review | Reason |
@@ -138,6 +159,9 @@ Without an explicit risk declaration, the effective tier remains `unknown` and
 requires review and runtime confirmation. This report is not a
 vulnerability verdict, does not inspect tool implementations, and does not prove
 that the surrounding application supplies correct provenance or authorization.
+Remediation guidance is advisory and never rewrites a model-visible schema,
+discovers a trusted value source, or changes runtime registration. A protected
+argument whose authority is uncertain must be reviewed before choosing a fix.
 References and composed/conditional schemas are not resolved; when present,
 the report marks the tool for schema review instead of claiming complete coverage.
 Review every flagged argument against the real tool semantics before deployment.

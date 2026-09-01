@@ -103,7 +103,7 @@ def _installed_identity(
                 not location.is_relative_to(forbidden_root),
                 f"{module.__name__} imported from forbidden source root: {location}",
             )
-    _check(REPORT_VERSION == 5, "installed scanner is not report v5")
+    _check(REPORT_VERSION == 6, "installed scanner is not report v6")
     _check(DIFF_VERSION == 2, "installed Authority Diff is not diff v2")
 
 
@@ -2080,8 +2080,8 @@ def _mcp_annotation_assessment_contract() -> None:
         },
     )
     _check(
-        report["report_version"] == 5,
-        "MCP annotation evidence was not emitted in report v5",
+        report["report_version"] == 6,
+        "MCP annotation evidence was not emitted in report v6",
     )
     tools = {tool["name"]: tool for tool in report["tools"]}
     read_assessments = {
@@ -2170,7 +2170,7 @@ def _tool_review_aggregate_contract() -> None:
     report = scan_documents([document], control_declarations=controls)
     tool = report["tools"][0]
     _check(
-        report["report_version"] == 5
+        report["report_version"] == 6
         and tool["review_required"] is True
         and tool["review_sources"]
         == {
@@ -2182,11 +2182,22 @@ def _tool_review_aggregate_contract() -> None:
             "branch_risk": True,
         }
         and report["summary"]["review_required_tools"] == 1,
-        "installed scanner lost the report-v5 tool review aggregate",
+        "installed scanner lost the report-v6 tool review aggregate",
     )
     _check(
         "## Tool review summary" in render_markdown(report),
         "installed Markdown report omitted the tool review summary",
+    )
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+    _check(
+        arguments["action"]["remediation_status"] == "review_required"
+        and arguments["action"]["preferred_remediation"] is None
+        and arguments["action"]["fallback_remediation"] is None
+        and arguments["action"]["remediation_review_reason"]
+        == "selector_semantics_require_review"
+        and arguments["index"]["remediation_review_reason"]
+        == "authority_inference_requires_review",
+        "installed scanner lost uncertain remediation review reasons",
     )
 
     forged = copy.deepcopy(report)
@@ -2201,7 +2212,26 @@ def _tool_review_aggregate_contract() -> None:
     else:
         raise AssertionError("installed diff accepted a forged review aggregate")
 
-    legacy = copy.deepcopy(report)
+    remediation_fields = (
+        "remediation_status",
+        "preferred_remediation",
+        "fallback_remediation",
+        "remediation_review_reason",
+    )
+    legacy_v5 = copy.deepcopy(report)
+    legacy_v5["report_version"] = 5
+    for legacy_tool in legacy_v5["tools"]:
+        for argument in legacy_tool["arguments"]:
+            for field in remediation_fields:
+                argument.pop(field, None)
+    frozen_v5 = copy.deepcopy(legacy_v5)
+    v5_diff = diff_reports(legacy_v5, report)
+    _check(
+        v5_diff["changes"] == [] and legacy_v5 == frozen_v5,
+        "installed diff did not preserve v5-to-v6 observational compatibility",
+    )
+
+    legacy = copy.deepcopy(legacy_v5)
     legacy["report_version"] = 4
     legacy["summary"].pop("review_required_tools")
     for legacy_tool in legacy["tools"]:
@@ -2211,7 +2241,7 @@ def _tool_review_aggregate_contract() -> None:
     legacy_diff = diff_reports(legacy, report)
     _check(
         legacy_diff["changes"] == [] and legacy == frozen_legacy,
-        "installed diff did not preserve v4-to-v5 observational compatibility",
+        "installed diff did not preserve v4-to-v6 observational compatibility",
     )
 
     confirmation_only = scan_documents(
@@ -2249,6 +2279,60 @@ def _tool_review_aggregate_contract() -> None:
     )
 
 
+def _remediation_guidance_contract() -> None:
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    arguments = {
+        argument["name"]: argument
+        for argument in report["tools"][0]["arguments"]
+    }
+    recipient = arguments["to"]
+    _check(
+        recipient["policy"] == "trusted_fixed"
+        and recipient["review_required"] is False
+        and recipient["remediation_status"] == "recommended"
+        and recipient["preferred_remediation"]
+        == "remove_from_model_schema_and_inject_from_application"
+        and recipient["fallback_remediation"]
+        == "bind_trusted_value_at_runtime"
+        and recipient["remediation_review_reason"] is None,
+        "installed scanner lost trusted-fixed remediation guidance",
+    )
+    _check(
+        not {
+            "remediation_status",
+            "preferred_remediation",
+            "fallback_remediation",
+            "remediation_review_reason",
+        }.intersection(arguments["body"]),
+        "installed scanner attached protected remediation to a data-fillable argument",
+    )
+    markdown = render_markdown(report)
+    _check(
+        "## Remediation guidance" in markdown
+        and "remove_from_model_schema_and_inject_from_application" in markdown
+        and "bind_trusted_value_at_runtime" in markdown,
+        "installed Markdown report omitted remediation guidance",
+    )
+
+
 def _constraint_diff_and_migration() -> None:
     before_document = _constraint_document(100, 40, ["safe"])
     after_document = _constraint_document(
@@ -2256,14 +2340,14 @@ def _constraint_diff_and_migration() -> None:
     )
     before = scan_documents([before_document])
     after = scan_documents([after_document])
-    _check(before["report_version"] == 5, "scanner did not produce report v5")
+    _check(before["report_version"] == 6, "scanner did not produce report v6")
     privacy = before["privacy"]
     _check(
         privacy["examples_included"] is False
         and privacy["defaults_included"] is False
         and privacy["runtime_values_included"] is False
         and "examples_or_values_included" not in privacy,
-        "report v5 privacy fields do not separately exclude values",
+        "report v6 privacy fields do not separately exclude values",
     )
     _check(
         privacy["schema_material_fingerprints_included"] is True
@@ -4580,6 +4664,7 @@ def main() -> int:
         _unicode_homograph_rejection,
         _mcp_annotation_assessment_contract,
         _tool_review_aggregate_contract,
+        _remediation_guidance_contract,
         _constraint_diff_and_migration,
         _scanner_resource_boundaries,
         _daybreak_scanner_diff_regressions,
@@ -4593,8 +4678,8 @@ def main() -> int:
         check()
     print(
         "installed-wheel smoke: "
-        f"{args.expected_version}; all audited blocker families + report v5 "
-        "+ v4 compatibility + legacy-v3 rejection + diff thresholds passed"
+        f"{args.expected_version}; all audited blocker families + report v6 "
+        "+ v4/v5 compatibility + legacy-v3 rejection + diff thresholds passed"
     )
     return 0
 
