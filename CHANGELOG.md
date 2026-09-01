@@ -10,6 +10,12 @@ dates are added when a GitHub release is actually published.
 - Include `setuptools>=77` in the `dev` extra so a clean
   `pip install ".[dev]"` environment can run the intentional no-isolation
   release-archive contract test.
+- Add an unpublished, server-side TypeScript runtime prototype under
+  `packages/node/` for design-partner evaluation without Python. It uses
+  explicit trusted registration, exact per-call argument binding, bounded
+  plain-JSON snapshots, and a private pre-execution handler boundary. It is not
+  part of Beta 14, is not published to npm, and does not claim Python feature
+  parity or schema-inference support.
 
 ## [0.10.0-beta.14] - 2026-08-31
 
