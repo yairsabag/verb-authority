@@ -4,7 +4,7 @@ recursive-include docs *.md *.png *.jpg
 recursive-include atlas *.md *.json
 recursive-include .github *.yml
 include CHANGELOG.md CODE_OF_CONDUCT.md CONTRIBUTING.md LANDSCAPE.md SECURITY.md action.yml
-include scripts/installed_pydantic_smoke.py scripts/installed_wheel_smoke.py scripts/verify_release_artifacts.py
+include scripts/build_github_mcp_corpus.py scripts/installed_pydantic_smoke.py scripts/installed_wheel_smoke.py scripts/verify_release_artifacts.py
 include test_*.py
 include validate_v01.py chain_demo.py adversarial.py adaptive.py capability_demo.py agent_demo.py resolve_live.py
 include pydantic_ai_demo.py trusted_choice_demo.py

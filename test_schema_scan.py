@@ -2585,6 +2585,43 @@ def test_public_atlas_baseline_is_reproducible():
     assert report_path.read_text(encoding="utf-8") == render_markdown(report)
 
 
+def test_github_mcp_atlas_baseline_is_reproducible():
+    atlas_directory = Path(__file__).with_name("atlas")
+    schema_path = atlas_directory / "github_mcp_schemas.json"
+    report_path = atlas_directory / "github_mcp_report.md"
+    document = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    source = document["sources"][0]
+    assert source["upstream_commit"] == (
+        "12d16ed05310876a1e6988701b109da63d69dd49"
+    )
+    assert source["snapshot_manifest_sha256"] == (
+        "4f906e7bb62dc1175c6379333dc1d3d7ba899752b4228810fed3b9df8508b7aa"
+    )
+    assert len(source["tools"]) == 117
+
+    report = scan_documents([document])
+
+    assert report["summary"] == {
+        "tools": 117,
+        "parameters": 623,
+        "protected_parameters": 597,
+        "data_fillable_parameters": 26,
+        "review_required": 587,
+        "review_required_tools": 117,
+        "schema_review_required_tools": 21,
+        "confirmation_required_tools": 117,
+        "risk_review_required_tools": 117,
+        "risk_conflicts": 0,
+        "annotation_conflicts": 0,
+        "branch_risk_review_required_tools": 20,
+    }
+    assert report["schema_fingerprint_sha256"] == (
+        "bee716ad2001250261c759298aff9f3573298d864b03ec5d2f060d8b1190a9cc"
+    )
+    assert report_path.read_text(encoding="utf-8") == render_markdown(report)
+
+
 def test_markdown_states_privacy_and_interpretation_boundary():
     report = scan_documents(
         [{"tools": [{"name": "read_graph", "inputSchema": {"type": "object"}}]}]
