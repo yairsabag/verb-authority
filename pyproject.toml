@@ -41,6 +41,7 @@ verb-authority-diff = "verb_authority_diff:main"
 dev = [
   "build>=1.2,<2",
   "pytest>=8,<10",
+  "setuptools>=77",
 ]
 pydantic = [
   "pydantic-ai-slim==2.35.0",

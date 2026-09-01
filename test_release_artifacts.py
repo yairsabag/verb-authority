@@ -1472,6 +1472,16 @@ def test_package_index_publish_stages_candidates_outside_the_checkout():
         assert checkout_relative_path not in build
 
 
+def test_dev_extra_installs_the_local_build_backend():
+    repository = Path(__file__).resolve().parent
+    config = release_verifier._project_release_config(
+        repository / "pyproject.toml"
+    )
+
+    assert config.dependencies == ()
+    assert "setuptools>=77" in config.optional_dependencies["dev"]
+
+
 def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
     repository = Path(__file__).resolve().parent
     config = release_verifier._project_release_config(
