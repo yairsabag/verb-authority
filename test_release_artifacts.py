@@ -1504,6 +1504,11 @@ def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
         in config.wheel_data_payloads
     )
     assert (
+        "share/doc/verb-authority/docs/case-studies/"
+        "spendshield-assisted-composition.md"
+        in config.wheel_data_payloads
+    )
+    assert (
         "scripts/installed_pydantic_smoke.py"
         in config.sdist_source_payloads
     )

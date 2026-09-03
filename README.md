@@ -347,6 +347,8 @@ Public case material is preserved separately from CI reductions:
 
 - [external risk-tier case study](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/external-beta-risk-evidence.md);
 - [frozen Playwright `browser_tabs` contribution](https://github.com/yairsabag/verb-authority/blob/main/fixtures/external/sankalp-gilda/playwright-browser-tabs/README.md);
+- [assisted Verb Authority → SpendShield composition](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/spendshield-assisted-composition.md),
+  with explicit limits on what the seven-case result establishes;
 - [Tool Authority Atlas](https://github.com/yairsabag/verb-authority/blob/main/atlas/README.md), a small source-pinned corpus rather
   than a ranking of MCP servers; and
 - [executable demos](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/index.md#evidence-and-demos).

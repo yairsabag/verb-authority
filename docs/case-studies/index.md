@@ -15,6 +15,12 @@ establish.
   — frozen two-arm evidence for argument-authority and MCP annotation findings,
   kept separately from reduced regression material.
 
+- [Assisted external composition: Verb Authority and
+  SpendShield](spendshield-assisted-composition.md) — a source-pinned,
+  co-designed integration exercising seven pre-dispatch cases and separate
+  source-bound grant checks. It is not a production-deployment or
+  customer-adoption claim.
+
 ## Evidence and demos
 
 The complete pytest suite covers policy inference, declared capabilities, verb
