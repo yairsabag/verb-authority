@@ -3469,6 +3469,68 @@ def test_composed_or_unresolved_schemas_require_explicit_review(input_schema):
     assert report["summary"]["schema_review_required_tools"] == 1
 
 
+@pytest.mark.parametrize("shape", ("wrapped", "direct", "nested-direct"))
+def test_nested_object_payload_requires_schema_review_without_changing_policy(
+    tmp_path, shape
+):
+    nested_properties = {
+        "to": {"type": "string", "format": "email"},
+        "text": {"type": "string"},
+    }
+    body_schema = {
+        "type": "object",
+        "properties": nested_properties,
+        "required": ["to", "text"],
+        "additionalProperties": False,
+    }
+    if shape == "nested-direct":
+        body_schema = nested_properties
+    input_schema = {"body": body_schema}
+    if shape != "direct":
+        input_schema = {
+            "type": "object",
+            "properties": input_schema,
+            "required": ["body"],
+            "additionalProperties": False,
+        }
+    document = {"tools": [{"name": "deliver", "inputSchema": input_schema}]}
+    controls = {
+        "version": 1,
+        "tools": {
+            "deliver": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["send_message"],
+                }
+            }
+        },
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    assert len(tool["arguments"]) == 1
+    body = tool["arguments"][0]
+    assert body["policy"] == "outbound_payload"
+    assert body["confidence"] == "high"
+    assert body["review_required"] is False
+    assert tool["risk"] == "write"
+    assert tool["risk_review_required"] is False
+    assert tool["schema_review_required"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["schema"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert report["summary"]["review_required_tools"] == 1
+    assert report["summary"]["review_required"] == 0
+
+    schema_path = tmp_path / "schema.json"
+    controls_path = tmp_path / "controls.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    assert main([
+        str(schema_path), "--controls", str(controls_path), "--fail-on-review"
+    ]) == 2
+
+
 def test_simple_schema_and_enum_instance_values_do_not_require_schema_review():
     report = scan_documents(
         [

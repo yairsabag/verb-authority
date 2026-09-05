@@ -202,6 +202,12 @@ set for required names absent from the modeled `properties` map, multi-type
 unions, dynamic `patternProperties`, and ambiguous direct-shape exports whose
 argument names collide with JSON Schema wrapper keywords. A schema with
 dynamic property admission is not reported as closed to unknown arguments.
+An argument containing a nonempty nested property map also requires schema
+review: only root arguments receive individual authority policies, so a
+payload-named object can contain destinations or selectors whose ownership
+has not been assessed. This review flag does not infer nested ownership or
+change the outer argument's policy. Object-valued enum members and unused
+schema definitions remain instance data or inert helpers, not extra arguments.
 Direct-shape collisions preserve the arguments
 in the report rather than silently replacing them with an empty list. The
 structurally indistinguishable `properties` collision remains an explicit

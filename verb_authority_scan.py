@@ -1292,15 +1292,16 @@ def _schema_closes_unknown_arguments(definition: ToolDefinition) -> bool:
     )
 
 
-def _schema_requires_authority_review(schema: Any) -> bool:
+def _schema_requires_authority_review(schema: Any, *, _at_root: bool = True) -> bool:
     """Flag composition the scanner deliberately does not resolve.
 
     The scanner models only the caller-visible ``properties`` at the exported
     input-schema root. References, combinators, and conditional/dependent
     schemas can add or alter those properties, so their presence must remain a
     visible review obligation rather than silently producing a complete-looking
-    per-argument report. Traversal follows schema-bearing keyword positions and
-    intentionally does not interpret instance values such as ``enum`` members.
+    per-argument report. Nested property maps also need review because their
+    fields are not modeled as separate arguments. Traversal follows schema-bearing
+    keyword positions and does not interpret instance values such as enum members.
     """
 
     if type(schema) is bool:
@@ -1313,10 +1314,23 @@ def _schema_requires_authority_review(schema: Any) -> bool:
         # A direct-shape argument may legitimately be named ``type``, ``enum``,
         # or another JSON Schema keyword. Preserve every argument, but surface
         # the unavoidable direct-vs-wrapper ambiguity for explicit review.
-        return bool(_SCHEMA_WRAPPER_KEYWORDS.intersection(schema)) or any(
-            _schema_requires_authority_review(subschema)
-            for subschema in schema.values()
+        return (
+            not _at_root
+            or bool(_SCHEMA_WRAPPER_KEYWORDS.intersection(schema))
+            or any(
+                _schema_requires_authority_review(subschema, _at_root=False)
+                for subschema in schema.values()
+            )
         )
+    if (
+        not _at_root
+        and type(schema.get("properties")) is dict
+        and schema["properties"]
+    ):
+        # Only root properties become Params. A payload-named object may mix
+        # writable content with nested destinations or selectors; its outer
+        # policy cannot establish authority for those unmodeled fields.
+        return True
     if "properties" in schema and schema.get("type") != "object":
         # A root mapping named ``properties`` is indistinguishable from a
         # direct-shape argument with that literal name unless the document
@@ -1371,13 +1385,12 @@ def _schema_requires_authority_review(schema: Any) -> bool:
             # list must not look like a complete analysis.
             return True
 
-    # Root ``properties`` and nested object properties are the only schema map
-    # this scanner actually enumerates. Follow those paths so a ref/combinator
-    # inside an argument is still surfaced. Deliberately do not walk `$defs`
+    # Follow root properties into argument schemas; nested property maps remain
+    # explicit review debt rather than inferred per-field authority. Do not walk `$defs`
     # or legacy `definitions`: an unused helper definition is inert, while any
     # reference to it is already caught at the reference site.
     return type(properties) is dict and any(
-        _schema_requires_authority_review(subschema)
+        _schema_requires_authority_review(subschema, _at_root=False)
         for subschema in properties.values()
     )
 

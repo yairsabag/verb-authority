@@ -7,6 +7,10 @@ dates are added when a GitHub release is actually published.
 
 ### Scanner report v6
 
+- Require schema review for nested argument property maps, including structured
+  payloads, so scanner and Authority Diff review thresholds retain this
+  unmodeled authority surface. Outer argument policy and runtime behavior are
+  unchanged; object-valued enum members and unused definitions remain inert.
 - Add a first-look section to the Markdown report that separates
   strong lock candidates, provisional fail-closed locks, and data-fillable
   arguments without changing JSON output, policy inference, or runtime
@@ -28,6 +32,15 @@ dates are added when a GitHub release is actually published.
 - Document the preferred `send_reply(body)` application pattern and an
   optional schema-projection design. No projection API, wrapper generation,
   trusted-value inference, deployment behavior, or runtime promise is added.
+
+### Integration examples
+
+- Use `dispatch` in the Anthropic decision demo so trusted binding requires
+  an explicitly present key and an exact JSON type/value match. The demo no
+  longer labels Python-coercible values or a missing trusted key as trusted.
+  The production runtime already enforced these checks.
+- Restrict the capability demo's model-selected read path to a trusted public
+  enum catalog; read-only risk is not permission to choose arbitrary files.
 
 ### Development
 

@@ -4135,3 +4135,69 @@ def test_runner_rejects_lone_surrogates_during_snapshot(destination):
 def test_resolver_rejects_invalid_catalog_entries(choice, expected_message):
     with pytest.raises(ValueError, match=expected_message):
         TrustedResolver([choice])
+
+
+@pytest.mark.parametrize(
+    "param_type, proposed, trusted_args, expected_invocations",
+    [
+        ("boolean", True, {"value": 1}, 0),
+        ("integer", 1, {"value": True}, 0),
+        ("json", None, {}, 0),
+        ("json", {"flag": True}, {"value": {"flag": 1}}, 0),
+        ("boolean", True, {"value": True}, 1),
+        ("integer", 1, {"value": 1}, 1),
+        ("json", None, {"value": None}, 1),
+        ("json", {"flag": True}, {"value": {"flag": True}}, 1),
+    ],
+)
+def test_agent_demo_uses_exact_present_key_trusted_binding(
+    param_type, proposed, trusted_args, expected_invocations
+):
+    from agent_demo import check_with_gate
+
+    entries = []
+
+    def handler(value):
+        entries.append(value)
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(Tool(
+        "demo_action", [Param("value", param_type, sink=True)],
+        fn=handler, risk=Risk.WRITE,
+    ))
+    decision = check_with_gate(
+        registry, build_policy(registry), "demo_action",
+        {"value": proposed}, trusted_args,
+    )
+    if decision.allow:
+        handler(value=proposed)
+
+    assert decision.allow is bool(expected_invocations)
+    assert len(entries) == expected_invocations
+
+
+def test_agent_demo_runs_with_an_offline_provider_stub(monkeypatch, capsys):
+    import agent_demo
+
+    requests = []
+
+    def provider_stub(messages, tools):
+        requests.append((messages, tools))
+        return {"content": [{
+            "type": "tool_use",
+            "name": "send_email",
+            "input": {
+                "to": agent_demo.TRUSTED_RECIPIENT,
+                "subject": "Notes",
+                "body": "Got it, thanks!",
+            },
+        }]}
+
+    monkeypatch.setattr(agent_demo, "anthropic_run", provider_stub)
+    agent_demo.main()
+
+    output = capsys.readouterr().out
+    assert len(requests) == 1
+    assert "gate verdict:    ALLOW" in output
+    assert "gate verdict:    BLOCKED" in output
