@@ -243,22 +243,43 @@ if (!allowed.resultValidated || invocations !== 1) throw new Error("allowed call
     encoding: "utf8",
     mode: 0o600,
   });
+  // Compile and execute the shipped example against a local typed service.
+  const packedReadme = readFileSync(
+    join(consumer, "node_modules", "@verb-authority", "node", "README.md"),
+    "utf8",
+  );
+  const usageExample = packedReadme.match(
+    /^## Minimal server-side use\r?\n\s*```ts\r?\n([\s\S]*?)^```[ \t]*$/m,
+  );
+  if (!usageExample) {
+    throw new Error("packed README is missing the minimal TypeScript example");
+  }
   const typeSmokeSource = `
-import { createGuardedToolRunner, type ExecutionResult } from "@verb-authority/node";
-const runner = createGuardedToolRunner([{
-  name: "send_email",
-  risk: "write",
-  params: [
-    { name: "to", authority: "trusted_fixed", type: "string" },
-    { name: "body", authority: "outbound_payload", type: "string", maxLength: 2000 },
-  ],
-  handler: async () => ({ ok: true }),
-}]);
+import type { ExecutionResult } from "@verb-authority/node";
+const sessionRecipient = "alice@company.com";
+const modelProposedArguments = { to: sessionRecipient, body: "hello" };
+let serviceInvocations = 0;
+const applicationEmailService = {
+  async send(input: { to: string; body: string }): Promise<{ ok: boolean }> {
+    serviceInvocations += 1;
+    return { ok: input.to === sessionRecipient && input.body === "hello" };
+  },
+};
+${usageExample[1]}
+if (
+  !result.decision.allow || !result.invoked || !result.handlerCompleted ||
+  !result.resultValidated || JSON.stringify(result.result) !== '{"ok":true}' ||
+  serviceInvocations !== 1
+) throw new Error("README example did not complete exactly one typed service call");
 const execution: Promise<ExecutionResult> = runner.run(
-  { name: "send_email", input: { to: "alice@company.com", body: "hello" } },
+  { name: "send_email", input: { to: "attacker@evil.com", body: "hello" } },
   { trustedArgs: { to: "alice@company.com" } },
 );
-void execution;
+const denied = await execution;
+if (
+  denied.decision.allow || denied.invoked || denied.handlerCompleted ||
+  denied.resultValidated || serviceInvocations !== 1
+) throw new Error("README example let an untrusted recipient reach the typed service");
 `;
   writeFileSync(join(consumer, "smoke.ts"), typeSmokeSource, {
     encoding: "utf8",
@@ -274,7 +295,7 @@ void execution;
     process.execPath,
     [
       join(typescriptRoot, "bin", "tsc"),
-      "--noEmit",
+      "--noEmitOnError",
       "--strict",
       "--module",
       "NodeNext",
@@ -282,11 +303,19 @@ void execution;
       "NodeNext",
       "--target",
       "ES2022",
+      "--rootDir",
+      consumer,
+      "--outDir",
+      join(consumer, "compiled"),
       join(consumer, "smoke.ts"),
     ],
     { cwd: consumer, stdio: "inherit" },
   );
-  process.stdout.write("verified clean tarball install, ESM import, runtime gate, and TypeScript declarations\n");
+  run(process.execPath, [join(consumer, "compiled", "smoke.js")], {
+    cwd: consumer,
+    stdio: "inherit",
+  });
+  process.stdout.write("verified clean tarball install, ESM import, runtime gate, and compiled README typed-service execution\n");
 } finally {
   rmSync(workspace, { recursive: true, force: true });
 }

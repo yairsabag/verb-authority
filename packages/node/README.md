@@ -32,8 +32,11 @@ checks an exact package-file allowlist, verifies the package copy of the Apache
 license, validates both source and packed manifests against an exact private,
 dependency-free contract with no lifecycle hooks, creates a temporary tarball,
 installs it offline with lifecycle scripts disabled into a fresh ESM consumer,
-imports it, proves block `0` / allow `1`, and type-checks a separate TypeScript
-consumer. Source maps and the unexported quickstart are not included in that
+imports it, proves block `0` / allow `1`, and compiles and runs the packaged
+README's example against a local typed service stub in a separate TypeScript
+consumer. The valid recipient reaches the stub once; a malicious recipient
+causes no additional service call. No email or network service is used.
+Source maps and the unexported quickstart are not included in that
 tarball. The tarball is deleted after the check and nothing is published.
 
 To test the same source in another local server project, first run
@@ -67,6 +70,9 @@ const runner = createGuardedToolRunner([
       },
     ],
     handler: async ({ to, body }) => {
+      if (typeof to !== "string" || typeof body !== "string") {
+        throw new TypeError("expected registered string arguments");
+      }
       return await applicationEmailService.send({ to, body });
     },
   },
@@ -95,6 +101,11 @@ if (result.handlerCompleted && !result.resultValidated) {
   // contract. The original authorization remains visible; do not retry.
 }
 ```
+
+The prototype types handler arguments as `JsonValue`; registration does not
+infer their TypeScript types. The explicit checks above narrow `to` and `body`
+for a service accepting strings. The runner still enforces the registered
+types and authority before entering the handler.
 
 Every model-triggered execution route must call `runner.run`. The adapter
 cannot stop application code from calling a raw handler reference directly.
