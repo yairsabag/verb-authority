@@ -25,18 +25,23 @@ Verb Authority scans exported tool schemas, produces a reviewable
 per-argument authority map, and provides a small local runtime gate. It does
 not invoke tools while scanning and does not upload schemas.
 
-## Install beta.14
+## Install beta.15
 
-Install the dependency-free core from PyPI:
+**Publication note:** this branch prepares beta.15. Until it appears on
+[PyPI](https://pypi.org/project/verb-authority/), the published version remains
+`0.10.0b14`; the commands below target the new release. To evaluate this
+candidate before publication, install this checkout with `python -I -m pip install .`.
+
+Install the dependency-free core from PyPI once available:
 
 ~~~bash
-python -m pip install "verb-authority==0.10.0b14"
+python -m pip install "verb-authority==0.10.0b15"
 ~~~
 
-Or install the same release tag directly from GitHub:
+Or install the same release tag directly from GitHub once published:
 
 ~~~bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.14"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.15"
 ~~~
 
 The dependency-free core supports Python 3.10 through 3.14. See
@@ -121,7 +126,7 @@ send_reply(body: str)
 
 The application restores `to` from state established independently of
 untrusted content; the canonical registration and implementation stay intact.
-`send_reply` is a conceptual interface, not a beta.14 wrapper or alias API.
+`send_reply` is a conceptual interface, not a shipped wrapper or alias API.
 
 If the schema cannot change, materialize the application-owned value in the
 canonical call and pass the same exact value in `trusted_args`. It verifies a
@@ -232,7 +237,7 @@ keys through an application-owned catalog before entering
 `GuardedToolRunner`.
 
 ~~~bash
-python -m pip install "verb-authority[pydantic]==0.10.0b14"
+python -m pip install "verb-authority[pydantic]==0.10.0b15"
 ~~~
 
 The adapter supports only the audited local, synchronous paths documented for
@@ -240,7 +245,7 @@ the pinned dependency versions. Unsupported remote, runtime-added, streaming,
 async, realtime, and native execution paths fail closed. See
 [Pydantic AI 2.35 runtime adapter](https://github.com/yairsabag/verb-authority/blob/main/docs/runtime-gate.md#pydantic-ai-235-runtime-adapter).
 
-No JavaScript/TypeScript runtime adapter is published in beta.14. JavaScript
+No JavaScript/TypeScript runtime adapter is included in this Python release. JavaScript
 applications may export JSON schemas for an offline scan, but runtime
 enforcement must sit in a trusted server-side boundary rather than a browser
 bundle. See the [JavaScript and TypeScript evaluation path][js-ts-evaluation].
@@ -263,7 +268,7 @@ Or use the composite GitHub Action:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.14
+- uses: yairsabag/verb-authority@v0.10.0-beta.15
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -352,11 +357,12 @@ Public case material is preserved separately from CI reductions:
 - [executable demos](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/index.md#evidence-and-demos).
 
 `v0.9.0` is the latest stable release.
-`v0.10.0-beta.14` is the latest public prerelease and the first PyPI
-distribution. Beta.14 makes the existing schema-to-gate behavior easier to
-install, evaluate, and integrate without changing the security promise or
-policy-inference behavior. It retains the beta.13 offline quickstart and frozen
-external regression evidence. The beta.7, beta.8, and beta.9 identifiers were
+Beta.14 was the first PyPI distribution. This branch prepares beta.15 with
+report-v6 remediation guidance, a first-look review summary, nested-schema
+review coverage, and corrected integration examples. It retains the runtime
+API, offline quickstart, and frozen external regression evidence. Report-v5
+consumers should review the [compatibility notes](https://github.com/yairsabag/verb-authority/blob/main/CHANGELOG.md)
+before upgrading. The beta.7, beta.8, and beta.9 identifiers were
 withheld and will not be reused.
 This remains early, research-grade work and is not described as
 production-ready.

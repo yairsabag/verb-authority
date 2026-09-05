@@ -1,7 +1,7 @@
 # Optional schema-projection API: design proposal
 
 **Status:** design proposal only. No generic schema-projection API is shipped
-in beta.14.
+in this release.
 
 ## Problem and preferred remediation
 
@@ -20,7 +20,7 @@ send_reply(body: str)
 ```
 
 `send_reply` is a conceptual model-visible name in this proposal, not a
-function or alias API shipped in beta.14. A framework-native integration may
+function or alias API shipped by the package. A framework-native integration may
 keep the canonical model-visible name and still omit `to`.
 
 Immediately before execution, trusted application code supplies `to` from
