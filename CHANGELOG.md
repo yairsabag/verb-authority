@@ -35,6 +35,14 @@ dates are added when a GitHub release is actually published.
   `pip install ".[dev]"` environment can run the intentional no-isolation
   release-archive contract test.
 
+### External composition evidence
+
+- Document a source-pinned, assisted Verb Authority and SpendShield composition
+  rerun: seven pre-dispatch cases, two negative source-binding probes, one
+  positive control, and the review-driven fail-closed correction in the
+  external verifier. Keep the result explicitly separate from production,
+  payment-execution, independent-certification, and customer-adoption claims.
+
 ## [0.10.0-beta.14] - 2026-08-31
 
 ### Onboarding and distribution
