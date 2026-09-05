@@ -7,6 +7,11 @@ dates are added when a GitHub release is actually published.
 
 ### Scanner report v6
 
+- Add a first-look section to the Markdown report that separates
+  strong lock candidates, provisional fail-closed locks, and data-fillable
+  arguments without changing JSON output, policy inference, or runtime
+  enforcement. Confidence remains a lexical or declared-policy signal—not
+  proof of ownership, safety, security priority, or business authorization.
 - Add advisory, machine-readable remediation metadata to every
   `trusted_fixed` argument. An argument with no scanner review requirement
   recommends removing it from the model-visible schema and injecting it from

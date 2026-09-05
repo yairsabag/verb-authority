@@ -2991,6 +2991,21 @@ def _control_details(argument: dict[str, Any]) -> str:
 def render_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
     privacy = report["privacy"]
+    confident_protected = [
+        (tool, argument)
+        for tool in report["tools"]
+        for argument in tool["arguments"]
+        if argument["policy"] == "trusted_fixed"
+        and argument["confidence"] == "high"
+        and argument["review_required"] is False
+    ]
+    provisional_locks = [
+        (tool, argument)
+        for tool in report["tools"]
+        for argument in tool["arguments"]
+        if argument["policy"] == "trusted_fixed"
+        and argument["review_required"] is True
+    ]
     lines = [
         "# Verb Authority schema report",
         "",
@@ -3021,7 +3036,42 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"Schema fingerprint: `{report['schema_fingerprint_sha256']}`",
         f"Names redacted: `{'yes' if privacy['names_redacted'] else 'no'}`",
+        "",
+        "## First-look authority signals",
+        "",
+        "> Confidence describes lexical or declared-policy matching, not ownership",
+        "> truth, security priority, active protection, or business authorization.",
+        "> The integrator must validate every candidate against deployment intent.",
+        "",
+        "| Signal | Count | Meaning |",
+        "|---|---:|---|",
+        "| Strong lock candidates | "
+        f"{len(confident_protected)} | Validate against deployment intent |",
+        "| Provisional fail-closed locks | "
+        f"{len(provisional_locks)} | Uncertain; review before adopting as policy |",
+        f"| Data-fillable arguments | {summary['data_fillable_parameters']} | "
+        "Not proof that a value is safe or business-authorized |",
     ]
+    if confident_protected:
+        lines.extend(
+            [
+                "",
+                "### Strong lock candidates",
+                "",
+                "> Static candidates only; this report does not actively protect them.",
+                "",
+                "| Tool | Argument | Reason |",
+                "|---|---|---|",
+            ]
+        )
+        for tool, argument in confident_protected:
+            lines.append(
+                "| {tool} | {argument} | {reason} |".format(
+                    tool=_markdown_cell(tool["name"]),
+                    argument=_markdown_cell(argument["name"]),
+                    reason=_markdown_cell(argument["reason"]),
+                )
+            )
     sources = sorted(
         {
             (tool.get("source_id", "public source"), tool["source_url"])
