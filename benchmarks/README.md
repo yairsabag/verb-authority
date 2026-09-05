@@ -16,6 +16,20 @@ Run it without an API key or network access:
 python -m benchmarks.run_schema_corpus
 ```
 
+Run the provenance control separately:
+
+```bash
+python -m benchmarks.provenance_control --json
+```
+
+That control sends byte-for-byte identical `send_email` tool-call content
+through two local arms. The unbound arm is blocked with zero tool invocations;
+the arm carrying an independently supplied application binding executes once.
+The value is the same ordinary company address in both arms. This isolates the
+authority signal without pretending that a malicious-string detector should
+flag the content. It is a property demonstration, not a score against a named
+competitor.
+
 Use `--json` for machine-readable results. The corpus is small and curated; it
 is not an AgentDojo result, a universal security score, or evidence of
 production readiness. The adjacent `atlas/` dataset starts replacing
@@ -24,6 +38,12 @@ scanner lets users report classification errors without sharing the original
 schema. The next evidence milestones are to expand that public corpus, obtain
 reviewed redacted reports, and express compatible scenarios in AgentDojo where
 practical.
+
+The Atlas now also contains all 117 checked-in tool snapshots from a pinned
+GitHub MCP Server commit. Its manual review shows why the runtime benchmark
+cannot simply turn every fail-closed scan result into an AgentDojo defense:
+deployment context is required to distinguish an application-fixed selector
+from a selector the agent legitimately needs to choose.
 
 The [`agentdojo/`](agentdojo/) exercise is the first source-pinned half-step:
 it exports and scans all four public AgentDojo tool suites without running an
