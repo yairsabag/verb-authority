@@ -5,6 +5,22 @@ dates are added when a GitHub release is actually published.
 
 ## [Unreleased]
 
+Target: **0.10.0-beta.15**. This is release preparation, not a published
+package. Add the actual release date only when publication is finalized.
+
+### Compatibility and scope
+
+- Scanner JSON advances from beta.14's report v5 to v6. Authority Diff still
+  accepts complete v4 and v5 reports for observational comparisons; consumers
+  that require exactly v5 must update before adopting beta.15. CI thresholds
+  should scan raw schemas rather than trust an imported report as enforcement.
+- Structured nested argument maps now retain schema review debt, so
+  `--fail-on-review` can newly exit 2 on previously clean-looking schemas.
+  This is intentional coverage, not a runtime policy relaxation.
+- Preserve the Python runtime API, dependency-free core, pinned optional
+  Pydantic adapter, and security promise. No TypeScript/npm runtime, automatic
+  projection API, or new external adoption claim is part of this release.
+
 ### Scanner report v6
 
 - Require schema review for nested argument property maps, including structured

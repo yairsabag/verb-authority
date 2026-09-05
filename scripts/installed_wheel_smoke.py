@@ -4624,6 +4624,61 @@ def _daybreak_final_p3_regressions() -> None:
     )
 
 
+def _nested_argument_schema_review() -> None:
+    document = {
+        "tools": [{
+            "name": "deliver",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "object",
+                        "properties": {
+                            "to": {"type": "string", "format": "email"},
+                            "text": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    }
+                },
+                "additionalProperties": False,
+            },
+        }]
+    }
+    controls = {
+        "version": 1,
+        "tools": {"deliver": {"risk": {
+            "tier": "write", "evidence": "declared", "effects": ["send_message"]
+        }}},
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    _check(
+        tool["schema_review_required"] is True
+        and tool["review_required"] is True
+        and tool["risk_review_required"] is False
+        and tool["arguments"][0]["policy"] == "outbound_payload"
+        and tool["arguments"][0]["review_required"] is False,
+        "installed scanner lost nested authority review or changed outer policy",
+    )
+    with TemporaryDirectory(prefix="verb-authority-nested-smoke-") as directory:
+        root = Path(directory)
+        schema = root / "schema.json"
+        sidecar = root / "controls.json"
+        schema.write_text(json.dumps(document), encoding="utf-8")
+        sidecar.write_text(json.dumps(controls), encoding="utf-8")
+        scan_exit = verb_authority_scan.main([
+            str(schema), "--controls", str(sidecar), "--fail-on-review",
+            "--format", "json", "--output", str(root / "scan.json"),
+        ])
+        with contextlib.redirect_stdout(io.StringIO()):
+            diff_exit = verb_authority_diff.main([
+                str(schema), str(schema), "--before-controls", str(sidecar),
+                "--after-controls", str(sidecar), "--fail-on-review",
+            ])
+        _check(scan_exit == 2 and diff_exit == 2,
+               "installed scan/diff thresholds ignored unchanged nested review debt")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the installed Verb Authority wheel outside its checkout."
@@ -4672,6 +4727,7 @@ def main() -> int:
         _daybreak_external_audit_regressions,
         _daybreak_release_candidate_regressions,
         _schema_review_diff_fail_closed,
+        _nested_argument_schema_review,
         _daybreak_final_p3_regressions,
     )
     for check in checks:

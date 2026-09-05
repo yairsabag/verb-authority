@@ -7,25 +7,27 @@ trusted-choice behavior, and the pinned Pydantic AI adapter boundary.
 
 ## Install
 
-Install the latest published prerelease from PyPI:
+The commands below target beta.15. See the [README publication note](../README.md#install-beta15)
+for candidate availability; before publication, install the candidate checkout instead.
 
 ```bash
-python -m pip install "verb-authority==0.10.0b14"
+python -m pip install "verb-authority==0.10.0b15"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
 ```
 
-Or install the same release tag directly from GitHub:
+Or install the same release tag directly from GitHub once published:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.14"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.15"
 ```
 
 The second command runs the offline schema-to-gate quickstart. The package has
 no runtime dependencies and keeps the existing `verb_authority.py` module and
 import API.
 
-The [beta.14 release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.14)
-also includes a wheel, source archive, and `SHA256SUMS`. After downloading all
+Published [GitHub releases](https://github.com/yairsabag/verb-authority/releases)
+include a wheel, source archive, and `SHA256SUMS`. Use the files from one
+release, not a mixture of versions. After downloading all
 three files, use `sha256sum --check SHA256SUMS` on Linux or
 `shasum -a 256 -c SHA256SUMS` on macOS to verify the wheel and source archive
 against the manifest before installing. The manifest cannot authenticate
@@ -48,7 +50,7 @@ python -I -m pip install .
 
 ## 60-second quickstart
 
-After installing beta.14 or the current checkout, run the complete
+After installing the package or the candidate checkout, run the complete
 schema-to-gate path with one command:
 
 ```bash
@@ -117,9 +119,9 @@ retrieved document, model response, or untrusted tool result into session
 state does not make it trusted. The canonical registration and callable stay
 unchanged and remain the only executable tool.
 
-`send_reply` is a conceptual interface name, not a beta.14 wrapper or alias
+`send_reply` is a conceptual interface name, not a shipped wrapper or alias
 API. Applications can build that mapping with framework-native context
-injection. Beta.14's narrowly scoped Pydantic AI adapter, documented below,
+injection. The narrowly scoped Pydantic AI adapter, documented below,
 supports omitting the protected argument while retaining the canonical
 model-visible tool name. It does not publish a generic projection API. The
 [schema-projection design proposal](schema-projection-design.md) describes a

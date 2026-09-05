@@ -64,10 +64,12 @@ enforce these boundaries; Authority Diff applies the JSON boundaries to loaded
 reports before indexing them. An over-limit CLI input exits with status 2 and
 is not partially scanned or compared.
 
-**Unreleased source note:** the published beta.14 package emits report v5 and
-does not contain remediation fields. Report v6 below is the contract of this
-unreleased source checkout and will apply only when a release that includes it
-is published.
+**Version compatibility:** beta.14 emits report v5 without remediation fields.
+The beta.15 candidate emits report v6 as documented below. A consumer that
+requires exactly v5 must update before adopting beta.15. Complete v4/v5 reports
+remain supported as observational Authority Diff inputs; they do not become
+trusted runtime policy. See the [publication note](../README.md#install-beta15)
+before using the candidate-version install or action examples.
 
 Named JSON reports use report format v6. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a
@@ -439,7 +441,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.14
+- uses: yairsabag/verb-authority@v0.10.0-beta.15
   with:
     before: tools-main.json
     after: tools-pr.json
@@ -465,7 +467,7 @@ with:
   fail_on_review: "true"
 ```
 
-Both inputs accept only the exact strings `"true"` or `"false"`. The beta.14
+Both inputs accept only the exact strings `"true"` or `"false"`. The current
 pin in the example above supports both thresholds. The action removes
 `PYTHONPATH` and `PYTHONHOME` and uses Python isolated mode for both installation
 and comparison, preventing modules in the consumer checkout from shadowing
