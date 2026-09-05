@@ -28,6 +28,29 @@
 Schema fingerprint: `cd706cd542612e359452daccbcf49af52274fea8ee6b59501c2e0fb2a321128f`
 Names redacted: `no`
 
+## First-look authority signals
+
+> Confidence describes lexical or declared-policy matching, not ownership
+> truth, security priority, active protection, or business authorization.
+> The integrator must validate every candidate against deployment intent.
+
+| Signal | Count | Meaning |
+|---|---:|---|
+| Strong lock candidates | 4 | Validate against deployment intent |
+| Provisional fail-closed locks | 9 | Uncertain; review before adopting as policy |
+| Data-fillable arguments | 1 | Not proof that a value is safe or business-authorized |
+
+### Strong lock candidates
+
+> Static candidates only; this report does not actively protect them.
+
+| Tool | Argument | Reason |
+|---|---|---|
+| read_text_file | path | authority-bearing name |
+| write_file | path | authority-bearing name |
+| edit_file | path | authority-bearing name |
+| get_file_info | path | authority-bearing name |
+
 ## Sources
 
 | Source | Pinned URL |

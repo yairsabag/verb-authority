@@ -2596,6 +2596,134 @@ def test_markdown_states_privacy_and_interpretation_boundary():
     assert "vulnerability verdict" in markdown
 
 
+def test_markdown_surfaces_confident_candidates_without_unlocking_reviews():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string", "format": "email"},
+                                "subject": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    before = copy.deepcopy(report)
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert report == before
+    assert "## First-look authority signals" in markdown
+    assert "| Protected (`trusted_fixed`) | 2 |" in markdown
+    assert "| Strong lock candidates | 1 |" in first_look
+    assert "| Provisional fail-closed locks | 1 |" in first_look
+    assert "| Data-fillable arguments | 1 |" in first_look
+    assert "lexical or declared-policy matching" in first_look
+    assert "not ownership" in first_look
+    assert "not actively protect" in first_look
+    assert "| send_email | to | email destination |" in first_look
+    assert "subject" not in first_look
+    assert "body" not in first_look
+
+
+def test_markdown_first_look_handles_only_provisional_and_zero_strong_candidates():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"subject": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "| Strong lock candidates | 0 |" in first_look
+    assert "| Provisional fail-closed locks | 1 |" in first_look
+    assert "### Strong lock candidates" not in first_look
+
+
+def test_markdown_first_look_preserves_redaction():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_private_mail",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "secret_recipient": {"type": "string"},
+                                "custom_style": {"type": "string"},
+                                "draft_body": {"type": "string"},
+                            },
+                        },
+                    }
+                ]
+            }
+        ],
+        redact_names=True,
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "send_private_mail" not in markdown
+    assert "secret_recipient" not in markdown
+    assert "custom_style" not in markdown
+    assert "draft_body" not in markdown
+    assert "| tool_001 | param_001 |" in first_look
+
+
+def test_markdown_first_look_escapes_candidate_names():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_<script>|mail",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"recipient": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "send_&lt;script&gt;\\|mail" in first_look
+    assert "<script>" not in first_look
+
+
 def test_markdown_escapes_schema_controlled_names():
     report = scan_documents(
         [
