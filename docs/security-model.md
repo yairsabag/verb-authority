@@ -34,9 +34,10 @@ lock `to` while still allowing untrusted text to fill `body`, instead of
 disabling the entire `send_email` tool after untrusted content enters context.
 
 This is a research-grade boundary, not a claim that prompt injection is
-impossible. The optional ledger catches exact reuse, emails and URLs extracted
-from returned text, nested JSON values, every exact object key, exact
-containers (including empty ones), and several lexical disguises. It does
+impossible. The optional ledger catches exact reuse, emails and the selected
+URI forms listed below extracted from returned text, nested JSON values,
+every exact object key, exact containers (including empty ones), and several
+lexical disguises. It does
 **not** follow a value through semantic
 reconstruction—for example,
 turning “attacker at evil dot com” into an address. A developer can also defeat

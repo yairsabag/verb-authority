@@ -565,9 +565,13 @@ this beta and must remain disabled.
 
 ## Integrating a tool loop
 
-`trusted_args` is an application provenance declaration: an argument is marked
-trusted only when it equals the corresponding application-supplied value.
-Everything else is data.
+`trusted_args` is an application provenance declaration: the key must be
+present in the trusted mapping and the input must match its independently
+application-supplied value with the exact JSON types. A missing key is not an
+explicit `null`, and `true` is not the number `1`. Use `dispatch` or
+`GuardedToolRunner` for this binding rather than reconstructing provenance
+with Python `==` or `dict.get`. Everything else is data; a ledger can also
+downgrade a matching value already observed in untrusted results.
 
 ```python
 from verb_authority import Param, ProvenanceLedger, Registry, Risk, Tool

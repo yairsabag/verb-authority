@@ -1893,6 +1893,37 @@ def test_fail_on_review_trips_on_unchanged_schema_review_debt(tmp_path):
     )
 
 
+def test_fail_on_review_trips_on_unchanged_nested_object_authority(tmp_path):
+    document = {
+        "tools": [{
+            "name": "deliver",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "object",
+                        "properties": {"to": {"type": "string", "format": "email"}},
+                        "additionalProperties": False,
+                    }
+                },
+                "additionalProperties": False,
+            },
+        }]
+    }
+    controls = {
+        "version": 1,
+        "tools": {"deliver": {"risk": {
+            "tier": "write", "evidence": "declared", "effects": ["send_message"]
+        }}},
+    }
+    _assert_unchanged_raw_review_threshold(
+        tmp_path,
+        document,
+        controls=controls,
+        expected_summary_field="schema_review_required_tools",
+    )
+
+
 def test_fail_on_review_trips_on_unchanged_annotation_conflict(tmp_path):
     document = {
         "tools": [
