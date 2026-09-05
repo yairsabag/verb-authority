@@ -231,7 +231,7 @@ catalog resolution, selector branches, and the pinned Pydantic AI adapter.
 
 ## Pydantic AI
 
-Beta.14 includes an optional, narrowly pinned Pydantic AI adapter. It keeps
+The Python package includes an optional, narrowly pinned Pydantic AI adapter. It keeps
 protected values out of the model-visible function or resolves model-visible
 keys through an application-owned catalog before entering
 `GuardedToolRunner`.
