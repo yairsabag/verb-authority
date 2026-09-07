@@ -81,6 +81,7 @@ py-modules = [
 "share/doc/verb-authority/docs/case-studies" = [
   "docs/case-studies/external-beta-risk-evidence.md",
   "docs/case-studies/index.md",
+  "docs/case-studies/spendshield-assisted-composition.md",
 ]
 "share/doc/verb-authority/docs/assets" = [
   "docs/assets/README.md",
