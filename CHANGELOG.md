@@ -1,9 +1,30 @@
 # Changelog
 
-This project follows semantic versioning for its public Python API. Release
-dates are added when a GitHub release is actually published.
+This project follows semantic versioning for its public Python API. Entries
+describe source versions; a version entry alone does not establish publication.
+Publication timestamps and artifacts are recorded in the linked GitHub releases.
 
 ## [Unreleased]
+
+No additional changes recorded.
+
+## [0.10.0-beta.15]
+
+See the linked GitHub release for its publication timestamp and verified assets,
+and PyPI for package-index availability.
+
+### Compatibility and scope
+
+- Scanner JSON advances from beta.14's report v5 to v6. Authority Diff still
+  accepts complete v4 and v5 reports for observational comparisons; consumers
+  that require exactly v5 must update before adopting beta.15. CI thresholds
+  should scan raw schemas rather than trust an imported report as enforcement.
+- Structured nested argument maps now retain schema review debt, so
+  `--fail-on-review` can newly exit 2 on previously clean-looking schemas.
+  This is intentional coverage, not a runtime policy relaxation.
+- Preserve the Python runtime API, dependency-free core, pinned optional
+  Pydantic adapter, and security promise. No TypeScript/npm runtime, automatic
+  projection API, or new external adoption claim is part of this release.
 
 ### Scanner report v6
 
@@ -47,6 +68,19 @@ dates are added when a GitHub release is actually published.
 - Include `setuptools>=77` in the `dev` extra so a clean
   `pip install ".[dev]"` environment can run the intentional no-isolation
   release-archive contract test.
+
+### External regression evidence
+
+- Preserve Larry Peseckis's 18-file synthetic payment tuple-boundary contribution
+  unchanged, including the historical beta.6/beta.10 reports and license note.
+  Document the old runner's reproduction and assertion limits explicitly.
+- Add 16 maintainer-owned regression tests outside the frozen evidence for file
+  integrity, historical report consistency, the separate four-case business
+  oracle, current scanner review semantics, and CLI review thresholds. This is
+  not a payment integration, runtime authorization result or adoption claim.
+- Keep the frozen external bundle repository-only. The source distribution
+  carries the test module and skips its repository-only cases when the bundle
+  is absent.
 
 ## [0.10.0-beta.14] - 2026-08-31
 
@@ -848,7 +882,8 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.14...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.15...HEAD
+[0.10.0-beta.15]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.15
 [0.10.0-beta.14]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.14
 [0.10.0-beta.13]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13
 [0.10.0-beta.12]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.12

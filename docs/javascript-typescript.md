@@ -58,13 +58,17 @@ like this:
 ]
 ```
 
-Install Beta 14 into a disposable Python environment, then scan the JSON
+Install the Python package into a disposable environment, then scan the JSON
 without changing the JavaScript application:
+
+These examples target beta.15. See the [publication note](../README.md#install-beta15)
+before using its package or action tag; until publication, evaluate the candidate
+checkout or keep the published beta.14 scanner.
 
 ```bash
 python -m venv .verb-authority-venv
 . .verb-authority-venv/bin/activate
-python -m pip install "verb-authority==0.10.0b14"
+python -m pip install "verb-authority==0.10.0b15"
 env -u PYTHONPATH -u PYTHONHOME \
   python -I -m verb_authority scan tools.json --output authority-report.md
 ```
@@ -115,7 +119,7 @@ steps:
   - uses: actions/setup-python@v5
     with:
       python-version: "3.12"
-  - uses: yairsabag/verb-authority@v0.10.0-beta.14
+  - uses: yairsabag/verb-authority@v0.10.0-beta.15
     with:
       before: security/tool-schemas/main.json
       after: security/tool-schemas/pr.json

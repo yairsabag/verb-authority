@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verb-authority"
-version = "0.10.0b14"
+version = "0.10.0b15"
 description = "Prevent untrusted data from authoring protected tool-call arguments."
 readme = "README.md"
 requires-python = ">=3.10"
