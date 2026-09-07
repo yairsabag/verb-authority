@@ -65,11 +65,11 @@ reports before indexing them. An over-limit CLI input exits with status 2 and
 is not partially scanned or compared.
 
 **Version compatibility:** beta.14 emits report v5 without remediation fields.
-The beta.15 candidate emits report v6 as documented below. A consumer that
+Beta.15 emits report v6 as documented below. A consumer that
 requires exactly v5 must update before adopting beta.15. Complete v4/v5 reports
 remain supported as observational Authority Diff inputs; they do not become
-trusted runtime policy. See the [publication note](../README.md#install-beta15)
-before using the candidate-version install or action examples.
+trusted runtime policy. See the [publication status](../README.md#install-beta15)
+before using the version-pinned install or action examples.
 
 Named JSON reports use report format v6. For the constraints understood by
 Authority Diff, they retain exact `maximum` and `maxLength` values and a

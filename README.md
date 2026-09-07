@@ -27,10 +27,12 @@ not invoke tools while scanning and does not upload schemas.
 
 ## Install beta.15
 
-**Publication note:** this branch prepares beta.15. Until it appears on
-[PyPI](https://pypi.org/project/verb-authority/), the published version remains
-`0.10.0b14`; the commands below target the new release. To evaluate this
-candidate before publication, install this checkout with `python -I -m pip install .`.
+**Publication status:** the commands below target `0.10.0b15`. Check
+[PyPI](https://pypi.org/project/verb-authority/#history) for package-index availability
+and the [beta.15 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.15)
+for published artifacts and their hashes. A source version or branch does not
+itself establish publication. If that release is not available yet, evaluate
+this checkout with `python -I -m pip install .` instead.
 
 Install the dependency-free core from PyPI once available:
 
@@ -357,7 +359,7 @@ Public case material is preserved separately from CI reductions:
 - [executable demos](https://github.com/yairsabag/verb-authority/blob/main/docs/case-studies/index.md#evidence-and-demos).
 
 `v0.9.0` is the latest stable release.
-Beta.14 was the first PyPI distribution. This branch prepares beta.15 with
+Beta.14 was the first PyPI distribution. Beta.15 adds
 report-v6 remediation guidance, a first-look review summary, nested-schema
 review coverage, and corrected integration examples. It retains the runtime
 API, offline quickstart, and frozen external regression evidence. Report-v5

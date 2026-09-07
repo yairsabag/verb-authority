@@ -7,8 +7,8 @@ trusted-choice behavior, and the pinned Pydantic AI adapter boundary.
 
 ## Install
 
-The commands below target beta.15. See the [README publication note](../README.md#install-beta15)
-for candidate availability; before publication, install the candidate checkout instead.
+The commands below target beta.15. See the [README publication status](../README.md#install-beta15)
+for index and artifact availability; before publication, install the source checkout instead.
 
 ```bash
 python -m pip install "verb-authority==0.10.0b15"
@@ -50,7 +50,7 @@ python -I -m pip install .
 
 ## 60-second quickstart
 
-After installing the package or the candidate checkout, run the complete
+After installing the package or the source checkout, run the complete
 schema-to-gate path with one command:
 
 ```bash
