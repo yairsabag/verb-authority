@@ -1,0 +1,236 @@
+{
+  "control_declaration_fingerprint_sha256": "edce70f69dab1e689f4005ad3c185418391531472c929680d1f314591510b6f4",
+  "declared_controls": {
+    "attribution": {
+      "name": "synthetic tuple-authority boundary fixture",
+      "source": "independent test fixture for Verb Authority v0.10.0-beta.6"
+    },
+    "tools": [
+      {
+        "arguments": [
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted account allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "trusted_fixed",
+            "name": "account",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted recipient allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "trusted_fixed",
+            "name": "recipient",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "numeric ceiling before payment submission",
+                "operational_status": "enforced",
+                "source": "global payment ceiling of 10000"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "amount",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          },
+          {
+            "authority": "constrained",
+            "bounds": [
+              {
+                "bounds_mutability": "trusted_party",
+                "enforcement": "runtime membership check before payment submission",
+                "operational_status": "enforced",
+                "source": "application-trusted purpose allowlist"
+              }
+            ],
+            "evidence": "declared",
+            "inferred_policy": "typed_bounded",
+            "name": "purpose",
+            "review_required": false,
+            "schema_exposure": "exposed"
+          }
+        ],
+        "name": "submit_payment",
+        "risk": {
+          "effects": [
+            "initiates_payment",
+            "commits_funds"
+          ],
+          "evidence": "declared",
+          "note": "Synthetic financial tool used only to test the boundary between per-argument authority and action-instance authorization.",
+          "tier": "financial"
+        },
+        "schema_closes_unknown_arguments": true,
+        "unexposed_arguments": []
+      }
+    ],
+    "verification_notice": "Control declarations are supplied by the report author. Their evidence labels and operational statuses are preserved but are not independently verified by this scanner.",
+    "version": 1
+  },
+  "generator": "verb-authority",
+  "privacy": {
+    "control_declarations_included": true,
+    "defaults_included": false,
+    "descriptions_included": false,
+    "enum_value_fingerprints_dictionary_guessable": true,
+    "enum_value_fingerprints_included": true,
+    "enum_values_included": false,
+    "examples_included": false,
+    "names_redacted": false,
+    "network_used": false,
+    "runtime_values_included": false,
+    "schema_constraint_values_included": true,
+    "schema_fingerprint_material_scope": "full_validation_material_excluding_annotations",
+    "schema_material_fingerprints_dictionary_guessable": true,
+    "schema_material_fingerprints_included": true,
+    "server_executed": false,
+    "unmodeled_schema_fingerprints_included": true
+  },
+  "report_version": 3,
+  "schema_fingerprint_sha256": "928aee11759e96bd95f69ac6bcfca5854d29ff5d8b9860040b2551687cc85bff",
+  "summary": {
+    "annotation_conflicts": 0,
+    "confirmation_required_tools": 1,
+    "data_fillable_parameters": 2,
+    "parameters": 4,
+    "protected_parameters": 2,
+    "review_required": 0,
+    "risk_conflicts": 0,
+    "risk_review_required_tools": 0,
+    "schema_review_required_tools": 0,
+    "tools": 1
+  },
+  "tools": [
+    {
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "high",
+          "constraints": {
+            "enum": {
+              "count": 2,
+              "value_fingerprints_sha256": [
+                "48ccc01692439fa66bed18f80033f133fa3109d3827a774836b637d6b801b570",
+                "d0782bf79e6ef8062469a3e69a12d931f3e58fd22d59911abc1daab39987c6ae"
+              ]
+            }
+          },
+          "name": "account",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "09e0e4b0abbe335c2624bb076d8158f2a61ab24a1614ad78a45884fbc343c44e",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "high",
+          "constraints": {
+            "enum": {
+              "count": 2,
+              "value_fingerprints_sha256": [
+                "310351dbc15f28049655cd86ee22027fe1f003b82c155ab58fefda09c9965b3d",
+                "402d1f71acae9fc6593f13898199823cf39d55a7b448bfc427f8d1186e081a6e"
+              ]
+            }
+          },
+          "name": "recipient",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "f597681e4e9ba8f260161666ffd935d66a4c49459bf186a7097abec8dd934a80",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "high",
+          "constraints": {
+            "maximum": 10000
+          },
+          "name": "amount",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "6d02d63c09c9552310eb0f88bde4dd71d0db2868682791a0dba92ae18d0df7a8",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "33527092b4d7b347b5d568868d198441ac482767578c40660b0cda9ea16f5b3a"
+        },
+        {
+          "confidence": "high",
+          "constraints": {
+            "enum": {
+              "count": 2,
+              "value_fingerprints_sha256": [
+                "25db593a98a3eed671b300e600cbb331a4219cf1624c56b9b4ab4e6cfe493642",
+                "8ef51abd0a2e3c322789ad384fe9939745dd974f52916e038d2c4a89272469e2"
+              ]
+            }
+          },
+          "name": "purpose",
+          "policy": "typed_bounded",
+          "reason": "typed or bounded value",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "3e39e8af5b9ffb1ec94c05f6a6bd329dcc269e0f292230ffeab891eef7b8fd6b",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "declared_risk": {
+        "effects": [
+          "initiates_payment",
+          "commits_funds"
+        ],
+        "evidence": "declared",
+        "note": "Synthetic financial tool used only to test the boundary between per-argument authority and action-instance authorization.",
+        "tier": "financial"
+      },
+      "inferred_risk": "financial",
+      "name": "submit_payment",
+      "needs_confirmation": true,
+      "risk": "financial",
+      "risk_conflict": false,
+      "risk_evidence": "declared",
+      "risk_inference": {
+        "confidence": "heuristic",
+        "matched_tokens": [
+          "payment"
+        ],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": false,
+      "risk_source": "control_declaration",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "10e27fa6e7bb916a00343e5b2c78e61b7493621d07dfed0911b1714ea7940dec",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "a2c799262a3ce3c19ef5cdd983bf3d12b43ab3c426227091b909dcb7054738c0"
+    }
+  ]
+}
