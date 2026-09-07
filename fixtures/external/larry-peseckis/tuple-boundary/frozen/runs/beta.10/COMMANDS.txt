@@ -1,0 +1,32 @@
+# Verb Authority tuple-boundary regression rerun
+# Target release: v0.10.0-beta.10
+# Shell: Windows PowerShell
+
+cd .\verb-authority-tuple-boundary-test_v10\
+
+$env:VENV=".venv-beta10"
+$env:VA_REF="v0.10.0-beta.10"
+.\run.ps1
+
+# Independently record the installed package version used by the rerun.
+
+& .\.venv-beta10\Scripts\python.exe -c "import importlib.metadata as m; print(m.version('verb-authority'))" |
+    Set-Content -Encoding utf8 results\installed-version.txt
+
+Get-Content results\installed-version.txt
+
+# Record the interpreter associated with that environment.
+
+& .\.venv-beta10\Scripts\python.exe -c "import sys; print(sys.executable)" |
+    Set-Content -Encoding utf8 results\python-executable.txt
+
+# Record SHA-256 hashes of the five frozen semantic inputs.
+
+Get-FileHash tools.json, controls.json, policy.json, cases.json, EXPECTED.md -Algorithm SHA256 |
+    Format-Table -AutoSize |
+    Out-String |
+    Set-Content -Encoding utf8 results\fixture-input-hashes.txt
+
+Get-Content results\installed-version.txt
+Get-Content results\python-executable.txt
+Get-Content results\fixture-input-hashes.txt

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "attribution": {
+    "name": "synthetic tuple-authority boundary fixture",
+    "source": "independent test fixture for Verb Authority v0.10.0-beta.6"
+  },
+  "tools": {
+    "submit_payment": {
+      "risk": {
+        "tier": "financial",
+        "evidence": "declared",
+        "effects": [
+          "initiates_payment",
+          "commits_funds"
+        ],
+        "note": "Synthetic financial tool used only to test the boundary between per-argument authority and action-instance authorization."
+      },
+      "arguments": {
+        "account": {
+          "authority": "constrained",
+          "evidence": "declared",
+          "bounds": [
+            {
+              "source": "application-trusted account allowlist",
+              "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
+              "enforcement": "runtime membership check before payment submission"
+            }
+          ]
+        },
+        "recipient": {
+          "authority": "constrained",
+          "evidence": "declared",
+          "bounds": [
+            {
+              "source": "application-trusted recipient allowlist",
+              "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
+              "enforcement": "runtime membership check before payment submission"
+            }
+          ]
+        },
+        "amount": {
+          "authority": "constrained",
+          "evidence": "declared",
+          "bounds": [
+            {
+              "source": "global payment ceiling of 10000",
+              "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
+              "enforcement": "numeric ceiling before payment submission"
+            }
+          ]
+        },
+        "purpose": {
+          "authority": "constrained",
+          "evidence": "declared",
+          "bounds": [
+            {
+              "source": "application-trusted purpose allowlist",
+              "bounds_mutability": "trusted_party",
+              "operational_status": "enforced",
+              "enforcement": "runtime membership check before payment submission"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
