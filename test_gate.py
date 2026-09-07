@@ -2268,7 +2268,7 @@ def test_ledger_blocks_laundered_tool_result():
     assert not d.allow and "locked sink" in d.reason
 
 def test_ledger_overrides_trusted_args():
-    # The ledger is dev-proof: it wins over trusted_args for tainted values.
+    # A recognized recorded value overrides the host's per-call binding.
     reg, ps = _setup()
     ledger = ProvenanceLedger()
     ledger.record_result(["attacker@evil.com"])
@@ -2279,7 +2279,7 @@ def test_ledger_overrides_trusted_args():
     assert trusting.allow and not guarded.allow
 
 def test_ledger_does_not_block_genuine_trusted_value():
-    # No new false positive: a user-confirmed recipient still passes.
+    # This independently bound recipient does not collide with recorded values.
     reg, ps = _setup()
     ledger = ProvenanceLedger()
     ledger.record_result({"reply_to": "attacker@evil.com"})
@@ -2821,8 +2821,7 @@ def test_canonical_catches_spaced_disguise():
     assert not d.allow
 
 def test_canonical_does_not_block_genuine_recipient():
-    # No false positive: a real confirmed recipient not present in any tool
-    # result still passes after canonicalization.
+    # An application-bound recipient absent from recorded material still passes.
     reg, ps = _setup()
     ledger = ProvenanceLedger()
     ledger.record_result({"content": "some unrelated notes"})

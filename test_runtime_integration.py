@@ -3750,6 +3750,38 @@ def test_runner_reports_ledger_capacity_after_invocation_and_never_retries(
     assert calls == ["invoked"]
 
 
+def test_runner_reports_recording_failure_after_invocation_without_retry(
+    monkeypatch,
+):
+    outbox, runner = _email_runtime()
+    recording_attempts = []
+
+    def fail_record_result(self, result):
+        assert self is runner.ledger
+        recording_attempts.append(result)
+        raise RuntimeError("private recorder failure details")
+
+    monkeypatch.setattr(ProvenanceLedger, "record_result", fail_record_result)
+    execution = runner.run(
+        {
+            "name": "send_email",
+            "input": {"to": "alice@company.com", "body": "status update"},
+        },
+        trusted_args={"to": "alice@company.com"},
+    )
+
+    # The inert handler already ran once, even though publication failed.
+    assert outbox == [{"to": "alice@company.com", "body": "status update"}]
+    assert recording_attempts == [{"status": "sent"}]
+    assert execution.invoked and not execution.executed
+    assert not execution.decision.allow
+    assert execution.result is None
+    assert execution.contract_violation == "ledger_recording_failure"
+    assert "do not retry" in execution.decision.reason
+    assert "already-invoked" in execution.decision.reason
+    assert "private recorder failure details" not in execution.decision.reason
+
+
 def test_direct_dispatch_denies_a_saturated_ledger_even_without_arguments(
     monkeypatch,
 ):

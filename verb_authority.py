@@ -1796,19 +1796,18 @@ def gate(reg: Registry, ps: PolicySet, tool: str, args: dict, provenance: dict) 
 # naive developer threads it into `trusted_args` for the next call, the gate
 # would trust it. That is Family 3 in adversarial.py.
 #
-# The ledger adds an INDEPENDENT, dev-proof source of truth. Every value a tool
-# *returns* is data the agent read, so it is tainted at origin. We record those
-# values. On a later call, if an argument's value matches something the ledger
-# saw come out of a previous tool, the gate forces its provenance to "data" --
-# EVEN IF the developer declared it trusted. The dev can no longer launder a
-# tool result into a sink by mis-wiring trusted_args.
+# The ledger adds a bounded negative check over observed tool results. If a
+# later argument matches recorded material, the gate treats it as "data" even
+# when trusted_args contains an exact match. This can catch a host misbinding
+# when the untrusted value was both recorded and recognized. Capture, history
+# selection, and trusted_args still depend on trusted application wiring; these
+# checks are not independent failure domains or proof of causal origin.
 #
-# What this is NOT: it is not CaMeL's sound interpreter taint. It tracks values
-# by exact match, so a value the agent paraphrases or reformats (e.g. strips a
-# name out of a sentence) no longer matches and escapes the ledger. It catches
-# verbatim propagation -- the common, naive case -- not arbitrary control flow.
-# Honest verdict: closes the laundering path it can SEE; the transform path
-# still needs the dev to be careful (or a real interpreter).
+# What this is NOT: it is not CaMeL's sound interpreter taint. Exact values and
+# selected lexical forms can match; arbitrary semantic transformations need
+# not. Conversely, an independently trusted value can be blocked because equal
+# bytes appeared in unrelated tool output. A ledger miss never supplies missing
+# authority: the host must still bind every protected value independently.
 def _json_leaf_token(value: Any) -> tuple[str, Any] | None:
     """Return a hashable token preserving the exact JSON scalar type."""
 
@@ -4099,7 +4098,8 @@ class GuardedToolRunner:
                 Decision(
                     False,
                     f"verb '{display_tool}' result could not be recorded "
-                    "safely in the provenance ledger",
+                    "safely in the provenance ledger; do not retry this "
+                    "already-invoked tool",
                 ),
                 executed=False,
                 invoked=True,
