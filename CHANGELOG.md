@@ -6,7 +6,18 @@ Publication timestamps and artifacts are recorded in the linked GitHub releases.
 
 ## [Unreleased]
 
-No additional changes recorded.
+### Runtime diagnostics and boundary evidence
+
+- Add an explicit no-retry instruction when provenance-result recording fails
+  after handler entry. The result remains withheld with `invoked=True`,
+  `executed=False`, and `ledger_recording_failure`; authority decisions and the
+  public API are unchanged.
+- Exercise lexical collisions and valid-address reconstruction with inert
+  handler counters and separate honest-host/misbound-host controls. These tests
+  document conservative blocking and the bounded ledger's existing limitations,
+  not sound causal tracking or protection against arbitrary host faults.
+- Clarify the ledger's dependence on host capture and binding, and explain why
+  a fresh ledger must not silently discard restrictions on retained context.
 
 ## [0.10.0-beta.15]
 

@@ -244,6 +244,11 @@ the ledger becomes permanently saturated, and every later call is denied until
 the application starts a new session with a fresh ledger. The already-entered
 tool must not be retried: the runner reports `invoked=True`, `executed=False`,
 and `contract_violation="ledger_capacity_exceeded"` with that instruction.
+Starting a fresh ledger does not restore the provenance of retained data. Do
+not carry old tool results, summaries, or model context into a new session while
+discarding their relevant history or restrictions. Use genuinely fresh context
+or preserve those restrictions in the application's handoff; an empty ledger is
+not evidence of a trusted origin.
 Unicode normalization is bounded twice: no individual NFKC input may exceed
 4,096 characters, and one policy-inference, gate, ledger-publication, or lookup
 operation shares a cumulative 32,768-character work budget across all of its
@@ -270,6 +275,13 @@ violating the result contract. A result beyond the JSON depth or integer bound
 or the total node/material snapshot budget is reported after invocation as
 `contract_violation="unsupported_result"` without exposing the result. A
 snapshot-budget denial also carries an explicit no-retry instruction.
+If result recording raises another ordinary `Exception`, the runner withholds
+the result and reports `invoked=True`, `executed=False`, and
+`contract_violation="ledger_recording_failure"`, with an explicit no-retry
+instruction and without exposing exception details. This does not imply that
+every recording failure saturates the ledger or that an external effect was
+rolled back; the host must resolve incomplete capture before dependent work
+continues.
 Free outbound payloads may be authored by data, but they still must satisfy
 their declared runtime type and bounds such as `max_len`.
 
@@ -669,7 +681,9 @@ callable identity, result validation, and result capture to the application.
 Thread one ledger through the session and record each plain JSON result
 immediately after the tool returns. If `record_result` raises a capacity error,
 the tool has already run: do not retry it, discard the saturated session, and
-start a fresh ledger. Prefer `GuardedToolRunner` when those
+start a genuinely fresh session, not just a new ledger with the old data/context.
+Any retained data still needs its relevant provenance restrictions.
+Prefer `GuardedToolRunner` when those
 operations should share the frozen runtime boundary described above. The
 ledger is a containment layer, not sound taint tracking: it recognizes values
 (including every exact key, exact containers, and typed scalar leaves nested
