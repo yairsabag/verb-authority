@@ -29,23 +29,32 @@ The [`agentdojo/`](agentdojo/) exercise is the first source-pinned half-step:
 it exports and scans all four public AgentDojo tool suites without running an
 agent or claiming an attack benchmark result.
 
-## v0.9.0 baseline
+## Current development baseline after primitive-authority tightening
 
 | Measure | Result |
 |---|---:|
 | Schemas / categories | 12 / 10 |
-| Policy matches | 30 / 34 |
-| Policy false allows | 2 |
-| Policy false blocks | 2 |
-| Call-decision matches | 15 / 18 |
-| Call false allows | 2 |
-| Call false blocks | 1 |
+| Policy matches | 26 / 34 |
+| Policy false allows | 0 |
+| Policy false blocks | 8 |
+| Call-decision matches | 12 / 18 |
+| Call false allows | 0 |
+| Call false blocks | 6 |
 
-The two security-relevant misses are an untrusted SQL query inferred as an
-outbound payload and an untrusted payment amount inferred as merely
-type-bounded. Both calls still request confirmation because their verbs are
-high risk, but confirmation is not the same guarantee as preventing untrusted
-data from authoring the argument. The retained false block is a calendar title
-that the reviewer marked as data-fillable but the conservative inference keeps
-locked. These are proposed v0.10.0 evidence targets, not silently corrected
-v0.9.0 behavior.
+The desired corpus labels were deliberately left unchanged. The stricter rule
+that primitive type membership alone does not establish data authorship removes
+the former payment-amount false allow: undeclared enums, numbers, and booleans
+on consequential tools now remain locked for review. Rejecting raw string
+length as authority evidence also closes the untrusted SQL-query false allow.
+The current corpus therefore contains no policy or call false allows.
+
+That result has an explicit usability cost rather than a
+silently improved score. The conservative false-block set grows to eight policy
+cases and six calls, including operation selectors, primitive values, and
+ambiguously named strings whose intended data authorship cannot be established
+from representation alone. Applications can release a reviewed value through trusted control-plane
+configuration; the benchmark does not add `sink=False` merely to make the
+current implementation match. Exact one-selector branch risk now covers a
+reviewed polymorphic-tool shape, but it does not change these corpus truth
+labels or silently infer authorability from a schema. The retained mismatches
+remain evidence for broader integration work, not mislabeled successes.

@@ -1,0 +1,2033 @@
+{
+  "generator": "verb-authority",
+  "privacy": {
+    "branch_value_fingerprints_dictionary_guessable": true,
+    "branch_value_fingerprints_included": true,
+    "control_declarations_included": false,
+    "defaults_included": false,
+    "descriptions_included": false,
+    "enum_value_fingerprints_dictionary_guessable": true,
+    "enum_value_fingerprints_included": true,
+    "enum_values_included": false,
+    "examples_included": false,
+    "names_redacted": false,
+    "network_used": false,
+    "runtime_values_included": false,
+    "schema_constraint_values_included": true,
+    "schema_fingerprint_material_scope": "full_validation_material_excluding_annotations",
+    "schema_material_fingerprints_dictionary_guessable": true,
+    "schema_material_fingerprints_included": true,
+    "server_executed": false,
+    "unmodeled_schema_fingerprints_included": true
+  },
+  "report_version": 4,
+  "schema_fingerprint_sha256": "e64a1c264cc180ddbe4fbfc27ec5b8e0fdc0f31715e07a2f8315539336fe4404",
+  "summary": {
+    "annotation_conflicts": 0,
+    "branch_risk_review_required_tools": 1,
+    "confirmation_required_tools": 23,
+    "data_fillable_parameters": 3,
+    "parameters": 61,
+    "protected_parameters": 58,
+    "review_required": 54,
+    "risk_conflicts": 0,
+    "risk_review_required_tools": 23,
+    "schema_review_required_tools": 5,
+    "tools": 23
+  },
+  "tools": [
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_close",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "width",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "height",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_resize",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "56af3a7c22b06bd7efa2892ac75b5b3d1c883a82d17db5931ef9d1493cddb4a2",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "enum": {
+              "count": 4,
+              "value_fingerprints_sha256": [
+                "2c5943c559a125bf3745c6dc0e019944c34298b0b7a375763414965ed6b7be5a",
+                "3e3e8e84e722887a4d8913d527f925f3a307b0649b3aff95d10450d5b951e96c",
+                "4d01709fcd599118652e3b27bd0ca97c802f832183d01f76a034755f2bc62fa3",
+                "c94f9df6f3f7bc69e76a374ce4cd3e5d8766f2145a742ccb34d26e1954efd067"
+              ]
+            }
+          },
+          "name": "level",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "36bef56cadc80e7948302e84c96b267b8ab2ad39b3c2d5d3e5c7c9902203066f",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "all",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_console_messages",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "0d8e8a11d5de8fa774adf2dfde844de968a96696270c7b2341517c98e074c1b7",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "accept",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        },
+        {
+          "confidence": "high",
+          "name": "promptText",
+          "policy": "outbound_payload",
+          "reason": "outbound payload name or bounded free text",
+          "required": false,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_handle_dialog",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "067324979baa07b90ebf40c79a47ab1ec582866a8d676a55f959b235a7d7983c",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "function",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_evaluate",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "f4324c189333a839b28a13cc30813c0c5b7f8689d1061a448d1970f8f74917ff",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "high",
+          "name": "paths",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": false,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9",
+          "type": "array",
+          "unmodeled_schema_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "write",
+      "name": "browser_file_upload",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "heuristic",
+        "matched_tokens": [
+          "upload"
+        ],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "a0e2e87ffcaebcbe1307500db1cad52e0590beb383d638bf50fb68e121f191a6",
+      "schema_review_required": true,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "high",
+          "name": "paths",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": false,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9",
+          "type": "array",
+          "unmodeled_schema_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "data",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "86408dfcaaac4be6d88ecee6ebdf819a00af60b8556d0d25319c9e0b958a57cd",
+          "type": "object",
+          "unmodeled_schema_fingerprint_sha256": "86408dfcaaac4be6d88ecee6ebdf819a00af60b8556d0d25319c9e0b958a57cd"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "destructive",
+      "name": "browser_drop",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "heuristic",
+        "matched_tokens": [
+          "drop"
+        ],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "251fd0eb79fe765a5e73cf4f0a595ece6147c9bc15835ebab87c597b16501c50",
+      "schema_review_required": true,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "fields",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "752d903490581c1093bbc374fb855d546978af78ed3819327e85a74ffbe16b7a",
+          "type": "array",
+          "unmodeled_schema_fingerprint_sha256": "752d903490581c1093bbc374fb855d546978af78ed3819327e85a74ffbe16b7a"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_fill_form",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "9b132f4b2897b3cf948edcca99fc8bf69bfff0b9e97e961d3c73a2a6f8ef5484",
+      "schema_review_required": true,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "key",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_press_key",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "d000bdafc52d2246527fe549df601a2e7c9d4da585ad33a925c8e06db57a370d",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "high",
+          "name": "text",
+          "policy": "outbound_payload",
+          "reason": "outbound payload name or bounded free text",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "submit",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "slowly",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_type",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "cc9e5f4f7d445032ec7954d8f3a202489ea0b5662e71b28b6678aee96b6f96c7",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "high",
+          "name": "url",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": true,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_navigate",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "2ad753ee58411738babd0ed0a3f6070093329319e9350f6637ead1ab383c29d1",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_navigate_back",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "static",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filter",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_network_requests",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "9e5264b1480ac78ef8d68aa6baec9ff4310536c55a446dbca7d53362937e9bec",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "maximum": 9007199254740991
+          },
+          "name": "index",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "ea288f4ef558f5f1682c9ec4c9395734bd8290c18c696889964cd2b24e1dcfe8",
+          "type": "integer",
+          "unmodeled_schema_fingerprint_sha256": "2a1379ebe9f4b632fbdf3732d4b86b26e9fbf2aa92cf2449dde7bf4dc122060f"
+        },
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "enum": {
+              "count": 4,
+              "value_fingerprints_sha256": [
+                "50e9ff5c4ec07bd10649b263f2e2737f695e4874de8c8cd22a21d5107dfc2076",
+                "939bc95c191686ec685e1432ef6c7fe211cc71f7407149e5da880768d29aa7b4",
+                "c15389530ab9ebae582772b8ac66b67993cbe51bf565b319426aa226cdce248c",
+                "c3acd527857ff8d0e7b17d05c507e5464477e58a82e1b51140e5f4f9aadb6b04"
+              ]
+            }
+          },
+          "name": "part",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "22d5f9b1550b3172e7e773e129b0deba30805a07bb5ad94fd9fc6bc97491dae5",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_network_request",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "b94fffc919c7a6269db44dc55618b2f51370fcc42c23c52a1d57bccc660a326f",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "code",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_run_code_unsafe",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "e617291c0c464fb92436d434a02c017639554705a50c19f062cd29a6ea7d801a",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "enum": {
+              "count": 2,
+              "value_fingerprints_sha256": [
+                "6498cebf62e790c8f7375f135b916cc5087f126cf4ae0c4401749a41b65fd960",
+                "6e8a45b4224910a4ff6d68a52d1d3fd54320b19fd8b2e75af83a57587bcbfdb5"
+              ]
+            }
+          },
+          "name": "type",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "eee4b15218df0024259917de97d47ad41ea136a9744b8a05e86a54509018ccd4",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "fullPage",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_take_screenshot",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "556fc9a9902fd2141284241f2d13bbcd0b325d3e66c8ad1ac9d1874d72dc2fe7",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "filename",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "depth",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "boxes",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_snapshot",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "16f48106a4c2d24bcebc6a61cec7d7c06138297b694618e8540e9d513a6db041",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "doubleClick",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553",
+          "type": "boolean",
+          "unmodeled_schema_fingerprint_sha256": "7cb541e84f226754a46c21c79f131fa2898354e1242456e6fd1c162bce319553"
+        },
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "enum": {
+              "count": 3,
+              "value_fingerprints_sha256": [
+                "187e87df03ab04bf4b6b4a94666a8033fc292f0e31f2a8416a06275dd0f29e36",
+                "604dc80c5b39a9f879a3f5cf23eeb9d466a51a5114c839c3d8ec1bc68bd63282",
+                "6157fe4ca13ffd6bc0f6f9b2c22d24f59fd468886733d7bf389a2f73311e049b"
+              ]
+            }
+          },
+          "name": "button",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "01d1d4309f6dc0e9f07828eaa8c515b0d86f6ec195c9ec2ee9dbb840aa93bace",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "modifiers",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "24160586d065e331fb7822b5722c8013181f1fc39dbe977f78895993eb18a48a",
+          "type": "array",
+          "unmodeled_schema_fingerprint_sha256": "24160586d065e331fb7822b5722c8013181f1fc39dbe977f78895993eb18a48a"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_click",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "8423c6119ebb1b274f560e7629e7f3ea29946178efa74a28478cf97fa5d967cf",
+      "schema_review_required": true,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "startElement",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "startTarget",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "endElement",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "endTarget",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_drag",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "ebde705969ca57915e8c002443acf5d085e1aa73f9b3630bed1bb19f227f1a14",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_hover",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "6431e9ced1a665d169fc5a3552a312f569936267db8048345b6b4d186deea1c6",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "element",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "target",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "values",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9",
+          "type": "array",
+          "unmodeled_schema_fingerprint_sha256": "681004346c78d5f384b654c986b4eda8fea28010db3be7da70b19aa0080f3ff9"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_select_option",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "b5df1bf2e584ec92ce8ab001c477709e35b746d22f8d52b74b4f161a3171670f",
+      "schema_review_required": true,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "constraints": {
+            "enum": {
+              "count": 4,
+              "value_fingerprints_sha256": [
+                "80270e39ab5a8e50f949b1287e9432cef723e843964056ef04e1f185a4d3b301",
+                "8dac625925dff4ce3ce795479774c56113af2e44edb49e4dd648038826bc45e2",
+                "97959247360c5f0b8faf336aea5eba322af7be295958302fdb8a3fe8c6eb8ab8",
+                "dcb452a982945e5e2957930d83d36af5ceee19805ec0c3b30529ae8f44f6e49e"
+              ]
+            }
+          },
+          "name": "action",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": true,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "5925a37a2f0d033ac352644511010597fbc64b26cdbb9ce53199e085971f74c5",
+          "type": "enum",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "index",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387"
+        },
+        {
+          "confidence": "high",
+          "name": "url",
+          "policy": "trusted_fixed",
+          "reason": "authority-bearing name",
+          "required": false,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": true,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_tabs",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "911b39e2dbb2827543ed23ea9e2c4722a58f9be8c766ccab8fb28e61531fefbf",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    },
+    {
+      "annotation_assessments": [
+        {
+          "annotation": "readOnlyHint",
+          "comparison_source": "effective_risk",
+          "comparison_value": "unknown",
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        },
+        {
+          "annotation": "destructiveHint",
+          "comparison_source": "readOnlyHint",
+          "comparison_value": true,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "inapplicable",
+          "trust": "unverified_hint",
+          "value": false
+        },
+        {
+          "annotation": "openWorldHint",
+          "comparison_source": "none",
+          "comparison_value": null,
+          "evidence_source": "mcp_tool_annotation",
+          "state": "unresolved",
+          "trust": "unverified_hint",
+          "value": true
+        }
+      ],
+      "annotation_conflicts": [],
+      "arguments": [
+        {
+          "confidence": "uncertain",
+          "name": "time",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387",
+          "type": "number",
+          "unmodeled_schema_fingerprint_sha256": "cddf8275afa15408533079581ad27f95be579f4eeafbb1fba9fb6f32a4a64387"
+        },
+        {
+          "confidence": "high",
+          "name": "text",
+          "policy": "outbound_payload",
+          "reason": "outbound payload name or bounded free text",
+          "required": false,
+          "review_required": false,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        },
+        {
+          "confidence": "uncertain",
+          "name": "textGone",
+          "policy": "trusted_fixed",
+          "reason": "ambiguous consequential argument; review required",
+          "required": false,
+          "review_required": true,
+          "schema_material_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96",
+          "type": "string",
+          "unmodeled_schema_fingerprint_sha256": "00404e686415370f1711c4d7acfa2905444d3cf23cef2e10c47d445ebe690f96"
+        }
+      ],
+      "branch_risk": null,
+      "branch_risk_review_required": false,
+      "declared_risk": null,
+      "inferred_risk": "unknown",
+      "name": "browser_wait_for",
+      "needs_confirmation": true,
+      "risk": "unknown",
+      "risk_conflict": false,
+      "risk_evidence": null,
+      "risk_inference": {
+        "confidence": "uncertain",
+        "matched_tokens": [],
+        "mutability": "caller",
+        "source": "tool_name"
+      },
+      "risk_review_required": true,
+      "risk_source": "safe_default",
+      "schema_closes_unknown_arguments": true,
+      "schema_material_fingerprint_sha256": "fee9d69fb0d651ea87025529b845e67935076277d5c8845f90d1dc8ed584c4a4",
+      "schema_review_required": false,
+      "unmodeled_schema_fingerprint_sha256": "ccb5a9d66e068ea8f4e205788589675a48e9e3754a840d8ac10120d14238e914"
+    }
+  ]
+}

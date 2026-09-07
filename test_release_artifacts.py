@@ -2,6 +2,7 @@ import base64
 import hashlib
 from io import BytesIO
 import gzip
+import os
 from pathlib import Path
 import stat
 import struct
@@ -41,9 +42,22 @@ SCRIPTS = {
 }
 
 
+#: Global git settings that change what these helpers BUILD rather than how they
+#: run, so a throwaway repository must not inherit them. With ``tag.gpgsign``
+#: on, ``git tag <name> <commit>`` stops being a lightweight tag and becomes an
+#: annotated signed one, which needs a message and exits 128 with
+#: "no tag message?" -- so the suite fails for anyone who signs their tags, and
+#: the failure names git rather than the setting. ``commit.gpgsign`` is pinned
+#: for the same reason at ``_commit_test_project``.
+_ISOLATED_GIT_CONFIG = (
+    "-c", "tag.gpgsign=false",
+    "-c", "commit.gpgsign=false",
+)
+
+
 def _git(repository: Path, *arguments: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        ["git", "-C", str(repository), *_ISOLATED_GIT_CONFIG, *arguments],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -93,7 +107,26 @@ def _write_project(path: Path, *, version: str = PROJECT_VERSION) -> Path:
         ),
         encoding="utf-8",
     )
+    _normalize_source_modes(path)
     return project_path
+
+
+#: The sdist contract requires 0o644 on every regular member and 0o755 on every
+#: directory. Two separate things set those, and both follow the developer's
+#: umask, so both have to be pinned or the test measures the machine:
+#: setuptools COPIES the mode of a source file it packages, which is what this
+#: function fixes, and it CREATES its own generated members under the umask of
+#: the build process, which is what ``_release_contract_umask`` fixes.
+_SDIST_FILE_MODE = 0o644
+_SDIST_DIRECTORY_MODE = 0o755
+
+
+def _normalize_source_modes(root: Path) -> None:
+    for entry in root.rglob("*"):
+        if entry.is_symlink():
+            continue
+        entry.chmod(_SDIST_DIRECTORY_MODE if entry.is_dir() else _SDIST_FILE_MODE)
+    root.chmod(_SDIST_DIRECTORY_MODE)
 
 
 def _metadata(*, name: str = PROJECT_NAME, version: str = PROJECT_VERSION) -> str:
@@ -178,6 +211,7 @@ def _write_wheel(
     internal_dist_info_name: str | None = None,
     wheel_dist_info_name: str | None = None,
     include_wheel_metadata: bool = True,
+    additional_members: dict[str, bytes] | None = None,
 ) -> Path:
     wheel_path = dist / f"{ARTIFACT_NAME}-{filename_version}-{suffix}.whl"
     expected_dist_info_name = (
@@ -218,6 +252,9 @@ def _write_wheel(
     members[f"{metadata_dist_info_name}/top_level.txt"] = (
         "".join(f"{module}\n" for module in sorted(MODULES))
     ).encode("utf-8")
+    for member, payload in (additional_members or {}).items():
+        assert member not in members
+        members[member] = payload
     record_name = f"{metadata_dist_info_name}/RECORD"
     record_rows = []
     for member, payload in members.items():
@@ -525,6 +562,60 @@ def test_exactly_one_wheel_and_sdist_are_accepted(tmp_path):
     ) == (wheel, sdist)
 
 
+def test_documentation_data_files_are_verified_inside_the_wheel(tmp_path):
+    project_path = _write_project(tmp_path)
+    with project_path.open("a", encoding="utf-8") as project:
+        project.write(
+            '\n[tool.setuptools.data-files]\n'
+            '"share/doc/verb-authority" = ["LICENSE"]\n'
+        )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    data_member = (
+        f"{ARTIFACT_NAME}-{PROJECT_VERSION}.data/data/"
+        "share/doc/verb-authority/LICENSE"
+    )
+    license_payload = (tmp_path / "LICENSE").read_bytes()
+    wheel = _write_wheel(
+        dist,
+        additional_members={data_member: license_payload},
+    )
+    sdist = _write_sdist(dist)
+
+    assert verify_artifacts(project_path, dist) == (wheel, sdist)
+
+    _rewrite_wheel(
+        wheel,
+        changes={data_member: b"x" * len(license_payload)},
+        refresh_record=True,
+    )
+    with pytest.raises(VerificationError, match="wheel data payload"):
+        verify_artifacts(project_path, dist)
+
+
+def test_wheel_data_files_cannot_escape_the_documentation_root(tmp_path):
+    project_path = _write_project(tmp_path)
+    with project_path.open("a", encoding="utf-8") as project:
+        project.write(
+            '\n[tool.setuptools.data-files]\n'
+            '"bin" = ["LICENSE"]\n'
+        )
+
+    with pytest.raises(VerificationError, match="documentation root"):
+        release_verifier._project_release_config(project_path)
+
+
+#: The sdist contract in ``scripts/verify_release_artifacts.py`` requires mode
+#: 0o644 on every regular member and 0o755 on every directory. setuptools sets
+#: those from the umask of the process that builds them, on files it generates
+#: itself, so under the common ``umask 002`` the archive arrives 0o664 and
+#: 0o775 and this test fails on a tree nobody has touched. CI happens to run
+#: ``umask 022`` and never sees it. Set it for the build child only, so the
+#: test measures the build rather than the machine it ran on.
+def _release_contract_umask() -> None:
+    os.umask(0o022)
+
+
 def test_real_setuptools_build_uses_the_verified_archive_contract(tmp_path):
     build_available = subprocess.run(
         [sys.executable, "-I", "-m", "build", "--version"],
@@ -551,6 +642,7 @@ def test_real_setuptools_build_uses_the_verified_archive_contract(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        preexec_fn=_release_contract_umask,
     )
 
     wheel, sdist = verify_artifacts(project_path, dist)
@@ -1300,6 +1392,10 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
             "70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3",
             "v8.0.0",
         ),
+        "pypa/gh-action-pypi-publish": (
+            "dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+            "v1.14.2",
+        ),
     }
     observed = set()
     workflow_directory = repository / ".github/workflows"
@@ -1329,6 +1425,113 @@ def test_workflows_pin_every_remote_action_to_the_reviewed_commit():
                 assert "persist-credentials: false" in checkout_block
             observed.add(action)
     assert observed == set(expected)
+
+
+def test_package_index_publish_stages_candidates_outside_the_checkout():
+    repository = Path(__file__).resolve().parent
+    text = (
+        repository / ".github/workflows/publish-to-pypi.yml"
+    ).read_text(encoding="utf-8")
+    build = text.split("\n  build:\n", 1)[1].split(
+        "\n  publish_testpypi:\n", 1
+    )[0]
+    build_header = build.split("\n    steps:\n", 1)[0]
+
+    assert "runner.temp" not in build_header
+    assert (
+        build.count(
+            "RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets"
+        )
+        == 4
+    )
+    assert build.count("PYPI_DIST_DIR: ${{ runner.temp }}/pypi-dist") == 1
+    assert 'mkdir -- "$RELEASE_ASSETS_DIR"' in build
+    assert '--dir "$RELEASE_ASSETS_DIR"' in build
+    assert 'entries=("$RELEASE_ASSETS_DIR"/*)' in build
+    assert 'wheels=("$RELEASE_ASSETS_DIR"/*.whl)' in build
+    assert 'sdists=("$RELEASE_ASSETS_DIR"/*.tar.gz)' in build
+    assert '"$RELEASE_ASSETS_DIR/SHA256SUMS"' in build
+    assert 'mkdir -- "$PYPI_DIST_DIR"' in build
+    assert 'staged_wheels=("$PYPI_DIST_DIR"/*.whl)' in build
+    assert 'staged_sdists=("$PYPI_DIST_DIR"/*.tar.gz)' in build
+    assert "path: ${{ runner.temp }}/pypi-dist/" in build
+    assert '--repository "${{ github.workspace }}"' in build
+
+    for checkout_relative_path in (
+        "mkdir release-assets",
+        "--dir release-assets",
+        "entries=(release-assets/*)",
+        "wheels=(release-assets/*.whl)",
+        "sdists=(release-assets/*.tar.gz)",
+        "release-assets/SHA256SUMS",
+        "mkdir pypi-dist",
+        "staged_wheels=(pypi-dist/*.whl)",
+        "staged_sdists=(pypi-dist/*.tar.gz)",
+        "path: pypi-dist/",
+    ):
+        assert checkout_relative_path not in build
+
+
+def test_dev_extra_installs_the_local_build_backend():
+    repository = Path(__file__).resolve().parent
+    config = release_verifier._project_release_config(
+        repository / "pyproject.toml"
+    )
+
+    assert config.dependencies == ()
+    assert "setuptools>=77" in config.optional_dependencies["dev"]
+
+
+def test_optional_pydantic_adapter_keeps_the_base_install_dependency_free():
+    repository = Path(__file__).resolve().parent
+    config = release_verifier._project_release_config(
+        repository / "pyproject.toml"
+    )
+    assert config.version == "0.10.0b14"
+    assert config.dependencies == ()
+    assert config.optional_dependencies["pydantic"] == (
+        "pydantic-ai-slim==2.35.0",
+        "pydantic==2.13.4",
+    )
+    assert "verb_authority_pydantic" in config.modules
+    assert "share/doc/verb-authority/README.md" in config.wheel_data_payloads
+    assert (
+        "share/doc/verb-authority/docs/runtime-gate.md"
+        in config.wheel_data_payloads
+    )
+    assert (
+        "share/doc/verb-authority/docs/assets/social-preview.jpg"
+        in config.wheel_data_payloads
+    )
+    assert (
+        "scripts/installed_pydantic_smoke.py"
+        in config.sdist_source_payloads
+    )
+    assert "pydantic_ai_demo.py" in config.sdist_source_payloads
+    assert not any(
+        member.startswith("fixtures/external/")
+        for member in config.sdist_source_payloads
+    )
+
+    ci = (repository / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
+    release = (repository / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'run: python -m pip install "setuptools>=77" ".[dev]"' in ci
+    assert 'run: python -m pip install "setuptools>=77" ".[dev,pydantic]"' in ci
+    assert "python -m pytest -v test_pydantic_ai_integration.py" in ci
+    for workflow, base_smoke_step in (
+        (ci, "Smoke-test installed commands"),
+        (release, "Exercise installed commands outside the checkout"),
+    ):
+        assert "scripts/installed_pydantic_smoke.py" in workflow
+        assert '"${wheels[0]}[pydantic]"' in workflow
+        assert "python -I installed_pydantic_smoke.py" in workflow
+        assert workflow.index(base_smoke_step) < workflow.index(
+            "Install and smoke-test the optional Pydantic AI adapter"
+        )
 
 
 def test_release_candidate_is_reverified_on_a_fresh_read_only_runner():

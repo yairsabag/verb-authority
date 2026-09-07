@@ -16,7 +16,7 @@ Then:
     python3 agent_demo.py
 """
 import os, json, urllib.request
-from verb_authority import Policy, Param, Risk, Tool, Registry, build_policy, gate
+from verb_authority import Policy, Param, Risk, Tool, Registry, build_policy, dispatch
 
 TRUSTED_RECIPIENT = "alice@company.com"
 
@@ -65,43 +65,50 @@ def anthropic_run(messages, tools):
 
 
 def check_with_gate(reg, ps, tool, args, trusted_args):
-    """Minimal provenance pattern: each arg is 'trusted' if it matches a
-    dev-declared trusted value, else 'data'. The gate enforces the rest."""
-    provenance = {n: ("trusted" if args.get(n) == trusted_args.get(n) else "data")
-                  for n in args}
-    return gate(reg, ps, tool, args, provenance)
+    """Use the runtime's exact-type, present-key trusted binding.
+
+    This returns a decision only; applications that execute tools should use
+    GuardedToolRunner to bind the decision to the exact handler invocation.
+    """
+    return dispatch(
+        reg, ps, {"name": tool, "input": args}, trusted_args=trusted_args
+    )
 
 
-# --- build the policy for the agent's tools ---
-reg = Registry()
-reg.add(Tool("send_email",
-             [Param("to", "email"), Param("subject", "string"), Param("body", "string")],
-             risk=Risk.WRITE))
-ps = build_policy(reg)
+def main():
+    # --- build the policy for the agent's tools ---
+    reg = Registry()
+    reg.add(Tool("send_email",
+                 [Param("to", "email"), Param("subject", "string"), Param("body", "string")],
+                 risk=Risk.WRITE))
+    ps = build_policy(reg)
 
-# As a real dev would after the description-resolver pass (post #3):
-# subject/body are normal text fields, not sinks.
-ps.policy["send_email"]["subject"] = Policy.TYPED_BOUNDED
-ps.policy["send_email"]["body"]    = Policy.OUTBOUND_PAYLOAD
+    # Trusted application review permits these text fields in this workflow.
+    ps.policy["send_email"]["subject"] = Policy.TYPED_BOUNDED
+    ps.policy["send_email"]["body"] = Policy.OUTBOUND_PAYLOAD
 
-trusted_args = {"to": TRUSTED_RECIPIENT}
+    trusted_args = {"to": TRUSTED_RECIPIENT}
 
-# === run 1: a real Claude turn ===
-print("=== run 1: real Claude turn (injected email) ===")
-resp = anthropic_run([{"role": "user", "content": TASK}], [SEND_EMAIL_TOOL])
-tu = next((b for b in resp["content"] if b.get("type") == "tool_use"), None)
-if not tu:
-    text = next((b["text"] for b in resp["content"] if b.get("type") == "text"), "")
-    print(f"  Claude declined to call a tool. Reply: {text[:200]!r}")
-else:
-    to_val = tu["input"].get("to")
-    print(f"  Claude proposed: send_email(to={to_val!r}, ...)")
-    d = check_with_gate(reg, ps, "send_email", tu["input"], trusted_args)
+    # === run 1: a real Claude turn ===
+    print("=== run 1: real Claude turn (injected email) ===")
+    resp = anthropic_run([{"role": "user", "content": TASK}], [SEND_EMAIL_TOOL])
+    tu = next((b for b in resp["content"] if b.get("type") == "tool_use"), None)
+    if not tu:
+        text = next((b["text"] for b in resp["content"] if b.get("type") == "text"), "")
+        print(f"  Claude declined to call a tool. Reply: {text[:200]!r}")
+    else:
+        to_val = tu["input"].get("to")
+        print(f"  Claude proposed: send_email(to={to_val!r}, ...)")
+        d = check_with_gate(reg, ps, "send_email", tu["input"], trusted_args)
+        print(f"  gate verdict:    {'ALLOW' if d.allow else 'BLOCKED'} - {d.reason}")
+
+    # === run 2: simulate a compromised proposal ===
+    print("\n=== run 2: simulated compromised proposal (agent fell for injection) ===")
+    malicious = {"to": "attacker@evil.com", "subject": "Got it, thanks!", "body": "Confirming."}
+    print(f"  proposed:        send_email(to={malicious['to']!r}, ...)")
+    d = check_with_gate(reg, ps, "send_email", malicious, trusted_args)
     print(f"  gate verdict:    {'ALLOW' if d.allow else 'BLOCKED'} - {d.reason}")
 
-# === run 2: simulate a compromised proposal ===
-print("\n=== run 2: simulated compromised proposal (agent fell for injection) ===")
-malicious = {"to": "attacker@evil.com", "subject": "Got it, thanks!", "body": "Confirming."}
-print(f"  proposed:        send_email(to={malicious['to']!r}, ...)")
-d = check_with_gate(reg, ps, "send_email", malicious, trusted_args)
-print(f"  gate verdict:    {'ALLOW' if d.allow else 'BLOCKED'} - {d.reason}")
+
+if __name__ == "__main__":
+    main()

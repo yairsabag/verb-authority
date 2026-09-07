@@ -1,6 +1,10 @@
+import copy
+import hashlib
 import io
 import json
-from pathlib import Path
+import os
+from decimal import Decimal
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -41,7 +45,7 @@ def _constraint_schema(maximum, max_length, enum):
     }
 
 
-def test_report_v3_preserves_constraints_without_disclosing_enum_members():
+def test_report_v6_preserves_constraints_without_disclosing_enum_members():
     document = _constraint_schema(100, 40, ["safe", "reviewed"])
 
     report = scan_documents([document])
@@ -49,8 +53,8 @@ def test_report_v3_preserves_constraints_without_disclosing_enum_members():
         argument["name"]: argument for argument in report["tools"][0]["arguments"]
     }
 
-    assert REPORT_VERSION == 3
-    assert report["report_version"] == 3
+    assert REPORT_VERSION == 6
+    assert report["report_version"] == 6
     assert arguments["amount"]["constraints"] == {"maximum": 100}
     assert arguments["message"]["constraints"] == {"max_length": 40}
     enum = arguments["mode"]["constraints"]["enum"]
@@ -81,6 +85,70 @@ def test_report_v3_preserves_constraints_without_disclosing_enum_members():
     assert "maximum: 100" in markdown
     assert "max length: 40" in markdown
     assert "enum: 2 fingerprinted member(s)" in markdown
+
+
+def test_report_v6_emits_actionable_remediation_only_for_protected_arguments():
+    document = {
+        "tools": [
+            {
+                "name": "send_email",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "body": {"type": "string", "maxLength": 2000},
+                    },
+                    "required": ["to", "body"],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+    report = scan_documents([document])
+    arguments = {
+        argument["name"]: argument
+        for argument in report["tools"][0]["arguments"]
+    }
+    recipient = arguments["to"]
+    assert recipient["policy"] == "trusted_fixed"
+    assert recipient["review_required"] is False
+    assert recipient["remediation_status"] == "recommended"
+    assert recipient["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert recipient["fallback_remediation"] == (
+        "bind_trusted_value_at_runtime"
+    )
+    assert recipient["remediation_review_reason"] is None
+
+    remediation_fields = {
+        "remediation_status",
+        "preferred_remediation",
+        "fallback_remediation",
+        "remediation_review_reason",
+    }
+    assert arguments["body"]["policy"] == "outbound_payload"
+    assert not remediation_fields.intersection(arguments["body"])
+
+    markdown = render_markdown(report)
+    assert "## Remediation guidance" in markdown
+    assert "remove_from_model_schema_and_inject_from_application" in markdown
+    assert "bind_trusted_value_at_runtime" in markdown
+    assert "the report does not change a model schema" in markdown
+
+    redacted = scan_documents([document], redact_names=True)
+    redacted_protected = next(
+        argument
+        for argument in redacted["tools"][0]["arguments"]
+        if argument["policy"] == "trusted_fixed"
+    )
+    assert redacted_protected["name"] == "param_001"
+    assert redacted_protected["remediation_status"] == "recommended"
+    assert redacted_protected["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert "send_email" not in json.dumps(redacted, sort_keys=True)
 
 
 def test_direct_float_and_equivalent_json_decimal_share_fingerprints(tmp_path):
@@ -517,6 +585,119 @@ def test_malformed_report_container_cannot_fall_through_to_direct_tool_scan():
 
     with pytest.raises(SchemaError, match="report-shaped"):
         parse_tool_definitions(malformed)
+
+
+def test_annotation_assessments_mark_report_tool_instead_of_raw_schema():
+    report_shaped = {
+        "tools": [
+            {
+                "name": "operate",
+                "annotation_assessments": [],
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(SchemaError, match="report-shaped"):
+        scan_documents([report_shaped])
+
+
+def _wrap_collection_entry(envelope, tool):
+    if envelope == "direct-list":
+        return [tool]
+    if envelope == "tools":
+        return {"tools": [tool]}
+    if envelope == "result.tools":
+        return {"result": {"tools": [tool]}}
+    if envelope == "sources.tools":
+        return {"sources": [{"id": "source", "tools": [tool]}]}
+    raise AssertionError(f"unknown collection envelope: {envelope}")
+
+
+@pytest.mark.parametrize(
+    ("header", "value"),
+    (
+        ("generator", "verb-authority"),
+        ("report_version", 3),
+        ("privacy", {}),
+        ("schema_fingerprint_sha256", "0" * 64),
+        ("summary", {}),
+        ("declared_controls", {}),
+        ("control_declaration_fingerprint_sha256", "0" * 64),
+    ),
+)
+@pytest.mark.parametrize(
+    "envelope",
+    ("direct-list", "tools", "result.tools", "sources.tools"),
+)
+def test_report_header_sentinel_on_collection_entry_never_becomes_raw_schema(
+    envelope, header, value
+):
+    hybrid = _collision_mcp_tool("operate")
+    hybrid[header] = value
+    document = _wrap_collection_entry(envelope, hybrid)
+
+    with pytest.raises(SchemaError, match="report-shaped"):
+        parse_tool_definitions(document)
+
+
+@pytest.mark.parametrize(
+    ("sentinel", "value"),
+    (("review_required", True), ("review_sources", {})),
+)
+@pytest.mark.parametrize(
+    "envelope",
+    ("direct-list", "tools", "result.tools", "sources.tools"),
+)
+def test_v5_tool_review_sentinels_never_become_raw_schema(
+    envelope, sentinel, value
+):
+    hybrid = _collision_mcp_tool("operate")
+    hybrid[sentinel] = value
+
+    with pytest.raises(SchemaError, match="report-shaped"):
+        parse_tool_definitions(_wrap_collection_entry(envelope, hybrid))
+
+
+def test_v5_review_names_inside_input_schema_remain_ordinary_arguments():
+    document = {
+        "tools": [
+            {
+                "name": "record_review",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "review_required": {"type": "boolean"},
+                        "review_sources": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+    definitions = parse_tool_definitions(document)
+
+    assert [definition.name for definition in definitions] == ["record_review"]
+    assert set(definitions[0].input_schema["properties"]) == {
+        "review_required",
+        "review_sources",
+    }
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    ("direct-list", "tools", "result.tools", "sources.tools"),
+)
+def test_ordinary_raw_tool_in_each_collection_envelope_remains_accepted(envelope):
+    document = _wrap_collection_entry(envelope, _collision_mcp_tool("operate"))
+
+    definitions = parse_tool_definitions(document)
+
+    assert [definition.name for definition in definitions] == ["operate"]
 
 
 def test_scanner_shares_and_caches_identifier_nfkc_work(monkeypatch):
@@ -1117,11 +1298,13 @@ def test_scans_mcp_tools_list_result():
         "protected_parameters": 1,
         "data_fillable_parameters": 1,
         "review_required": 0,
+        "review_required_tools": 1,
         "schema_review_required_tools": 0,
         "confirmation_required_tools": 1,
         "risk_review_required_tools": 1,
         "risk_conflicts": 0,
         "annotation_conflicts": 0,
+        "branch_risk_review_required_tools": 0,
     }
     assert report["tools"][0]["risk"] == "unknown"
     assert report["tools"][0]["inferred_risk"] == "write"
@@ -1176,7 +1359,20 @@ def test_scans_openai_and_anthropic_exports_together():
 )
 def test_avp9_bid_name_mutations_are_only_advisory_until_declared(name):
     report = scan_documents(
-        [{"tools": [{"name": name, "inputSchema": {"properties": {}}}]}]
+        [
+            {
+                "tools": [
+                    {
+                        "name": name,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
     )
     tool = report["tools"][0]
 
@@ -1203,7 +1399,20 @@ def test_avp9_evaluation_names_do_not_trigger_code_exec_substrings(name):
 
 def test_avp9_eval_complete_token_is_advisory_code_exec_evidence():
     tool = scan_documents(
-        [{"tools": [{"name": "eval", "inputSchema": {"properties": {}}}]}]
+        [
+            {
+                "tools": [
+                    {
+                        "name": "eval",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
     )["tools"][0]
 
     assert tool["inferred_risk"] == "code_exec"
@@ -1212,6 +1421,15 @@ def test_avp9_eval_complete_token_is_advisory_code_exec_evidence():
     assert tool["risk_source"] == "safe_default"
     assert tool["risk_review_required"] is True
     assert tool["needs_confirmation"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"] == {
+        "arguments": [],
+        "schema": False,
+        "risk": True,
+        "risk_conflict": False,
+        "annotation_conflicts": [],
+        "branch_risk": False,
+    }
 
 
 def test_descriptions_and_parameter_names_do_not_author_risk():
@@ -1242,9 +1460,15 @@ def test_descriptions_and_parameter_names_do_not_author_risk():
 def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
     document = {
         "tools": [
-            {"name": "place_bid", "inputSchema": {"properties": {}}},
-            {"name": "evaluate", "inputSchema": {"properties": {}}},
-            {"name": "chain_index", "inputSchema": {"properties": {}}},
+            {
+                "name": name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+            for name in ("place_bid", "evaluate", "chain_index")
         ]
     }
     controls = {
@@ -1284,7 +1508,934 @@ def test_declared_effects_resolve_bid_evaluation_and_read_only_scanner():
     assert tools["chain_index"]["risk"] == "read_only"
     assert tools["chain_index"]["needs_confirmation"] is False
     assert all(not tool["risk_review_required"] for tool in tools.values())
+    assert all(not tool["review_required"] for tool in tools.values())
+    assert all(
+        tool["review_sources"]
+        == {
+            "arguments": [],
+            "schema": False,
+            "risk": False,
+            "risk_conflict": False,
+            "annotation_conflicts": [],
+            "branch_risk": False,
+        }
+        for tool in tools.values()
+    )
+    # Runtime confirmation is an execution control, not static review debt.
+    assert tools["place_bid"]["needs_confirmation"] is True
+    assert tools["place_bid"]["review_required"] is False
     assert report["summary"]["risk_review_required_tools"] == 0
+    assert report["summary"]["review_required_tools"] == 0
+
+
+def test_synthetic_browser_tabs_locks_operation_selector_and_unbounded_index():
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": True,
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "new", "close", "select"],
+                            "description": "Operation to perform",
+                        },
+                        "index": {"type": "number"},
+                        "url": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes browser tab state"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+    assessment_states = {
+        assessment["annotation"]: assessment["state"]
+        for assessment in tool["annotation_assessments"]
+    }
+
+    assert report["report_version"] == 6
+    assert tool["review_required"] is True
+    assert tool["review_sources"] == {
+        "arguments": ["action", "index"],
+        "schema": False,
+        "risk": False,
+        "risk_conflict": False,
+        "annotation_conflicts": [],
+        "branch_risk": True,
+    }
+    assert report["summary"]["review_required_tools"] == 1
+    for name in ("action", "index"):
+        assert arguments[name]["policy"] == "trusted_fixed"
+        assert arguments[name]["confidence"] == "uncertain"
+        assert arguments[name]["review_required"] is True
+        assert arguments[name]["remediation_status"] == "review_required"
+        assert arguments[name]["preferred_remediation"] is None
+        assert arguments[name]["fallback_remediation"] is None
+    assert arguments["action"]["remediation_review_reason"] == (
+        "selector_semantics_require_review"
+    )
+    assert arguments["index"]["remediation_review_reason"] == (
+        "authority_inference_requires_review"
+    )
+    assert arguments["url"]["policy"] == "trusted_fixed"
+    assert arguments["url"]["confidence"] == "high"
+    assert arguments["url"]["review_required"] is False
+    assert arguments["url"]["remediation_status"] == "recommended"
+    assert arguments["url"]["preferred_remediation"] == (
+        "remove_from_model_schema_and_inject_from_application"
+    )
+    assert arguments["url"]["fallback_remediation"] == (
+        "bind_trusted_value_at_runtime"
+    )
+    assert arguments["url"]["remediation_review_reason"] is None
+    markdown = render_markdown(report)
+    assert (
+        "| browser_tabs | action | review_required | — | — | "
+        "selector_semantics_require_review |"
+    ) in markdown
+    assert (
+        "| browser_tabs | index | review_required | — | — | "
+        "authority_inference_requires_review |"
+    ) in markdown
+
+    redacted = scan_documents(
+        [document],
+        control_declarations=controls,
+        redact_names=True,
+    )
+    redacted_selector = redacted["tools"][0]["arguments"][0]
+    assert redacted_selector["name"] == "param_001"
+    assert redacted_selector["remediation_status"] == "review_required"
+    assert redacted_selector["preferred_remediation"] is None
+    assert redacted_selector["fallback_remediation"] is None
+    assert redacted_selector["remediation_review_reason"] == (
+        "selector_semantics_require_review"
+    )
+    serialized_redacted = json.dumps(redacted, sort_keys=True)
+    assert "browser_tabs" not in serialized_redacted
+    assert '"action"' not in serialized_redacted
+
+    assert tool["risk"] == "write"
+    assert tool["needs_confirmation"] is False
+    assert tool["branch_risk"] is None
+    assert tool["branch_risk_review_required"] is True
+    assert report["summary"]["branch_risk_review_required_tools"] == 1
+    assert assessment_states == {
+        "readOnlyHint": "consistent",
+        "destructiveHint": "consistent",
+        "idempotentHint": "unresolved",
+        "openWorldHint": "unresolved",
+    }
+    assert tool["annotation_conflicts"] == []
+
+
+def _browser_tabs_branch_controls():
+    return {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": "list",
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_tabs"],
+                            },
+                            "arguments": ["action"],
+                        },
+                        {
+                            "value": "new",
+                            "risk": {
+                                "tier": "write",
+                                "evidence": "observed",
+                                "effects": ["opens_tab"],
+                            },
+                            "arguments": ["url", "action"],
+                        },
+                        {
+                            "value": "close",
+                            "risk": {
+                                "tier": "destructive",
+                                "evidence": "observed",
+                                "effects": ["destroys_tab"],
+                            },
+                            "arguments": ["index", "action"],
+                        },
+                        {
+                            "value": "select",
+                            "risk": {
+                                "tier": "write",
+                                "evidence": "observed",
+                                "effects": ["selects_tab"],
+                            },
+                            "arguments": ["action", "index"],
+                        },
+                    ],
+                }
+            }
+        },
+    }
+
+
+def _browser_tabs_branch_document():
+    return {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "new", "close", "select"],
+                            "description": "Operation to perform",
+                        },
+                        "index": {"type": "number"},
+                        "url": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+
+
+def test_declared_browser_tab_branches_report_exact_risk_without_values():
+    report = scan_documents(
+        [_browser_tabs_branch_document()],
+        control_declarations=_browser_tabs_branch_controls(),
+    )
+    tool = report["tools"][0]
+    branch = tool["branch_risk"]
+    action = next(
+        argument for argument in tool["arguments"] if argument["name"] == "action"
+    )
+
+    assert tool["risk"] == "destructive"
+    assert tool["risk_source"] == "branch_control_declaration"
+    assert tool["risk_evidence"] is None
+    assert tool["risk_review_required"] is False
+    assert tool["needs_confirmation"] is True
+    assert tool["branch_risk_review_required"] is False
+    assert branch["selector"] == "action"
+    assert branch["value_disclosure"] == "sha256_fingerprint_only"
+    assert len(branch["cases"]) == 4
+    assert [
+        case["value_fingerprint_sha256"] for case in branch["cases"]
+    ] == sorted(case["value_fingerprint_sha256"] for case in branch["cases"])
+    assert sum(case["risk"] == "destructive" for case in branch["cases"]) == 1
+    assert sum(case["needs_confirmation"] for case in branch["cases"]) == 1
+    assert all(
+        case["evidence"] == "observed" and case["active_arguments"]
+        for case in branch["cases"]
+    )
+    # Branch evidence does not silently authorize data to select the branch.
+    assert action["policy"] == "trusted_fixed"
+    assert action["confidence"] == "uncertain"
+    assert action["review_required"] is True
+    assert report["summary"]["branch_risk_review_required_tools"] == 0
+    assert report["summary"]["confirmation_required_tools"] == 1
+    assert tool["annotation_conflicts"] == [
+        "destructiveHint=false conflicts with effective risk"
+    ]
+    serialized = json.dumps(report, sort_keys=True)
+    for raw_value in ('"list"', '"new"', '"close"', '"select"'):
+        assert raw_value not in serialized
+    assert "## Declared branch risk" in render_markdown(report)
+
+
+def test_all_read_only_branches_do_not_relax_argument_provenance():
+    controls = _browser_tabs_branch_controls()
+    for case in controls["tools"]["browser_tabs"]["branches"]["cases"]:
+        case["risk"]["tier"] = "read_only"
+    report = scan_documents(
+        [_browser_tabs_branch_document()],
+        control_declarations=controls,
+    )
+    tool = report["tools"][0]
+    arguments = {
+        argument["name"]: argument for argument in tool["arguments"]
+    }
+
+    assert tool["risk"] == "read_only"
+    assert tool["needs_confirmation"] is False
+    for name in ("action", "index"):
+        assert arguments[name]["policy"] == "trusted_fixed"
+        assert arguments[name]["confidence"] == "uncertain"
+        assert arguments[name]["review_required"] is True
+        assert arguments[name]["reason"] == (
+            "ambiguous consequential argument; review required"
+        )
+
+
+def test_redacted_branch_report_redacts_selector_and_active_argument_names():
+    report = scan_documents(
+        [_browser_tabs_branch_document()],
+        control_declarations=_browser_tabs_branch_controls(),
+        redact_names=True,
+    )
+    tool = report["tools"][0]
+    branch = tool["branch_risk"]
+
+    assert tool["name"] == "tool_001"
+    assert tool["review_sources"]["arguments"] == [
+        "param_001",
+        "param_002",
+    ]
+    assert branch["selector"] == "param_001"
+    assert all(
+        set(case["active_arguments"]) <= {"param_001", "param_002", "param_003"}
+        for case in branch["cases"]
+    )
+    assert report["privacy"]["branch_value_fingerprints_included"] is True
+    assert (
+        report["privacy"]["branch_value_fingerprints_dictionary_guessable"]
+        is True
+    )
+    serialized = json.dumps(report, sort_keys=True)
+    for secret in ("browser_tabs", "action", "index", "url"):
+        assert secret not in serialized
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda controls: controls["tools"]["browser_tabs"].update(
+                {
+                    "risk": {
+                        "tier": "write",
+                        "evidence": "observed",
+                        "effects": ["writes_state"],
+                    }
+                }
+            ),
+            "cannot combine tool risk with branch risk",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"].update(
+                {"selector": "missing"}
+            ),
+            "must name an exposed schema argument",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ].pop(),
+            "must exhaust the selector enum",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ].__setitem__(
+                1,
+                copy.deepcopy(
+                    controls["tools"]["browser_tabs"]["branches"]["cases"][0]
+                ),
+            ),
+            "duplicate exact branch case",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ][0].update({"arguments": ["index"]}),
+            "must include selector",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ][0].update({"arguments": ["action", "action"]}),
+            "duplicate active argument",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ][0].update({"arguments": ["action", "missing"]}),
+            "must name an exposed schema argument",
+        ),
+        (
+            lambda controls: controls["tools"]["browser_tabs"]["branches"][
+                "cases"
+            ][0].update({"unexpected": True}),
+            "unknown field",
+        ),
+    ],
+)
+def test_branch_control_declarations_fail_closed(mutate, message):
+    controls = _browser_tabs_branch_controls()
+    mutate(controls)
+
+    with pytest.raises(SchemaError, match=message):
+        scan_documents(
+            [_browser_tabs_branch_document()], control_declarations=controls
+        )
+
+
+def test_branch_selector_requires_scalar_enum_members():
+    document = _browser_tabs_branch_document()
+    document["tools"][0]["inputSchema"]["properties"]["action"]["enum"][0] = {
+        "operation": "list"
+    }
+    controls = _browser_tabs_branch_controls()
+    controls["tools"]["browser_tabs"]["branches"]["cases"][0]["value"] = {
+        "operation": "list"
+    }
+
+    with pytest.raises(SchemaError, match="must be an exact JSON scalar"):
+        scan_documents([document], control_declarations=controls)
+
+
+def test_branch_selector_distinguishes_positive_and_negative_zero():
+    document = {
+        "tools": [
+            {
+                "name": "choose_mode",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "number", "enum": [0.0]}
+                    },
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "choose_mode": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": -0.0,
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_state"],
+                            },
+                            "arguments": ["action"],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    with pytest.raises(SchemaError, match="match exactly one selector enum"):
+        scan_documents([document], control_declarations=controls)
+
+
+def test_branch_selector_losslessly_normalizes_exact_decimal_members():
+    document = {
+        "tools": [
+            {
+                "name": "choose_mode",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "number",
+                            "enum": [Decimal("0.1"), Decimal("1.5")],
+                        }
+                    },
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "choose_mode": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": Decimal("0.1"),
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_state"],
+                            },
+                            "arguments": ["action"],
+                        },
+                        {
+                            "value": Decimal("1.5"),
+                            "risk": {
+                                "tier": "destructive",
+                                "evidence": "observed",
+                                "effects": ["destroys_state"],
+                            },
+                            "arguments": ["action"],
+                        },
+                    ],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+
+    assert report["tools"][0]["risk"] == "destructive"
+    assert len(report["tools"][0]["branch_risk"]["cases"]) == 2
+
+
+def test_branch_selector_rejects_decimal_that_float_cannot_preserve():
+    value = Decimal("0.1000000000000000000001")
+    document = {
+        "tools": [
+            {
+                "name": "choose_mode",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "number", "enum": [value]}
+                    },
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "choose_mode": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": value,
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_state"],
+                            },
+                            "arguments": ["action"],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    with pytest.raises(SchemaError, match="exact portable runtime selector"):
+        scan_documents([document], control_declarations=controls)
+
+
+def test_branch_selector_rejects_integer_beyond_runtime_portable_bound():
+    value = 10 ** verb_authority.MAX_JSON_INTEGER_DIGITS
+    document = {
+        "tools": [
+            {
+                "name": "choose_mode",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "integer", "enum": [value]}
+                    },
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "choose_mode": {
+                "branches": {
+                    "selector": "action",
+                    "cases": [
+                        {
+                            "value": value,
+                            "risk": {
+                                "tier": "read_only",
+                                "evidence": "observed",
+                                "effects": ["reads_state"],
+                            },
+                            "arguments": ["action"],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+    with pytest.raises(SchemaError, match="portable runtime integer limit"):
+        scan_documents([document], control_declarations=controls)
+
+
+@pytest.mark.parametrize("selector", ("tabAction", "tab_action", "tabaction"))
+def test_branch_review_recognizes_camel_and_flat_selector_names(selector):
+    document = {
+        "tools": [
+            {
+                "name": "operate_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        selector: {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        }
+                    },
+                },
+            }
+        ]
+    }
+
+    report = scan_documents([document])
+
+    assert report["tools"][0]["branch_risk_review_required"] is True
+    assert report["summary"]["branch_risk_review_required_tools"] == 1
+
+
+@pytest.mark.parametrize("raw_sink_hint", (False, True))
+def test_raw_schema_sink_hint_cannot_act_as_verified_authority_control(
+    raw_sink_hint,
+):
+    def browser_tabs_document(include_hint):
+        action = {
+            "type": "string",
+            "enum": ["list", "new", "close", "select"],
+        }
+        index = {"type": "number"}
+        if include_hint:
+            action["x-verb-authority-sink"] = raw_sink_hint
+            index["x-verb-authority-sink"] = raw_sink_hint
+        return {
+            "tools": [
+                {
+                    "name": "browser_tabs",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"action": action, "index": index},
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+        }
+
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes browser tab state"],
+                }
+            }
+        },
+    }
+    report = scan_documents(
+        [browser_tabs_document(True)], control_declarations=controls
+    )
+    baseline = scan_documents(
+        [browser_tabs_document(False)], control_declarations=controls
+    )
+    arguments = {
+        argument["name"]: argument for argument in report["tools"][0]["arguments"]
+    }
+    baseline_arguments = {
+        argument["name"]: argument
+        for argument in baseline["tools"][0]["arguments"]
+    }
+
+    for name in ("action", "index"):
+        assert arguments[name]["policy"] == "trusted_fixed"
+        assert arguments[name]["confidence"] == "uncertain"
+        assert arguments[name]["review_required"] is True
+        assert arguments[name]["reason"] == (
+            "ambiguous consequential argument; review required"
+        )
+        assert arguments[name]["schema_material_fingerprint_sha256"] != (
+            baseline_arguments[name]["schema_material_fingerprint_sha256"]
+        )
+        assert arguments[name]["unmodeled_schema_fingerprint_sha256"] != (
+            baseline_arguments[name]["unmodeled_schema_fingerprint_sha256"]
+        )
+
+
+def test_raw_max_length_cannot_unlock_ambiguous_authority_string():
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "maxLength": 201}
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes browser tab state"],
+                }
+            }
+        },
+    }
+
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    action = tool["arguments"][0]
+
+    assert action["policy"] == "trusted_fixed"
+    assert action["confidence"] == "uncertain"
+    assert action["review_required"] is True
+    assert action["constraints"] == {"max_length": 201}
+    assert tool["needs_confirmation"] is False
+    assert report["summary"]["review_required"] == 1
+
+
+def test_unknown_risk_keeps_mcp_annotations_unresolved_not_conflicting():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "operate",
+                        "annotations": {
+                            "readOnlyHint": False,
+                            "destructiveHint": True,
+                            "idempotentHint": True,
+                            "openWorldHint": False,
+                        },
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    )
+    tool = report["tools"][0]
+    assessments = {
+        assessment["annotation"]: assessment
+        for assessment in tool["annotation_assessments"]
+    }
+
+    assert tool["risk"] == "unknown"
+    assert tool["annotation_conflicts"] == []
+    assert report["summary"]["annotation_conflicts"] == 0
+    assert tool["review_sources"]["annotation_conflicts"] == []
+    assert {name: assessment["state"] for name, assessment in assessments.items()} == {
+        "readOnlyHint": "unresolved",
+        "destructiveHint": "unresolved",
+        "idempotentHint": "unresolved",
+        "openWorldHint": "unresolved",
+    }
+    assert assessments["readOnlyHint"]["comparison_source"] == "effective_risk"
+    assert assessments["readOnlyHint"]["comparison_value"] == "unknown"
+    assert assessments["destructiveHint"]["comparison_source"] == "effective_risk"
+    assert assessments["destructiveHint"]["comparison_value"] == "unknown"
+    assert assessments["idempotentHint"]["comparison_source"] == "none"
+    assert assessments["idempotentHint"]["comparison_value"] is None
+    assert all(
+        assessment["evidence_source"] == "mcp_tool_annotation"
+        and assessment["trust"] == "unverified_hint"
+        for assessment in assessments.values()
+    )
+
+    markdown = render_markdown(report)
+    assert "## MCP annotation evidence" in markdown
+    assert (
+        "| operate | destructiveHint | true | unresolved | effective_risk | "
+        "unknown |"
+    ) in markdown
+
+
+def test_read_only_hint_makes_effect_hints_inapplicable_even_when_risk_unknown():
+    tool = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "operate",
+                        "annotations": {
+                            "readOnlyHint": True,
+                            "destructiveHint": True,
+                            "idempotentHint": True,
+                        },
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        ]
+    )["tools"][0]
+
+    assessments = {
+        assessment["annotation"]: assessment
+        for assessment in tool["annotation_assessments"]
+    }
+    assert assessments["readOnlyHint"]["state"] == "unresolved"
+    assert assessments["destructiveHint"]["state"] == "inapplicable"
+    assert assessments["destructiveHint"]["comparison_source"] == "readOnlyHint"
+    assert assessments["idempotentHint"]["state"] == "inapplicable"
+    assert tool["annotation_conflicts"] == []
+
+
+@pytest.mark.parametrize(
+    ("name", "tier", "annotations", "expected_states", "expected_conflicts"),
+    [
+        (
+            "read_record",
+            "read_only",
+            {"readOnlyHint": True},
+            {"readOnlyHint": "consistent"},
+            [],
+        ),
+        (
+            "read_record",
+            "read_only",
+            {"readOnlyHint": False},
+            {"readOnlyHint": "conflict"},
+            ["readOnlyHint=false conflicts with effective risk"],
+        ),
+        (
+            "write_record",
+            "write",
+            {"readOnlyHint": False, "destructiveHint": False},
+            {"readOnlyHint": "consistent", "destructiveHint": "consistent"},
+            [],
+        ),
+        (
+            "write_record",
+            "write",
+            {
+                "readOnlyHint": True,
+                "destructiveHint": True,
+                "idempotentHint": False,
+            },
+            {
+                "readOnlyHint": "conflict",
+                "destructiveHint": "inapplicable",
+                "idempotentHint": "inapplicable",
+            },
+            ["readOnlyHint=true conflicts with effective risk"],
+        ),
+        (
+            "delete_record",
+            "destructive",
+            {"readOnlyHint": False, "destructiveHint": True},
+            {"readOnlyHint": "consistent", "destructiveHint": "consistent"},
+            [],
+        ),
+        (
+            "delete_record",
+            "destructive",
+            {"destructiveHint": True},
+            {"destructiveHint": "consistent"},
+            [],
+        ),
+        (
+            "delete_record",
+            "destructive",
+            {"readOnlyHint": False, "destructiveHint": False},
+            {"readOnlyHint": "consistent", "destructiveHint": "conflict"},
+            ["destructiveHint=false conflicts with effective risk"],
+        ),
+    ],
+)
+def test_mcp_annotation_assessment_states(
+    name, tier, annotations, expected_states, expected_conflicts
+):
+    document = {
+        "tools": [
+            {
+                "name": name,
+                "annotations": annotations,
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            name: {
+                "risk": {
+                    "tier": tier,
+                    "evidence": "observed",
+                    "effects": [f"observed_{tier}_effect"],
+                }
+            }
+        },
+    }
+
+    tool = scan_documents([document], control_declarations=controls)["tools"][0]
+
+    assert {
+        assessment["annotation"]: assessment["state"]
+        for assessment in tool["annotation_assessments"]
+    } == expected_states
+    assert tool["annotation_conflicts"] == expected_conflicts
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"),
+)
+def test_non_boolean_known_mcp_annotation_is_rejected(annotation):
+    document = {
+        "tools": [
+            {
+                "name": "operate",
+                "annotations": {annotation: "true"},
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ]
+    }
+
+    with pytest.raises(
+        SchemaError, match=rf"annotation '{annotation}' must be boolean"
+    ):
+        scan_documents([document])
+
+
+def test_direct_tool_definition_revalidates_known_mcp_annotation_types():
+    definition = ToolDefinition(
+        name="operate",
+        input_schema={"type": "object", "properties": {}},
+        annotations={"readOnlyHint": 1},
+    )
+
+    with pytest.raises(
+        SchemaError, match="annotation 'readOnlyHint' must be boolean"
+    ):
+        scan_definitions([definition])
 
 
 def test_destructive_hint_false_conflicts_with_declared_destructive_risk():
@@ -1319,7 +2470,18 @@ def test_destructive_hint_false_conflicts_with_declared_destructive_risk():
     assert tool["annotation_conflicts"] == [
         "destructiveHint=false conflicts with effective risk"
     ]
+    assert {
+        assessment["annotation"]: assessment["state"]
+        for assessment in tool["annotation_assessments"]
+    } == {
+        "readOnlyHint": "consistent",
+        "destructiveHint": "conflict",
+    }
     assert report["summary"]["annotation_conflicts"] == 1
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["annotation_conflicts"] == [
+        "destructiveHint"
+    ]
     assert tool["needs_confirmation"] is True
 
 
@@ -1353,6 +2515,9 @@ def test_declared_lower_risk_conflict_keeps_confirmation_fail_safe():
     assert tool["declared_risk"]["evidence"] == "declared"
     assert tool["risk_conflict"] is True
     assert tool["risk_review_required"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["risk"] is True
+    assert tool["review_sources"]["risk_conflict"] is True
     assert tool["needs_confirmation"] is True
     assert "| purchase_bid | unknown | conflict_safe_default |" in render_markdown(
         report
@@ -1393,26 +2558,31 @@ def test_redacted_report_omits_names_sources_and_name_derived_fingerprint():
 
 
 def test_public_atlas_baseline_is_reproducible():
-    atlas_path = Path(__file__).with_name("atlas") / "public_mcp_schemas.json"
-    document = json.loads(atlas_path.read_text(encoding="utf-8"))
+    atlas_directory = Path(__file__).with_name("atlas")
+    schema_path = atlas_directory / "public_mcp_schemas.json"
+    report_path = atlas_directory / "public_mcp_report.md"
+    document = json.loads(schema_path.read_text(encoding="utf-8"))
 
     report = scan_documents([document])
 
     assert report["summary"] == {
         "tools": 10,
         "parameters": 14,
-        "protected_parameters": 10,
-        "data_fillable_parameters": 4,
-        "review_required": 6,
+        "protected_parameters": 13,
+        "data_fillable_parameters": 1,
+        "review_required": 9,
+        "review_required_tools": 10,
         "schema_review_required_tools": 5,
         "confirmation_required_tools": 10,
         "risk_review_required_tools": 10,
         "risk_conflicts": 0,
-        "annotation_conflicts": 8,
+        "annotation_conflicts": 0,
+        "branch_risk_review_required_tools": 0,
     }
     assert report["schema_fingerprint_sha256"] == (
         "cd706cd542612e359452daccbcf49af52274fea8ee6b59501c2e0fb2a321128f"
     )
+    assert report_path.read_text(encoding="utf-8") == render_markdown(report)
 
 
 def test_markdown_states_privacy_and_interpretation_boundary():
@@ -1424,6 +2594,134 @@ def test_markdown_states_privacy_and_interpretation_boundary():
 
     assert "no server was executed and no network was used" in markdown
     assert "vulnerability verdict" in markdown
+
+
+def test_markdown_surfaces_confident_candidates_without_unlocking_reviews():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string", "format": "email"},
+                                "subject": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    before = copy.deepcopy(report)
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert report == before
+    assert "## First-look authority signals" in markdown
+    assert "| Protected (`trusted_fixed`) | 2 |" in markdown
+    assert "| Strong lock candidates | 1 |" in first_look
+    assert "| Provisional fail-closed locks | 1 |" in first_look
+    assert "| Data-fillable arguments | 1 |" in first_look
+    assert "lexical or declared-policy matching" in first_look
+    assert "not ownership" in first_look
+    assert "not actively protect" in first_look
+    assert "| send_email | to | email destination |" in first_look
+    assert "subject" not in first_look
+    assert "body" not in first_look
+
+
+def test_markdown_first_look_handles_only_provisional_and_zero_strong_candidates():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"subject": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "| Strong lock candidates | 0 |" in first_look
+    assert "| Provisional fail-closed locks | 1 |" in first_look
+    assert "### Strong lock candidates" not in first_look
+
+
+def test_markdown_first_look_preserves_redaction():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_private_mail",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "secret_recipient": {"type": "string"},
+                                "custom_style": {"type": "string"},
+                                "draft_body": {"type": "string"},
+                            },
+                        },
+                    }
+                ]
+            }
+        ],
+        redact_names=True,
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "send_private_mail" not in markdown
+    assert "secret_recipient" not in markdown
+    assert "custom_style" not in markdown
+    assert "draft_body" not in markdown
+    assert "| tool_001 | param_001 |" in first_look
+
+
+def test_markdown_first_look_escapes_candidate_names():
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_<script>|mail",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"recipient": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+
+    markdown = render_markdown(report)
+    first_look = markdown.split("## First-look authority signals\n", 1)[1].split(
+        "\n## Tool review summary", 1
+    )[0]
+
+    assert "send_&lt;script&gt;\\|mail" in first_look
+    assert "<script>" not in first_look
 
 
 def test_markdown_escapes_schema_controlled_names():
@@ -1628,6 +2926,8 @@ def test_unexposed_control_on_open_schema_requires_schema_review():
 
     assert report["tools"][0]["schema_closes_unknown_arguments"] is False
     assert report["tools"][0]["schema_review_required"] is True
+    assert report["tools"][0]["review_required"] is True
+    assert report["tools"][0]["review_sources"]["schema"] is True
     assert report["summary"]["schema_review_required_tools"] == 1
 
 
@@ -1991,6 +3291,59 @@ def test_cli_writes_report_and_can_fail_on_review(tmp_path):
     ] == 1
 
 
+def test_cli_fail_on_review_checks_branch_debt_directly(tmp_path, monkeypatch):
+    schema_path = tmp_path / "tools.json"
+    report_path = tmp_path / "report.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_scan_documents = scanner.scan_documents
+
+    def branch_debt_only(*args, **kwargs):
+        report = real_scan_documents(*args, **kwargs)
+        for field in (
+            "review_required",
+            "review_required_tools",
+            "schema_review_required_tools",
+            "risk_review_required_tools",
+            "risk_conflicts",
+            "annotation_conflicts",
+        ):
+            report["summary"][field] = 0
+        report["summary"]["branch_risk_review_required_tools"] = 1
+        return report
+
+    monkeypatch.setattr(scanner, "scan_documents", branch_debt_only)
+
+    assert (
+        main(
+            [
+                str(schema_path),
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+                "--fail-on-review",
+            ]
+        )
+        == 2
+    )
+
+
 @pytest.mark.parametrize(
     "input_schema",
     (
@@ -2114,6 +3467,68 @@ def test_composed_or_unresolved_schemas_require_explicit_review(input_schema):
 
     assert report["tools"][0]["schema_review_required"] is True
     assert report["summary"]["schema_review_required_tools"] == 1
+
+
+@pytest.mark.parametrize("shape", ("wrapped", "direct", "nested-direct"))
+def test_nested_object_payload_requires_schema_review_without_changing_policy(
+    tmp_path, shape
+):
+    nested_properties = {
+        "to": {"type": "string", "format": "email"},
+        "text": {"type": "string"},
+    }
+    body_schema = {
+        "type": "object",
+        "properties": nested_properties,
+        "required": ["to", "text"],
+        "additionalProperties": False,
+    }
+    if shape == "nested-direct":
+        body_schema = nested_properties
+    input_schema = {"body": body_schema}
+    if shape != "direct":
+        input_schema = {
+            "type": "object",
+            "properties": input_schema,
+            "required": ["body"],
+            "additionalProperties": False,
+        }
+    document = {"tools": [{"name": "deliver", "inputSchema": input_schema}]}
+    controls = {
+        "version": 1,
+        "tools": {
+            "deliver": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "declared",
+                    "effects": ["send_message"],
+                }
+            }
+        },
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    assert len(tool["arguments"]) == 1
+    body = tool["arguments"][0]
+    assert body["policy"] == "outbound_payload"
+    assert body["confidence"] == "high"
+    assert body["review_required"] is False
+    assert tool["risk"] == "write"
+    assert tool["risk_review_required"] is False
+    assert tool["schema_review_required"] is True
+    assert tool["review_required"] is True
+    assert tool["review_sources"]["schema"] is True
+    assert report["summary"]["schema_review_required_tools"] == 1
+    assert report["summary"]["review_required_tools"] == 1
+    assert report["summary"]["review_required"] == 0
+
+    schema_path = tmp_path / "schema.json"
+    controls_path = tmp_path / "controls.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    assert main([
+        str(schema_path), "--controls", str(controls_path), "--fail-on-review"
+    ]) == 2
 
 
 def test_simple_schema_and_enum_instance_values_do_not_require_schema_review():
@@ -2704,6 +4119,244 @@ def test_demo_remains_default_and_unknown_arguments_are_rejected(capsys):
     assert "usage:" in capsys.readouterr().err
 
 
+def test_quickstart_demo_connects_schema_report_to_gate(capsys):
+    assert verb_authority.main(["quickstart"]) == 0
+
+    output = capsys.readouterr().out
+    assert "SCHEMA -> AUTHORITY -> GATE" in output
+    assert "send_email.to    -> trusted_fixed" in output
+    assert "send_email.body  -> outbound_payload" in output
+    assert "BLOCKED - param 'to' is a locked sink" in output
+    assert "ALLOWED - within authority" in output
+    assert output.count("local tool invocations=0") == 2
+    assert output.count("local tool invocations=1") == 1
+    assert "body length=2001; registered maxLength=2000" in output
+    assert "BLOCKED - param 'body' failed its type/bounds check" in output
+    assert "CONTROL: APPLICATION-SUPPLIED TRUSTED RECIPIENT" in output
+    assert "APPROVED DESTINATION" not in output
+    assert "never sends email" in output
+
+    assert verb_authority.main(["quickstart", "extra"]) == 2
+    assert "verb_authority quickstart" in capsys.readouterr().err
+
+
 def test_rejects_documents_without_tools():
     with pytest.raises(SchemaError, match="no recognizable"):
         parse_tool_definitions({"not_tools": []})
+
+
+def _playwright_browser_tabs_fixture():
+    root = (
+        Path(__file__).parent
+        / "fixtures"
+        / "external"
+        / "sankalp-gilda"
+        / "playwright-browser-tabs"
+    )
+    frozen = root / "frozen"
+    if not frozen.is_dir():
+        pytest.skip("external frozen evidence is repository-only")
+    return root, frozen
+
+
+def _verify_playwright_browser_tabs_frozen_inputs(frozen, expected):
+    integrity = expected["frozen_integrity"]
+    manifest = frozen / "MANIFEST.sha256"
+    assert manifest.is_file() and not manifest.is_symlink()
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == integrity[
+        "manifest_sha256"
+    ]
+    commands = frozen / "COMMANDS.md"
+    assert commands.is_file() and not commands.is_symlink()
+    assert hashlib.sha256(commands.read_bytes()).hexdigest() == integrity[
+        "commands_sha256"
+    ]
+
+    recorded = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, name = line.split(maxsplit=1)
+        name = name.strip()
+        path = PurePosixPath(name)
+        assert not path.is_absolute() and len(path.parts) == 1
+        assert name not in {".", ".."} and "\\" not in name
+        assert name not in recorded, f"duplicate frozen manifest member: {name}"
+        assert len(digest) == 64 and all(
+            character in "0123456789abcdef" for character in digest
+        )
+        recorded[name] = digest
+
+    assert list(recorded) == integrity["manifest_members"]
+    for name, digest in recorded.items():
+        member = frozen / name
+        assert member.is_file() and not member.is_symlink()
+        actual = hashlib.sha256(member.read_bytes()).hexdigest()
+        assert actual == digest, f"{name} no longer matches the frozen manifest"
+
+    assert (
+        recorded["tools-list.json"]
+        == "1e615213d0fcc71246febecd281ce85fb11fc8cce3e8f636d9fbc255021a2c44"
+    )
+
+
+def test_playwright_browser_tabs_frozen_inputs_are_unmodified():
+    """The manifest is the fixture's own tripwire, so check it before using it.
+
+    A regression case whose inputs drifted proves nothing about the release it
+    names, and a drifted input fails in exactly the same way as a real
+    regression. Reading the manifest first tells those two apart.
+    """
+    root, frozen = _playwright_browser_tabs_fixture()
+    expected = json.loads((root / "EXPECTED.json").read_text(encoding="utf-8"))
+    _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+
+
+@pytest.mark.parametrize(
+    "member",
+    ("../escape.json", "/absolute.json", "nested/file.json", "nested\\file.json"),
+)
+def test_playwright_frozen_manifest_rejects_unsafe_member_paths(tmp_path, member):
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    commands = frozen / "COMMANDS.md"
+    commands.write_bytes(b"")
+    manifest = frozen / "MANIFEST.sha256"
+    manifest.write_text(f"{'0' * 64}  {member}\n", encoding="utf-8")
+    expected = {
+        "frozen_integrity": {
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "commands_sha256": hashlib.sha256(commands.read_bytes()).hexdigest(),
+            "manifest_members": [member],
+        }
+    }
+
+    with pytest.raises(AssertionError):
+        _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+
+
+def test_playwright_browser_tabs_external_regression():
+    """Pin the two behaviours 0.10.0b11 established, on externally frozen bytes.
+
+    Two arms, because one is ambiguous. With nothing declared every tool sits
+    behind an unknown tier and requires confirmation, which is fail-safe and
+    hides what the scanner concluded per argument. Declaring the tool a write
+    removes that cover. A scanner that is correct and one that is merely
+    fail-safe agree on arm 1 and differ on arm 2.
+    """
+    root, frozen = _playwright_browser_tabs_fixture()
+    expected = json.loads((root / "EXPECTED.json").read_text(encoding="utf-8"))
+    _verify_playwright_browser_tabs_frozen_inputs(frozen, expected)
+    schema = json.loads((frozen / "tools-list.json").read_text(encoding="utf-8"))
+    controls = json.loads((frozen / "controls.json").read_text(encoding="utf-8"))
+
+    def subject(report):
+        for tool in report["tools"]:
+            if tool["name"] == expected["tool"]:
+                return tool
+        raise AssertionError(f"{expected['tool']} absent from the report")
+
+    def arguments(tool):
+        return {argument["name"]: argument for argument in tool["arguments"]}
+
+    superseded = expected["superseded"]
+    beta10_undeclared = json.loads(
+        (frozen / "report-0.10.0b10-undeclared.json").read_text(encoding="utf-8")
+    )
+    beta10_declared = json.loads(
+        (frozen / "report-0.10.0b10-declared-write.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert beta10_undeclared["summary"]["annotation_conflicts"] == superseded[
+        "undeclared_annotation_conflicts_total"
+    ]
+    assert beta10_declared["summary"]["annotation_conflicts"] == superseded[
+        "declared_write_annotation_conflicts_total"
+    ]
+    beta10_arguments = arguments(subject(beta10_declared))
+    for name, want in superseded["declared_write_arguments"].items():
+        argument = beta10_arguments[name]
+        assert argument["policy"] == want["policy"], name
+        assert argument["review_required"] is want["review_required"], name
+        assert argument["confidence"] == want["confidence"], name
+
+    undeclared = scan_documents([schema])
+    declared = scan_documents([schema], control_declarations=controls)
+
+    # Arm 1. The count is the assertion: 23 of 23 tools reporting a conflict is
+    # indistinguishable from none of them doing so, because a correct hint and a
+    # wrong one produced the same string.
+    assert (
+        undeclared["summary"]["annotation_conflicts"]
+        == expected["undeclared"]["annotation_conflicts_total"]
+    )
+    undeclared_arguments = arguments(subject(undeclared))
+    for name, want in expected["undeclared"]["arguments"].items():
+        assert undeclared_arguments[name]["policy"] == want["policy"]
+        assert undeclared_arguments[name]["review_required"] is want["review_required"]
+
+    # Arm 2. An argument whose value selects the operation must stay
+    # consequential, whatever its type says.
+    arm2 = expected["declared_write"]
+    tool = subject(declared)
+    assert declared["summary"]["annotation_conflicts"] == arm2["annotation_conflicts_total"]
+    assert tool["annotation_conflicts"] == arm2["annotation_conflicts_on_subject"]
+    assert tool["risk"] == arm2["risk"]
+    assert tool["needs_confirmation"] is arm2["needs_confirmation"]
+
+    states = {
+        assessment["annotation"]: assessment["state"]
+        for assessment in tool["annotation_assessments"]
+    }
+    assert states == arm2["annotation_states"]
+
+    declared_arguments = arguments(tool)
+    for name, want in arm2["arguments"].items():
+        argument = declared_arguments[name]
+        assert argument["policy"] == want["policy"], name
+        assert argument["review_required"] is want["review_required"], name
+        assert argument["confidence"] == want["confidence"], name
+
+    # schema_review_required remains the narrow schema-structure source. The
+    # external expectation preserves report v5 as historical evidence; the
+    # live scanner now emits v6 while retaining the same review aggregate.
+    current = expected["current_report_v5"]
+    assert current["report_version"] == 5
+    assert declared["report_version"] == REPORT_VERSION == 6
+    assert declared["summary"]["review_required_tools"] == current[
+        "summary_review_required_tools"
+    ]
+    assert tool["schema_review_required"] is current["schema_review_required"]
+    assert tool["review_required"] is current["review_required"]
+    assert tool["review_sources"] == current["review_sources"]
+
+    # The process exit remains the CI enforcement path for any review source.
+    assert scanner.main(
+        [
+            "--format",
+            "json",
+            "--controls",
+            str(frozen / "controls.json"),
+            "--fail-on-review",
+            "--output",
+            os.devnull,
+            str(frozen / "tools-list.json"),
+        ]
+    ) == arm2["fail_on_review_exit_status"]
+
+    # The one surviving conflict is this fixture's own under-declaration, not a
+    # scanner defect. Declaring the tier the hint asserts clears it.
+    probe_controls = json.loads(
+        (root / "probe-controls-destructive.json").read_text(encoding="utf-8")
+    )
+    probe = scan_documents([schema], control_declarations=probe_controls)
+    probe_expected = expected["declared_destructive_probe"]
+    assert (
+        probe["summary"]["annotation_conflicts"]
+        == probe_expected["annotation_conflicts_total"]
+    )
+    assert {
+        assessment["annotation"]: assessment["state"]
+        for assessment in subject(probe)["annotation_assessments"]
+    } == probe_expected["annotation_states"]

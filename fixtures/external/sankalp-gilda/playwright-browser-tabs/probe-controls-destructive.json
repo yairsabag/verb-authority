@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "tools": {
+    "browser_tabs": {
+      "risk": {
+        "tier": "destructive",
+        "evidence": "observed",
+        "effects": ["opens, selects, or closes a browser tab"]
+      }
+    }
+  }
+}

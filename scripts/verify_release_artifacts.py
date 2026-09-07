@@ -124,6 +124,7 @@ class _ProjectReleaseConfig:
     optional_dependencies: dict[str, tuple[str, ...]]
     module_payloads: dict[str, bytes]
     license_payloads: dict[str, bytes]
+    wheel_data_payloads: dict[str, bytes]
     sdist_source_payloads: dict[str, bytes]
     core_metadata_fields: dict[str, tuple[str, ...]]
     description_body: str
@@ -1140,6 +1141,7 @@ def _project_release_config(
         name = project["name"]
         version = project["version"]
         modules_value = setuptools["py-modules"]
+        data_files_value = setuptools.get("data-files", {})
         scripts_value = project["scripts"]
         license_patterns = project["license-files"]
         requires_python = project["requires-python"]
@@ -1199,6 +1201,18 @@ def _project_release_config(
     if any(module_pattern.fullmatch(module) is None for module in modules):
         raise VerificationError(
             "tool.setuptools.py-modules contains an unsafe module name"
+        )
+    if not isinstance(data_files_value, dict) or any(
+        not isinstance(destination, str)
+        or not destination
+        or not isinstance(sources, list)
+        or not sources
+        or any(not isinstance(source, str) or not source for source in sources)
+        for destination, sources in data_files_value.items()
+    ):
+        raise VerificationError(
+            "tool.setuptools.data-files must map destinations to non-empty "
+            "string lists"
         )
     if (
         not isinstance(scripts_value, dict)
@@ -1361,6 +1375,60 @@ def _project_release_config(
                 )
             license_payloads[wheel_member] = license_payload
 
+    wheel_data_payloads: dict[str, bytes] = {}
+    portable_data_members: set[str] = set()
+    for destination, sources in data_files_value.items():
+        destination_path = PurePosixPath(destination)
+        documentation_root = ("share", "doc", name)
+        if (
+            destination_path.is_absolute()
+            or "\\" in destination
+            or any(part in {"", ".", ".."} for part in destination_path.parts)
+            or destination_path.parts[:3] != documentation_root
+            or any(
+                part.casefold().endswith((".data", ".dist-info"))
+                for part in destination_path.parts
+            )
+        ):
+            raise VerificationError(
+                "tool.setuptools.data-files must stay under the project "
+                "documentation root and contains an unsafe destination "
+                f"{destination!r}"
+            )
+        for source in sources:
+            _validate_manifest_pattern(
+                source,
+                label="tool.setuptools.data-files source",
+            )
+            if any(character in source for character in "*?["):
+                raise VerificationError(
+                    "tool.setuptools.data-files sources must be exact paths"
+                )
+            source_path = PurePosixPath(source)
+            member = f"{destination}/{source_path.name}"
+            portable = _portable_member_key(
+                member,
+                archive_label="project wheel data payload",
+            )
+            if member in wheel_data_payloads or portable in portable_data_members:
+                raise VerificationError(
+                    "tool.setuptools.data-files selects a duplicate wheel "
+                    f"payload {member!r}"
+                )
+            try:
+                payload = sdist_source_payloads[source]
+            except KeyError as exc:
+                raise VerificationError(
+                    "tool.setuptools.data-files source is absent from the "
+                    f"source-distribution contract: {source!r}"
+                ) from exc
+            if len(payload) > MAX_WHEEL_MEMBER_BYTES:
+                raise VerificationError(
+                    f"wheel data payload exceeds the size limit: {source!r}"
+                )
+            wheel_data_payloads[member] = payload
+            portable_data_members.add(portable)
+
     core_metadata_fields, description_body = _expected_static_core_metadata(
         project,
         source_payloads=sdist_source_payloads,
@@ -1377,6 +1445,7 @@ def _project_release_config(
         optional_dependencies=optional_dependencies,
         module_payloads=module_payloads,
         license_payloads=license_payloads,
+        wheel_data_payloads=wheel_data_payloads,
         sdist_source_payloads=sdist_source_payloads,
         core_metadata_fields=core_metadata_fields,
         description_body=description_body,
@@ -2394,10 +2463,15 @@ def _expected_wheel_members(
     config: _ProjectReleaseConfig,
     *,
     expected_root: str,
+    expected_data_root: str,
 ) -> set[str]:
     return {
         *config.module_payloads,
         *(f"{expected_root}/{member}" for member in config.license_payloads),
+        *(
+            f"{expected_data_root}/{member}"
+            for member in config.wheel_data_payloads
+        ),
         f"{expected_root}/METADATA",
         f"{expected_root}/WHEEL",
         f"{expected_root}/entry_points.txt",
@@ -2885,9 +2959,14 @@ def _wheel_identity(
         f"{_artifact_distribution_name(config.name)}-"
         f"{_artifact_version_name(config.version)}.dist-info"
     )
+    expected_data_root = (
+        f"{_artifact_distribution_name(config.name)}-"
+        f"{_artifact_version_name(config.version)}.data/data"
+    )
     expected_members = _expected_wheel_members(
         config,
         expected_root=expected_root,
+        expected_data_root=expected_data_root,
     )
     expected_exact_sizes = {
         **{
@@ -2897,6 +2976,10 @@ def _wheel_identity(
         **{
             f"{expected_root}/{member}": len(payload)
             for member, payload in config.license_payloads.items()
+        },
+        **{
+            f"{expected_data_root}/{member}": len(payload)
+            for member, payload in config.wheel_data_payloads.items()
         },
     }
     metadata_size_limits = {
@@ -3048,6 +3131,12 @@ def _wheel_identity(
         if payloads[wheel_name] != project_payload:
             raise VerificationError(
                 f"wheel license payload {license_name!r} differs from the project"
+            )
+    for data_name, project_payload in config.wheel_data_payloads.items():
+        wheel_name = f"{expected_data_root}/{data_name}"
+        if payloads[wheel_name] != project_payload:
+            raise VerificationError(
+                f"wheel data payload {data_name!r} differs from the project"
             )
     return wheel_identity
 

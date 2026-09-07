@@ -1,4 +1,4 @@
-"""Installed-wheel audit smoke for the beta.10 release boundary.
+"""Installed-wheel audit smoke for the current release boundary.
 
 Run this copy from outside the source checkout after installing the wheel. The
 checks intentionally repeat all audited blocker families, then exercise the
@@ -36,6 +36,7 @@ from verb_authority import (
     Policy,
     Registry,
     Risk,
+    SelectorCase,
     Tool,
     TrustedChoice,
     TrustedResolver,
@@ -102,7 +103,7 @@ def _installed_identity(
                 not location.is_relative_to(forbidden_root),
                 f"{module.__name__} imported from forbidden source root: {location}",
             )
-    _check(REPORT_VERSION == 3, "installed scanner is not report v3")
+    _check(REPORT_VERSION == 6, "installed scanner is not report v6")
     _check(DIFF_VERSION == 2, "installed Authority Diff is not diff v2")
 
 
@@ -260,6 +261,107 @@ def _authority_name_precedence() -> None:
         )
 
 
+def _exact_selector_branch_boundary() -> None:
+    calls: list[tuple[str, int | None, str | None]] = []
+
+    def browser_tabs(action: str, **kwargs: object) -> dict[str, bool]:
+        index = kwargs.get("index")
+        url = kwargs.get("url")
+        calls.append(
+            (
+                action,
+                index if isinstance(index, int) else None,
+                url if isinstance(url, str) else None,
+            )
+        )
+        return {"ok": True}
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "browser_tabs",
+            [
+                Param(
+                    "action",
+                    "enum",
+                    enum=["list", "new", "close", "select"],
+                    sink=False,
+                ),
+                Param("index", "integer", sink=False),
+                Param("url", "uri"),
+            ],
+            fn=browser_tabs,
+            risk=Risk.WRITE,
+            selector="action",
+            selector_cases=[
+                SelectorCase("list", Risk.READ_ONLY, ["action"]),
+                SelectorCase("new", Risk.WRITE, ["action", "url"]),
+                SelectorCase(
+                    "close",
+                    Risk.DESTRUCTIVE,
+                    ["action", "index"],
+                ),
+                SelectorCase("select", Risk.WRITE, ["action", "index"]),
+            ],
+        )
+    )
+    runner = GuardedToolRunner(registry)
+
+    listed = runner.run(
+        {"name": "browser_tabs", "input": {"action": "list"}},
+    )
+    pending = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        }
+    )
+    captured = []
+    closed = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "close", "index": 0},
+        },
+        confirm=lambda request: captured.append(request) or True,
+    )
+    unknown = runner.run(
+        {"name": "browser_tabs", "input": {"action": "drop"}},
+    )
+    inactive = runner.run(
+        {
+            "name": "browser_tabs",
+            "input": {"action": "list", "index": 0},
+        }
+    )
+
+    _check(
+        listed.executed
+        and not listed.decision.needs_confirm
+        and pending.decision.allow
+        and pending.decision.needs_confirm
+        and not pending.executed
+        and closed.executed
+        and closed.decision.needs_confirm
+        and not unknown.executed
+        and not unknown.decision.allow
+        and not inactive.executed
+        and not inactive.decision.allow,
+        "installed exact selector branch did not fail closed",
+    )
+    request = captured[0]
+    _check(
+        request.risk == "destructive"
+        and request.selector == "action"
+        and request.selector_value_json == '"close"'
+        and request.active_args == ("action", "index"),
+        "installed confirmation did not bind exact selector evidence",
+    )
+    _check(
+        calls == [("list", None, None), ("close", 0, None)],
+        "installed selector branch invoked an unexpected call",
+    )
+
+
 def _daybreak_post_audit_regressions() -> None:
     """Repeat the final pre-release audit findings from the installed wheel."""
 
@@ -304,9 +406,10 @@ def _daybreak_post_audit_regressions() -> None:
             f"installed selector tokenizer relaxed {name!r}",
         )
     for name in ("keyboard", "keynote", "guidance", "uuidification", "identity"):
-        inferred, _ = infer_policy(Param(name, "integer"))
+        inferred, confidence = infer_policy(Param(name, "integer"))
         _check(
-            inferred is verb_authority.Policy.TYPED_BOUNDED,
+            inferred is verb_authority.Policy.TRUSTED_FIXED
+            and confidence is Confidence.UNCERTAIN,
             f"installed selector tokenizer matched substring-only name {name!r}",
         )
     for name in ("valid", "grid", "monkey", "liquid", "hockey"):
@@ -384,10 +487,33 @@ def _daybreak_post_audit_regressions() -> None:
     ):
         inferred, confidence = infer_policy(Param(name, "integer"))
         _check(
-            inferred is verb_authority.Policy.TYPED_BOUNDED
-            and confidence is Confidence.HIGH,
+            inferred is verb_authority.Policy.TRUSTED_FIXED
+            and confidence is Confidence.UNCERTAIN,
             f"installed authority tokenizer matched substring-only name {name!r}",
         )
+
+    max_length_registry = Registry()
+    max_length_registry.add(
+        Tool(
+            "browser_tabs",
+            [Param("action", "string", max_len=201)],
+            risk=Risk.WRITE,
+        )
+    )
+    max_length_policy = build_policy(max_length_registry)
+    max_length_decision = dispatch(
+        max_length_registry,
+        max_length_policy,
+        {"name": "browser_tabs", "input": {"action": "close"}},
+    )
+    _check(
+        max_length_policy.policy["browser_tabs"]["action"]
+        is Policy.TRUSTED_FIXED
+        and ("browser_tabs", "action") in max_length_policy.review
+        and not max_length_decision.allow
+        and "locked sink" in max_length_decision.reason,
+        "installed maxLength-only string became data-authorable",
+    )
     flatcase_name = "destinationurlvalue"
     _check(
         len(flatcase_name) <= verb_authority.MAX_IDENTIFIER_INFERENCE_CHARS
@@ -1186,7 +1312,7 @@ def _confirmation_action_snapshot() -> None:
             "transfer_funds",
             [
                 Param("destination", sink=True),
-                Param("amount", "number"),
+                Param("amount", "number", sink=False),
                 Param("memo", "string", sink=False),
             ],
             fn=transfer,
@@ -1904,6 +2030,309 @@ def _unicode_homograph_rejection() -> None:
     _check("homograph" in decision.reason, "homograph rejection reason is absent")
 
 
+def _mcp_annotation_assessment_contract() -> None:
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "read_record",
+                        "annotations": {"readOnlyHint": True},
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "write_record",
+                        "annotations": {
+                            "readOnlyHint": True,
+                            "destructiveHint": True,
+                            "idempotentHint": False,
+                            "openWorldHint": False,
+                        },
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                ]
+            }
+        ],
+        control_declarations={
+            "version": 1,
+            "tools": {
+                "read_record": {
+                    "risk": {
+                        "tier": "read_only",
+                        "evidence": "observed",
+                        "effects": ["reads_record"],
+                    }
+                },
+                "write_record": {
+                    "risk": {
+                        "tier": "write",
+                        "evidence": "observed",
+                        "effects": ["writes_record"],
+                    }
+                },
+            },
+        },
+    )
+    _check(
+        report["report_version"] == 6,
+        "MCP annotation evidence was not emitted in report v6",
+    )
+    tools = {tool["name"]: tool for tool in report["tools"]}
+    read_assessments = {
+        assessment["annotation"]: assessment
+        for assessment in tools["read_record"]["annotation_assessments"]
+    }
+    write_assessments = {
+        assessment["annotation"]: assessment
+        for assessment in tools["write_record"]["annotation_assessments"]
+    }
+    _check(
+        read_assessments["readOnlyHint"]["state"] == "consistent",
+        "installed scanner lost a consistent MCP annotation assessment",
+    )
+    _check(
+        {
+            name: assessment["state"]
+            for name, assessment in write_assessments.items()
+        }
+        == {
+            "readOnlyHint": "conflict",
+            "destructiveHint": "inapplicable",
+            "idempotentHint": "inapplicable",
+            "openWorldHint": "unresolved",
+        },
+        "installed scanner changed structured MCP annotation states",
+    )
+    all_assessments = [*read_assessments.values(), *write_assessments.values()]
+    expected_fields = {
+        "annotation",
+        "value",
+        "state",
+        "evidence_source",
+        "trust",
+        "comparison_source",
+        "comparison_value",
+    }
+    _check(
+        all(
+            set(assessment) == expected_fields
+            and assessment["evidence_source"] == "mcp_tool_annotation"
+            and assessment["trust"] == "unverified_hint"
+            for assessment in all_assessments
+        ),
+        "installed scanner promoted MCP hints or lost assessment provenance",
+    )
+    _check(
+        tools["write_record"]["annotation_conflicts"]
+        == ["readOnlyHint=true conflicts with effective risk"]
+        and report["summary"]["annotation_conflicts"] == 1,
+        "installed scanner lost the derived MCP annotation conflict",
+    )
+
+
+def _tool_review_aggregate_contract() -> None:
+    document = {
+        "tools": [
+            {
+                "name": "browser_tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "close"],
+                        },
+                        "index": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    }
+    controls = {
+        "version": 1,
+        "tools": {
+            "browser_tabs": {
+                "risk": {
+                    "tier": "write",
+                    "evidence": "observed",
+                    "effects": ["changes_tab_state"],
+                }
+            }
+        },
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    _check(
+        report["report_version"] == 6
+        and tool["review_required"] is True
+        and tool["review_sources"]
+        == {
+            "arguments": ["action", "index"],
+            "schema": False,
+            "risk": False,
+            "risk_conflict": False,
+            "annotation_conflicts": [],
+            "branch_risk": True,
+        }
+        and report["summary"]["review_required_tools"] == 1,
+        "installed scanner lost the report-v6 tool review aggregate",
+    )
+    _check(
+        "## Tool review summary" in render_markdown(report),
+        "installed Markdown report omitted the tool review summary",
+    )
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+    _check(
+        arguments["action"]["remediation_status"] == "review_required"
+        and arguments["action"]["preferred_remediation"] is None
+        and arguments["action"]["fallback_remediation"] is None
+        and arguments["action"]["remediation_review_reason"]
+        == "selector_semantics_require_review"
+        and arguments["index"]["remediation_review_reason"]
+        == "authority_inference_requires_review",
+        "installed scanner lost uncertain remediation review reasons",
+    )
+
+    forged = copy.deepcopy(report)
+    forged["tools"][0]["review_required"] = False
+    try:
+        diff_reports(forged, copy.deepcopy(forged))
+    except DiffError as exc:
+        _check(
+            "review_required is inconsistent" in str(exc),
+            "installed diff reported the wrong aggregate-forgery boundary",
+        )
+    else:
+        raise AssertionError("installed diff accepted a forged review aggregate")
+
+    remediation_fields = (
+        "remediation_status",
+        "preferred_remediation",
+        "fallback_remediation",
+        "remediation_review_reason",
+    )
+    legacy_v5 = copy.deepcopy(report)
+    legacy_v5["report_version"] = 5
+    for legacy_tool in legacy_v5["tools"]:
+        for argument in legacy_tool["arguments"]:
+            for field in remediation_fields:
+                argument.pop(field, None)
+    frozen_v5 = copy.deepcopy(legacy_v5)
+    v5_diff = diff_reports(legacy_v5, report)
+    _check(
+        v5_diff["changes"] == [] and legacy_v5 == frozen_v5,
+        "installed diff did not preserve v5-to-v6 observational compatibility",
+    )
+
+    legacy = copy.deepcopy(legacy_v5)
+    legacy["report_version"] = 4
+    legacy["summary"].pop("review_required_tools")
+    for legacy_tool in legacy["tools"]:
+        legacy_tool.pop("review_required")
+        legacy_tool.pop("review_sources")
+    frozen_legacy = copy.deepcopy(legacy)
+    legacy_diff = diff_reports(legacy, report)
+    _check(
+        legacy_diff["changes"] == [] and legacy == frozen_legacy,
+        "installed diff did not preserve v4-to-v6 observational compatibility",
+    )
+
+    confirmation_only = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "erase_store",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ],
+        control_declarations={
+            "version": 1,
+            "tools": {
+                "erase_store": {
+                    "risk": {
+                        "tier": "destructive",
+                        "evidence": "observed",
+                        "effects": ["deletes_store"],
+                    }
+                }
+            },
+        },
+    )["tools"][0]
+    _check(
+        confirmation_only["needs_confirmation"] is True
+        and confirmation_only["review_required"] is False,
+        "installed scanner conflated runtime confirmation with static review debt",
+    )
+
+
+def _remediation_guidance_contract() -> None:
+    report = scan_documents(
+        [
+            {
+                "tools": [
+                    {
+                        "name": "send_email",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "to": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    arguments = {
+        argument["name"]: argument
+        for argument in report["tools"][0]["arguments"]
+    }
+    recipient = arguments["to"]
+    _check(
+        recipient["policy"] == "trusted_fixed"
+        and recipient["review_required"] is False
+        and recipient["remediation_status"] == "recommended"
+        and recipient["preferred_remediation"]
+        == "remove_from_model_schema_and_inject_from_application"
+        and recipient["fallback_remediation"]
+        == "bind_trusted_value_at_runtime"
+        and recipient["remediation_review_reason"] is None,
+        "installed scanner lost trusted-fixed remediation guidance",
+    )
+    _check(
+        not {
+            "remediation_status",
+            "preferred_remediation",
+            "fallback_remediation",
+            "remediation_review_reason",
+        }.intersection(arguments["body"]),
+        "installed scanner attached protected remediation to a data-fillable argument",
+    )
+    markdown = render_markdown(report)
+    _check(
+        "## Remediation guidance" in markdown
+        and "remove_from_model_schema_and_inject_from_application" in markdown
+        and "bind_trusted_value_at_runtime" in markdown,
+        "installed Markdown report omitted remediation guidance",
+    )
+
+
 def _constraint_diff_and_migration() -> None:
     before_document = _constraint_document(100, 40, ["safe"])
     after_document = _constraint_document(
@@ -1911,14 +2340,14 @@ def _constraint_diff_and_migration() -> None:
     )
     before = scan_documents([before_document])
     after = scan_documents([after_document])
-    _check(before["report_version"] == 3, "scanner did not produce report v3")
+    _check(before["report_version"] == 6, "scanner did not produce report v6")
     privacy = before["privacy"]
     _check(
         privacy["examples_included"] is False
         and privacy["defaults_included"] is False
         and privacy["runtime_values_included"] is False
         and "examples_or_values_included" not in privacy,
-        "report v3 privacy fields do not separately exclude values",
+        "report v6 privacy fields do not separately exclude values",
     )
     _check(
         privacy["schema_material_fingerprints_included"] is True
@@ -2043,15 +2472,15 @@ def _constraint_diff_and_migration() -> None:
     )
 
     legacy = copy.deepcopy(before)
-    legacy["report_version"] = 2
-    for argument in legacy["tools"][0]["arguments"]:
-        argument.pop("constraints", None)
+    legacy["report_version"] = 3
+    for tool in legacy["tools"]:
+        tool.pop("annotation_assessments", None)
     try:
         diff_reports(legacy, copy.deepcopy(legacy))
     except DiffError as exc:
         _check("rescan" in str(exc), "legacy report rejection omitted rescan guidance")
     else:
-        raise AssertionError("legacy report v2 was compared as if lossless")
+        raise AssertionError("legacy report v3 was compared as if current")
 
     with TemporaryDirectory(prefix="verb-authority-wheel-smoke-") as directory:
         root = Path(directory)
@@ -2438,9 +2867,13 @@ def _daybreak_scanner_diff_regressions() -> None:
         hybrid.pop("report_version")
         hybrid["inputSchema"] = {}
         malformed_reports.append(("report-hybrid", hybrid))
-        legacy = copy.deepcopy(base_report)
-        legacy["report_version"] = 2
-        malformed_reports.append(("legacy-v2", legacy))
+        for legacy_version in (2, 3):
+            legacy = copy.deepcopy(base_report)
+            legacy["report_version"] = legacy_version
+            if legacy_version == 3:
+                for tool in legacy["tools"]:
+                    tool.pop("annotation_assessments", None)
+            malformed_reports.append((f"legacy-v{legacy_version}", legacy))
         report_tool = copy.deepcopy(base_report["tools"][0])
         malformed_reports.extend(
             (
@@ -3118,8 +3551,8 @@ def _daybreak_external_audit_regressions() -> None:
             Param(ordinary_name, "string", max_len=2048)
         )
         _check(
-            ordinary_policy is Policy.OUTBOUND_PAYLOAD
-            and ordinary_confidence is Confidence.HIGH,
+            ordinary_policy is Policy.TRUSTED_FIXED
+            and ordinary_confidence is Confidence.UNCERTAIN,
             f"installed compact inference over-locked an ordinary word: {ordinary_name}",
         )
 
@@ -3831,6 +4264,26 @@ def _daybreak_release_candidate_regressions() -> None:
         verb_authority.unicodedata = original_unicode
 
 
+def _refresh_tool_review_aggregate(report: dict) -> None:
+    for tool in report["tools"]:
+        tool["review_sources"] = verb_authority_scan._tool_review_sources(
+            arguments=tool["arguments"],
+            schema_review_required=tool["schema_review_required"],
+            risk_review_required=tool["risk_review_required"],
+            risk_conflict=tool["risk_conflict"],
+            annotation_assessments=tool["annotation_assessments"],
+            branch_risk_review_required=tool[
+                "branch_risk_review_required"
+            ],
+        )
+        tool["review_required"] = verb_authority_scan._tool_review_required(
+            tool["review_sources"]
+        )
+    report["summary"]["review_required_tools"] = sum(
+        tool["review_required"] is True for tool in report["tools"]
+    )
+
+
 def _schema_review_diff_fail_closed() -> None:
     """Pin report observation, raw-only enforcement, and mandatory fields."""
 
@@ -3850,6 +4303,7 @@ def _schema_review_diff_fail_closed() -> None:
     explicit_false = copy.deepcopy(before)
     explicit_false["tools"][0]["schema_review_required"] = False
     explicit_false["summary"]["schema_review_required_tools"] = 0
+    _refresh_tool_review_aggregate(explicit_false)
     explicit_diff = diff_reports(before, explicit_false)
     explicit_change = next(
         change
@@ -3984,7 +4438,7 @@ def _daybreak_final_p3_regressions() -> None:
             "installed empty-report rejection omitted rescan guidance",
         )
     else:
-        raise AssertionError("installed diff accepted a zero-tool v3 report")
+        raise AssertionError("installed diff accepted a zero-tool v5 report")
 
     schema = {
         "tools": [
@@ -4191,6 +4645,7 @@ def main() -> int:
         _trusted_fixed_validation,
         _serialized_policy_runtime_boundary,
         _authority_name_precedence,
+        _exact_selector_branch_boundary,
         _daybreak_post_audit_regressions,
         _exact_authority_and_action_identity,
         _registry_replacement_drift,
@@ -4207,6 +4662,9 @@ def main() -> int:
         _ledger_invocation_serialization,
         _async_rejection,
         _unicode_homograph_rejection,
+        _mcp_annotation_assessment_contract,
+        _tool_review_aggregate_contract,
+        _remediation_guidance_contract,
         _constraint_diff_and_migration,
         _scanner_resource_boundaries,
         _daybreak_scanner_diff_regressions,
@@ -4220,8 +4678,8 @@ def main() -> int:
         check()
     print(
         "installed-wheel smoke: "
-        f"{args.expected_version}; all audited blocker families + v2 migration "
-        "+ diff thresholds passed"
+        f"{args.expected_version}; all audited blocker families + report v6 "
+        "+ v4/v5 compatibility + legacy-v3 rejection + diff thresholds passed"
     )
     return 0
 

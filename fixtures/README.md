@@ -31,3 +31,32 @@ status, and confirmation requirement.
 
 The sidecar records supplied evidence. It does not claim that Verb Authority
 independently observed or verified the deployed controls.
+
+## External fixture layout
+
+External contributions keep frozen evidence separate from the smaller inputs
+used by CI:
+
+```text
+fixtures/external/<contributor>/<case>/
+├── README.md                  # narrow claim and reproduction summary
+├── PROVENANCE.md              # source, license, attribution, evidence limits
+├── EXPECTED.json              # derived regression oracle
+├── probe-controls.json        # optional derived probes
+└── frozen/                    # contributor-supplied, never rewritten
+    ├── tools-list.json
+    ├── controls.json          # when used
+    ├── reports-*.json         # when contributed
+    ├── COMMANDS.md
+    └── MANIFEST.sha256
+```
+
+The manifest freezes the files it names. It does not by itself prove when an
+expectation was registered, how an upstream capture was produced, or that a
+control declaration matches a live deployment. Record those as attestations
+and preserve the distinction in `PROVENANCE.md`.
+
+See the
+[`playwright-browser-tabs`](external/sankalp-gilda/playwright-browser-tabs/README.md)
+case for the current two-arm, multi-version example. Contribution and redaction
+requirements are documented in [`CONTRIBUTING.md`](../CONTRIBUTING.md).
