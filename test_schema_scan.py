@@ -894,7 +894,8 @@ def test_scanner_read_only_reason_uses_the_effective_relaxed_policy():
     assert argument["policy"] == "typed_bounded"
     assert argument["review_required"] is False
     assert argument["reason"] == (
-        "ambiguous argument auto-relaxed for read-only tool"
+        "ambiguous argument relaxed by application read-only declaration; "
+        "implementation effects not verified"
     )
 
 

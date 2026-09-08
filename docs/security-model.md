@@ -78,6 +78,12 @@ pieces. The optional Pydantic adapter is a separate module and extra:
   financial, destructive, or code execution. Undeclared tools remain `unknown`
   and require review plus confirmation. A complete-token name heuristic is
   reported only as caller-mutable evidence; it never establishes authority.
+  `READ_ONLY` is a trusted application assertion, not an inspection of the
+  implementation. A non-conflicting tool-wide declaration can make ambiguous
+  arguments model-writable and does not require confirmation by default;
+  explicit protected sinks remain locked. Neither a name nor HTTP `GET`
+  establishes that an operation cannot write state. See the
+  [read-only integration contract](runtime-gate.md#read-only-is-a-host-contract-not-an-effect-sandbox).
 - **Exact selector branches.** A trusted registration may enumerate every
   value of one scalar enum selector and bind each value to its effective risk
   plus complete active-argument set. Missing, unknown, duplicated, or

@@ -42,6 +42,9 @@ sensitive deployment details out of public issues and follow
 
 - The gate protects only calls routed through it.
 - A schema describes a calling shape; it does not prove implementation behavior.
+- A trusted `read_only` declaration can relax ambiguous arguments; neither
+  the gate nor an exact approved URL verifies that the handler makes no writes.
+  See the [read-only integration contract](runtime-gate.md#read-only-is-a-host-contract-not-an-effect-sandbox).
 - Trusted application code must supply protected values independently of
   untrusted model, webpage, retrieval, or tool-result content.
 - General cross-argument, transaction, sequence, tenant, and business rules

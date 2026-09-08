@@ -1150,11 +1150,11 @@ def build_policy(
                     and tool.selector_cases is None
                     and not inference_context.inference_incomplete_for(p.name)
                 ):
-                    # A tool-wide read-only declaration can establish that an
-                    # otherwise ambiguous primitive has no side effects.  A
-                    # selector registration cannot: its case risks describe
-                    # only the chosen call's effects and applicability, never
-                    # who may author the selector or any other argument.
+                    # Trust the application's tool-wide read-only assertion
+                    # to relax an otherwise ambiguous argument. This does not
+                    # verify the handler's actual effects. Selector case risks
+                    # declare only the chosen call's effects/applicability,
+                    # never who may author its arguments; do not relax them.
                     pol = Policy.TYPED_BOUNDED
                 else:
                     review.append((name, p.name))    # keep locked + surface for review
