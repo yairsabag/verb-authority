@@ -1991,7 +1991,10 @@ def _reason(param: Param, policy: Policy, confidence: Confidence, risk: Risk) ->
         and risk is Risk.READ_ONLY
         and policy is Policy.TYPED_BOUNDED
     ):
-        return "ambiguous argument auto-relaxed for read-only tool"
+        return (
+            "ambiguous argument relaxed by application read-only declaration; "
+            "implementation effects not verified"
+        )
     if (
         confidence is Confidence.UNCERTAIN
         and risk is Risk.READ_ONLY

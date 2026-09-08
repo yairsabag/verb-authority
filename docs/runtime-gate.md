@@ -285,6 +285,48 @@ continues.
 Free outbound payloads may be authored by data, but they still must satisfy
 their declared runtime type and bounds such as `max_len`.
 
+### Read-only is a host contract, not an effect sandbox
+
+`Risk.READ_ONLY` is an assertion by trusted application code about the
+operation, not a verified property of its implementation or remote service.
+A non-conflicting tool-wide declaration relaxes otherwise uncertain arguments
+to `typed_bounded` and does not require confirmation by default. Explicit
+`sink=True` parameters remain protected; exact selector branches do not get
+this argument relaxation. Do not derive a trusted declaration solely from a
+tool name, an MCP `readOnlyHint`, an HTTP method, or a model's assurance.
+
+For a read-only registration, the owner must check that model-writable inputs
+cannot select consequential writes. A `GET` request can reach an implementation
+that changes state, and a query parameter can select a different operation on
+the same host. Normal reads may still create logs, consume quota, or reveal
+data; the tier is not a promise of zero observable effects or confidentiality.
+Use the appropriate risk tier and application authorization for operations
+that can write, and retain explicit argument locks or exact-call confirmation
+where the workflow requires them. Confirmation does not verify server behavior.
+
+For a URL-bound reader, prefer keeping the destination out of the model-visible
+interface and resolving it in trusted application code. If it remains exposed,
+register `Param("url", "uri", sink=True)` and supply the independently approved
+**complete URL** through `trusted_args`. A change to its query string then
+fails the same exact-value check as a change to its host. Do not use a model's
+confidence, explanation, or self-reported compliance to establish that binding.
+Conversely, an unchanged approved URL can still perform an unexpected write;
+the gate does not inspect redirects, the network, or effects inside the handler.
+Destination binding is not a general URL security policy or an egress sandbox.
+
+Validate both handler entries and actual effects in an isolated environment.
+For example, a changed protected URL must produce zero entries and zero writes,
+while an approved read should enter once and produce zero application-state
+writes. A result marked `executed=True` only satisfies the runner contract
+described above; it does not certify those effects. Use application/service
+access controls and network isolation where these stronger guarantees are needed.
+The synthetic controls in `test_runtime_effect_boundaries.py` exercise both the
+existing protection and the deliberately inaccurate-host-contract limitation
+with local counters only; they do not reproduce an external incident or test a
+live model.
+
+### Resolving application-owned choices
+
 When a model supplies a human label such as a contact name, resolve that label
 against an application-owned catalog first. `TrustedResolver` implements only
 an exact `key -> (value, evidence)` lookup after trimming and case-folding. It

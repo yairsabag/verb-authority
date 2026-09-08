@@ -295,6 +295,13 @@ conflict. The declaration and its evidence remain visible under
 `declared_risk`; they are not relabeled as evidence for the effective
 safe-default tier.
 
+A `read_only` declaration can relax ambiguous arguments. Their report reason
+explicitly identifies the application declaration and states that implementation
+effects were not verified. The scanner does not execute the service or prove
+that its name, HTTP method, or declared effects match its behavior. Before
+relying on the relaxation, validate the
+[read-only integration contract](runtime-gate.md#read-only-is-a-host-contract-not-an-effect-sandbox).
+
 Exposed arguments may be `locked`, `constrained`, or `free`. A constrained
 argument must name at least one bound and say whether the bound is
 `immutable`, controlled by a `trusted_party`, or controlled by the `caller`.

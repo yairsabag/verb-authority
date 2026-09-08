@@ -6,6 +6,17 @@ Publication timestamps and artifacts are recorded in the linked GitHub releases.
 
 ## [Unreleased]
 
+### Read-only declaration clarity
+
+- Identify application-declared read-only argument relaxation in the scanner's
+  reason text, explicitly stating that implementation effects are not verified.
+  Report structure, policy decisions, review counts, and runtime API are unchanged.
+- Document the trusted read-only contract and add offline controls for exact URL
+  binding, same-origin query changes, untrusted safety narratives, raw MCP hints,
+  and unexpected writes behind an unchanged approved URL. These are synthetic
+  boundary tests, not a new effect sandbox, a live-model evaluation, or a claim
+  that an external incident would have been prevented.
+
 ### Runtime diagnostics and boundary evidence
 
 - Add an explicit no-retry instruction when provenance-result recording fails
