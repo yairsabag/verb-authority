@@ -7,18 +7,18 @@ trusted-choice behavior, and the pinned Pydantic AI adapter boundary.
 
 ## Install
 
-The commands below target beta.15. See the [README publication status](../README.md#install-beta15)
+The commands below target beta.16. See the [README publication status](../README.md#install-beta16)
 for index and artifact availability; before publication, install the source checkout instead.
 
 ```bash
-python -m pip install "verb-authority==0.10.0b15"
+python -m pip install "verb-authority==0.10.0b16"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
 ```
 
 Or install the same release tag directly from GitHub once published:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.15"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.16"
 ```
 
 The second command runs the offline schema-to-gate quickstart. The package has
@@ -558,6 +558,14 @@ against those exact raw booleans before execution. Manually driving a
 preceding transition. In a mixed batch, Pydantic's internal `skip` marker is
 accepted only for the same call ID and tool name already settled in the
 authenticated history; the approved sibling still executes exactly once.
+
+Starting with beta.16, if concurrent resumes reach confirmation for the same
+pending approval, a resume that finds the commitment already consumed or
+discarded fails without creating another pending approval. This prevents the
+losing resume from rearming the original authorization, including when the
+first handler entered and then failed. Do not automatically retry an action
+reported as possibly executed. This session-local guard is not a distributed
+idempotency key or an exactly-once guarantee for external services.
 Approval and tool-call batches are capped at 256 entries.
 
 The live `AgentRun`, its backing `GraphRun`, graph iterator, graph dependencies,

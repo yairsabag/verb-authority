@@ -25,11 +25,11 @@ Verb Authority scans exported tool schemas, produces a reviewable
 per-argument authority map, and provides a small local runtime gate. It does
 not invoke tools while scanning and does not upload schemas.
 
-## Install beta.15
+## Install beta.16
 
-**Publication status:** the commands below target `0.10.0b15`. Check
+**Publication status:** the commands below target `0.10.0b16`. Check
 [PyPI](https://pypi.org/project/verb-authority/#history) for package-index availability
-and the [beta.15 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.15)
+and the [beta.16 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.16)
 for published artifacts and their hashes. A source version or branch does not
 itself establish publication. If that release is not available yet, evaluate
 this checkout with `python -I -m pip install .` instead.
@@ -37,13 +37,13 @@ this checkout with `python -I -m pip install .` instead.
 Install the dependency-free core from PyPI once available:
 
 ~~~bash
-python -m pip install "verb-authority==0.10.0b15"
+python -m pip install "verb-authority==0.10.0b16"
 ~~~
 
 Or install the same release tag directly from GitHub once published:
 
 ~~~bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.15"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.16"
 ~~~
 
 The dependency-free core supports Python 3.10 through 3.14. See
@@ -83,6 +83,21 @@ local tool invocations=1
 The demo implementation only increments an in-memory counter. It never sends
 email. In the allowed control, the recipient value is supplied independently
 by application code; the demo does not implement a human approval workflow.
+
+For an executable comparison of three inert workflows (email, service tickets,
+and deployment), run the source-distribution/repository demo:
+
+~~~bash
+python authority_assurance_demo.py
+python authority_assurance_demo.py --json
+~~~
+
+It compares a deliberately unguarded baseline, a separate server-injection
+design, and the integrated gate. Every case checks actual handler entries and
+observed arguments, including legitimate calls. The projected server-injection
+interface accepts only payload fields; the canonical interface also carries
+protected fields. This is deterministic offline evidence, not a live-model
+attack rate or proof of protection in an untested integration.
 
 ## Why this boundary matters
 
@@ -239,7 +254,7 @@ keys through an application-owned catalog before entering
 `GuardedToolRunner`.
 
 ~~~bash
-python -m pip install "verb-authority[pydantic]==0.10.0b15"
+python -m pip install "verb-authority[pydantic]==0.10.0b16"
 ~~~
 
 The adapter supports only the audited local, synchronous paths documented for
@@ -270,7 +285,7 @@ Or use the composite GitHub Action:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.15
+- uses: yairsabag/verb-authority@v0.10.0-beta.16
   with:
     before: tools-main.json
     after: tools-pr.json

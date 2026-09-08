@@ -448,7 +448,7 @@ the baseline and candidate schemas in your workflow:
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.15
+- uses: yairsabag/verb-authority@v0.10.0-beta.16
   with:
     before: tools-main.json
     after: tools-pr.json

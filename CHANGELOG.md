@@ -6,6 +6,32 @@ Publication timestamps and artifacts are recorded in the linked GitHub releases.
 
 ## [Unreleased]
 
+## [0.10.0-beta.16]
+
+See the linked GitHub release for publication and package-index availability.
+
+### Deferred approval replay repair
+
+- Reject an approved Pydantic resume if its pending commitment was already
+  consumed or discarded before the worker reaches confirmation. Previously,
+  concurrent resumes could recreate consumed pending state and allow a later
+  replay of the original approval to invoke the same action again.
+- Check and reject the missing commitment under the existing pending-state
+  lock. Keep fresh approval requests for still-pending actions whose ledger
+  state changed; the public runtime API and optional dependency pins are unchanged.
+- Add deterministic concurrent-resume, failure-after-entry, cancellation,
+  cross-session, and raw-argument controls with inert handler counters.
+  A consumed approval cannot be rearmed by the losing resume. This is a scoped
+  in-process adapter repair, not distributed exactly-once execution.
+
+### Reproducible argument protection evidence
+
+- Add an offline three-workflow comparison of unguarded calls, a separate
+  server-injection design, and the integrated runtime gate. Measure actual
+  handler entries and observed arguments, including legitimate controls.
+  These are internally authored deterministic replays, not live-model attack
+  success rates, external adoption, or new core enforcement behavior.
+
 ### Read-only declaration clarity
 
 - Identify application-declared read-only argument relaxation in the scanner's
