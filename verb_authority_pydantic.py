@@ -1324,6 +1324,16 @@ class PydanticAuthoritySession:
             current = _PendingApproval.from_request(request)
             with self._pending_lock:
                 previous = self._pending.get(tool_call_id)
+                if approved is True and previous is None:
+                    # Two resumes can pass the pre-worker checks before either
+                    # consumes the approval. The losing worker must not recreate
+                    # a commitment already consumed (or explicitly discarded).
+                    # Otherwise replaying the original approval could invoke the
+                    # same action again after the first worker completed.
+                    raise PydanticAuthorityConfigurationError(
+                        "Verb Authority approval is no longer pending; it may "
+                        "already have executed; do not retry automatically"
+                    )
                 if approved is True and previous is not None and previous.matches(request):
                     # Consume before invocation.  If the implementation is entered and
                     # later fails, the approval cannot be replayed automatically.

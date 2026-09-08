@@ -8,3 +8,4 @@ include scripts/installed_pydantic_smoke.py scripts/installed_wheel_smoke.py scr
 include test_*.py
 include validate_v01.py chain_demo.py adversarial.py adaptive.py capability_demo.py agent_demo.py resolve_live.py
 include pydantic_ai_demo.py trusted_choice_demo.py
+include authority_assurance_demo.py
