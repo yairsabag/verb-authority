@@ -158,17 +158,28 @@ def _assert_current_report(report):
     assert tool["risk_source"] == "control_declaration"
     assert tool["needs_confirmation"] is True
     assert tool["review_required"] is True
-    assert tool["review_sources"]["arguments"] == ["amount", "purpose"]
+    # The fixed inference now also surfaces the owner's constrained declarations
+    # for account/recipient as advisory review, without releasing any value.
+    assert tool["review_sources"]["arguments"] == ["account", "recipient", "amount", "purpose"]
     assert {arg["name"]: (arg["policy"], arg["confidence"], arg["review_required"])
             for arg in tool["arguments"]} == {
-        "account": ("trusted_fixed", "high", False),
-        "recipient": ("trusted_fixed", "high", False),
+        "account": ("trusted_fixed", "uncertain", True),
+        "recipient": ("trusted_fixed", "uncertain", True),
         "amount": ("trusted_fixed", "uncertain", True),
         "purpose": ("trusted_fixed", "uncertain", True),
     }
     assert report["summary"]["protected_parameters"] == 4
     assert report["summary"]["data_fillable_parameters"] == 0
-    assert report["summary"]["review_required"] == 2
+    assert report["summary"]["review_required"] == 4
+    for argument in tool["arguments"]:
+        assert argument["remediation_status"] == "review_required"
+        assert argument["preferred_remediation"] is None
+        assert argument["fallback_remediation"] is None
+    assert {
+        argument["name"]: (argument["authority"], argument["inferred_policy"], argument["review_required"])
+        for argument in report["declared_controls"]["tools"][0]["arguments"]
+    } == dict.fromkeys(("account", "recipient", "amount", "purpose"),
+                      ("constrained", "trusted_fixed", True))
     assert report["declared_controls"]["verification_notice"] == NOTICE
     assert report["privacy"]["runtime_values_included"] is False
     assert report["privacy"]["server_executed"] is False
@@ -186,20 +197,31 @@ def test_current_scanner_preserves_review_and_interpretation_boundary(frozen):
     assert "not independently verified" in markdown
 
 
-@pytest.mark.parametrize("mutation", ["empty", "missing_tool", "relaxed_amount"])
+@pytest.mark.parametrize("mutation", [
+    "empty", "missing_tool", "relaxed_amount", "missing_account_review",
+    "recipient_auto_remediation",
+])
 def test_current_report_assertions_reject_false_passes(frozen, mutation):
     report = scanner.scan_documents(
         [_read(frozen, "fixture/tools.json")],
         control_declarations=_read(frozen, "fixture/controls.json"),
     )
+    # Ensure the negative oracle does not pass merely because its baseline is stale.
+    _assert_current_report(report)
     broken = copy.deepcopy(report)
     if mutation == "empty":
         broken = {}
     elif mutation == "missing_tool":
         broken["tools"] = []
-    else:
+    elif mutation == "relaxed_amount":
         amount = next(arg for arg in broken["tools"][0]["arguments"] if arg["name"] == "amount")
         amount["policy"] = "typed_bounded"
+    elif mutation == "missing_account_review":
+        account = next(arg for arg in broken["tools"][0]["arguments"] if arg["name"] == "account")
+        account["review_required"] = False
+    else:
+        recipient = next(arg for arg in broken["tools"][0]["arguments"] if arg["name"] == "recipient")
+        recipient["preferred_remediation"] = "remove_from_model_schema_and_inject_from_trusted_state"
     with pytest.raises((AssertionError, KeyError, ValueError)):
         _assert_current_report(broken)
 
