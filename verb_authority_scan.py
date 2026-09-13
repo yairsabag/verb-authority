@@ -895,6 +895,23 @@ def _property_type(schema: dict[str, Any]) -> str:
     return schema_type
 
 
+def _reported_property_type(schema: Any, inference_type: str) -> str:
+    """Avoid presenting an unresolved composition as a declared string type.
+
+    Keep the inference representation and existing fingerprints unchanged. This
+    display label does not evaluate branches or claim support for their types.
+    """
+
+    if (
+        isinstance(schema, dict)
+        and "type" not in schema
+        and inference_type != "enum"
+        and any(keyword in schema for keyword in ("anyOf", "oneOf", "allOf"))
+    ):
+        return "json"
+    return inference_type
+
+
 def _enum_value_fingerprint(value: Any) -> str:
     """Return a stable, type-preserving digest without reporting enum values."""
 
@@ -2177,6 +2194,18 @@ def _tool_review_required(review_sources: dict[str, Any]) -> bool:
     )
 
 
+def _declared_authority_mismatch(
+    policy: Policy, declaration: dict[str, Any] | None
+) -> bool:
+    """Unverified owner intent can require review without releasing a lock."""
+
+    return (
+        policy is Policy.TRUSTED_FIXED
+        and declaration is not None
+        and declaration["authority"] in {"constrained", "free"}
+    )
+
+
 def _trusted_fixed_remediation(
     policy: Policy,
     *,
@@ -2229,6 +2258,7 @@ def _branch_selector_candidate(
     params: list[Param],
     risk: Risk,
     inference_context: _PolicyInferenceContext,
+    declared_arguments: dict[str, Any] | None = None,
 ) -> bool:
     """Flag unresolved enum selectors without inventing branch semantics.
 
@@ -2245,7 +2275,12 @@ def _branch_selector_candidate(
         if not is_branch_selector_name(param.name, inference_context):
             continue
         policy, confidence = infer_policy(param, inference_context)
-        if policy is Policy.TRUSTED_FIXED and confidence is Confidence.UNCERTAIN:
+        if policy is Policy.TRUSTED_FIXED and (
+            confidence is Confidence.UNCERTAIN
+            or _declared_authority_mismatch(
+                policy, (declared_arguments or {}).get(param.name)
+            )
+        ):
             return True
     return False
 
@@ -2641,6 +2676,7 @@ def _scan_definitions_bounded(
                 params_by_tool[tool_name],
                 risk,
                 inference_context,
+                declared_tool["arguments"] if declared_tool is not None else None,
             )
         )
         if branch_review_required:
@@ -2672,6 +2708,21 @@ def _scan_definitions_bounded(
             )
             final_policy = policy_set.policy[tool_name][param.name]
             needs_review = (tool_name, param.name) in review_pairs
+            reason = _reason(param, final_policy, confidence, inference_risk)
+            declared_argument = (
+                declared_tool["arguments"].get(param.name)
+                if declared_tool is not None else None
+            )
+            if _declared_authority_mismatch(final_policy, declared_argument):
+                # This changes report advice only. Re-running policy inference
+                # with uncertainty could relax the lock under read-only risk.
+                confidence = Confidence.UNCERTAIN
+                needs_review = True
+                reason = (
+                    f"author-declared {declared_argument['authority']} authority "
+                    "differs from the inferred fixed-value policy; review required; "
+                    "declaration and enforcement not verified"
+                )
             counts["parameters"] += 1
             if final_policy is Policy.TRUSTED_FIXED:
                 counts["protected_parameters"] += 1
@@ -2682,14 +2733,12 @@ def _scan_definitions_bounded(
             display_param = f"param_{param_index:03d}" if redact_names else param.name
             argument = {
                 "name": display_param,
-                "type": param.type,
+                "type": _reported_property_type(properties.get(param.name), param.type),
                 "required": param.name in required_by_tool[tool_name],
                 "policy": final_policy.value,
                 "confidence": confidence.value,
                 "review_required": needs_review,
-                "reason": _reason(
-                    param, final_policy, confidence, inference_risk
-                ),
+                "reason": reason,
             }
             argument.update(
                 _trusted_fixed_remediation(
@@ -3342,6 +3391,22 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Findings",
             "",
+        ]
+    )
+    if any(
+        argument["type"] == "json"
+        for tool in report["tools"]
+        for argument in tool["arguments"]
+    ):
+        lines.extend(
+            [
+                "> Type `json` is an unresolved/composite representation, not a resolved union",
+                "> or validation guarantee. Check the original schema and its review flags.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "| Tool | Risk | Argument | Type | Required | Constraints | Policy | Review | Reason |",
             "|---|---|---|---|---|---|---|---|---|",
         ]

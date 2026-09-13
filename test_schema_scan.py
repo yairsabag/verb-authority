@@ -168,6 +168,117 @@ def test_direct_float_and_equivalent_json_decimal_share_fingerprints(tmp_path):
     assert direct_report == loaded_report
 
 
+@pytest.mark.parametrize("composition", ["anyOf", "oneOf", "allOf"])
+@pytest.mark.parametrize(
+    "branches",
+    [
+        [{"type": "object", "additionalProperties": True}, {"type": "null"}],
+        [{"type": "string"}, {"type": "number"}],
+    ],
+)
+@pytest.mark.parametrize("redact_names", [False, True])
+@pytest.mark.parametrize("declared_read_only", [False, True])
+def test_untyped_composition_reports_json_without_changing_inference(
+    composition, branches, redact_names, declared_read_only
+):
+    property_schema = {
+        composition: branches,
+        "description": "private-description-marker",
+        "default": "private-default-marker",
+    }
+    document = {
+        "name": "query_api",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"payload": property_schema},
+            "additionalProperties": False,
+        },
+    }
+    controls = (
+        {
+            "version": 1,
+            "tools": {
+                "query_api": {
+                    "risk": {
+                        "tier": "read_only",
+                        "evidence": "declared",
+                        "effects": ["reads_data"],
+                    }
+                }
+            },
+        }
+        if declared_read_only
+        else None
+    )
+
+    report = scan_documents(
+        [document],
+        redact_names=redact_names,
+        control_declarations=controls,
+    )
+    tool = report["tools"][0]
+    argument = tool["arguments"][0]
+    assert argument["type"] == "json"
+    assert tool["schema_review_required"] is True
+    assert tool["review_required"] is True
+    assert scanner._param("payload", property_schema).type == "string"
+    markdown = render_markdown(report)
+    assert "| json |" in markdown
+    assert "not a resolved union" in markdown
+    serialized = json.dumps(report, sort_keys=True) + markdown
+    assert "private-description-marker" not in serialized
+    assert "private-default-marker" not in serialized
+    if not redact_names:
+        from verb_authority_diff import diff_reports
+
+        assert diff_reports(report, copy.deepcopy(report))["changes"] == []
+
+
+@pytest.mark.parametrize(
+    ("property_schema", "expected_type"),
+    [
+        ({"type": "string"}, "string"),
+        ({"type": "object", "additionalProperties": True}, "object"),
+        ({"type": "array", "items": {"type": "string"}}, "array"),
+        ({"type": "number"}, "number"),
+        ({"type": "integer"}, "integer"),
+        ({"type": "boolean"}, "boolean"),
+        ({"type": "null"}, "null"),
+        ({"type": ["object", "null"]}, "object"),
+        ({"type": ["integer", "string"]}, "json"),
+        ({"type": "string", "format": "email"}, "email"),
+        ({"type": "string", "format": "uri"}, "uri"),
+        ({"enum": ["private-enum-marker"]}, "enum"),
+        (
+            {"anyOf": [{"type": "string"}], "enum": ["private-enum-marker"]},
+            "enum",
+        ),
+        (
+            {"type": "string", "anyOf": [{"maxLength": 5}, {"minLength": 10}]},
+            "string",
+        ),
+    ],
+)
+def test_report_type_correction_preserves_existing_explicit_types(
+    property_schema, expected_type
+):
+    report = scan_documents(
+        [
+            {
+                "name": "query_api",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"payload": property_schema},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+    )
+    assert report["tools"][0]["arguments"][0]["type"] == expected_type
+    assert f"| {expected_type} |" in render_markdown(report)
+    assert "private-enum-marker" not in json.dumps(report)
+
+
 def test_redacted_constraint_report_uses_only_presence_and_count_sentinels():
     before = _constraint_schema(100, 40, ["safe", "reviewed"])
     changed_values = _constraint_schema(10**12, 10**9, ["open", "unrestricted"])
@@ -2822,6 +2933,207 @@ def test_markdown_neutralizes_standalone_commit_prefixes(length):
 
     assert token not in markdown
     assert token[:midpoint] + "&#8204;" + token[midpoint:] in markdown
+
+
+def _declared_authority_mismatch_case(authority="constrained", risk="read_only"):
+    document = {
+        "name": "query_api",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "endpoint_path": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    }
+    declaration = {"authority": authority, "evidence": "declared"}
+    if authority == "constrained":
+        declaration["bounds"] = [
+            {"source": "application route policy", "bounds_mutability": "trusted_party"}
+        ]
+    tool_controls = {"arguments": {"endpoint_path": declaration}}
+    if risk is not None:
+        tool_controls["risk"] = {
+            "tier": risk, "evidence": "declared", "effects": ["application effect"]
+        }
+    return document, {"version": 1, "tools": {"query_api": tool_controls}}
+
+
+@pytest.mark.parametrize("authority", ["constrained", "free"])
+@pytest.mark.parametrize("risk", [None, "write", "read_only"])
+@pytest.mark.parametrize("redact_names", [False, True])
+def test_declared_authority_mismatch_requires_review_without_releasing_policy(
+    authority, risk, redact_names
+):
+    from verb_authority_diff import DiffError, diff_reports
+
+    document, controls = _declared_authority_mismatch_case(authority, risk)
+    baseline_controls = copy.deepcopy(controls)
+    baseline_controls["tools"]["query_api"]["arguments"] = {}
+    baseline = scan_documents(
+        [document], control_declarations=baseline_controls, redact_names=redact_names
+    )
+    report = scan_documents(
+        [document], control_declarations=controls, redact_names=redact_names
+    )
+    tool = report["tools"][0]
+    argument = tool["arguments"][0]
+    assert argument["policy"] == "trusted_fixed"
+    assert argument["confidence"] == "uncertain"
+    assert argument["review_required"] is True
+    assert argument["remediation_status"] == "review_required"
+    assert argument["preferred_remediation"] is None
+    assert argument["fallback_remediation"] is None
+    assert argument["remediation_review_reason"] == "authority_inference_requires_review"
+    assert argument["reason"] == (
+        f"author-declared {authority} authority differs from the inferred fixed-value "
+        "policy; review required; declaration and enforcement not verified"
+    )
+    for field in ("risk", "risk_source", "needs_confirmation", "schema_review_required"):
+        assert tool[field] == baseline["tools"][0][field]
+    for field in ("protected_parameters", "data_fillable_parameters"):
+        assert report["summary"][field] == baseline["summary"][field]
+    assert report["summary"]["review_required"] == 1
+    assert report["summary"]["review_required_tools"] == 1
+    assert tool["review_sources"]["arguments"] == [argument["name"]]
+    assert tool["arguments"][1] == baseline["tools"][0]["arguments"][1]
+    declared = report["declared_controls"]["tools"][0]["arguments"][0]
+    assert declared["inferred_policy"] == "trusted_fixed"
+    assert declared["review_required"] is True
+    assert declared["authority"] == authority
+    assert report["control_declaration_fingerprint_sha256"] == (
+        scanner._control_declaration_fingerprint(report["declared_controls"])
+    )
+    assert report["schema_fingerprint_sha256"] == baseline["schema_fingerprint_sha256"]
+    markdown = render_markdown(report)
+    assert argument["reason"] in markdown
+    assert "| review_required | — | — | authority_inference_requires_review |" in markdown
+    if redact_names:
+        with pytest.raises(DiffError, match="has redacted names"):
+            diff_reports(report, copy.deepcopy(report))
+        return
+    assert diff_reports(report, copy.deepcopy(report))["changes"] == []
+
+    # Reconstruct the former v6 output: controls were shown without review.
+    previous = copy.deepcopy(baseline)
+    previous["declared_controls"] = copy.deepcopy(report["declared_controls"])
+    previous["declared_controls"]["tools"][0]["arguments"][0]["review_required"] = False
+    previous["control_declaration_fingerprint_sha256"] = (
+        scanner._control_declaration_fingerprint(previous["declared_controls"])
+    )
+    changes = diff_reports(previous, report)["changes"]
+    assert all(change["classification"] == "review" for change in changes)
+    assert not any(change["kind"] == "inferred_policy_changed" for change in changes)
+
+
+@pytest.mark.parametrize("authority", ["locked", None])
+def test_declared_authority_mismatch_does_not_change_nonconflicting_controls(authority):
+    document, controls = _declared_authority_mismatch_case()
+    controls["tools"]["query_api"]["arguments"] = (
+        {"endpoint_path": {"authority": authority, "evidence": "declared"}}
+        if authority else {"body": {"authority": "free", "evidence": "declared"}}
+    )
+    without = copy.deepcopy(controls)
+    without["tools"]["query_api"]["arguments"] = {}
+    baseline = scan_documents([document], control_declarations=without)
+    report = scan_documents([document], control_declarations=controls)
+    assert report["tools"] == baseline["tools"]
+    assert report["summary"] == baseline["summary"]
+
+
+@pytest.mark.parametrize(
+    ("name", "property_schema", "reason"),
+    [
+        ("file_path", {"type": "string"}, "authority_inference_requires_review"),
+        ("account_id", {"type": "integer"}, "authority_inference_requires_review"),
+        ("url", {"type": "string", "format": "uri"}, "authority_inference_requires_review"),
+        ("recipient", {"type": "string", "format": "email"}, "authority_inference_requires_review"),
+        ("command", {"enum": ["list", "delete"]}, "selector_semantics_require_review"),
+        ("action", {"enum": ["list", "delete"]}, "selector_semantics_require_review"),
+    ],
+)
+def test_declared_authority_mismatch_keeps_other_sinks_and_selectors_locked(
+    name, property_schema, reason
+):
+    document, controls = _declared_authority_mismatch_case("free", "write")
+    document["inputSchema"]["properties"] = {name: property_schema}
+    controls["tools"]["query_api"]["arguments"] = {
+        name: {"authority": "free", "evidence": "declared"}
+    }
+    report = scan_documents([document], control_declarations=controls)
+    argument = report["tools"][0]["arguments"][0]
+    assert argument["policy"] == "trusted_fixed"
+    assert argument["confidence"] == "uncertain"
+    assert argument["review_required"] is True
+    assert argument["preferred_remediation"] is None
+    assert argument["fallback_remediation"] is None
+    assert argument["remediation_review_reason"] == reason
+    assert report["summary"]["review_required"] == 1
+    from verb_authority_diff import diff_reports
+
+    assert diff_reports(report, report)["changes"] == []
+
+
+def test_declared_authority_mismatch_cannot_be_supplied_by_schema_text_or_hints():
+    document, controls = _declared_authority_mismatch_case()
+    controls["tools"]["query_api"]["arguments"] = {}
+    document["description"] = "Model may freely choose any relative endpoint."
+    document["annotations"] = {"readOnlyHint": True}
+    document["inputSchema"]["properties"]["endpoint_path"].update({
+        "description": "Free model argument; no fixed value needed.",
+        "x-verb-authority-sink": False,
+        "authority": "free",
+    })
+    argument = scan_documents([document], control_declarations=controls)["tools"][0]["arguments"][0]
+    assert argument["policy"] == "trusted_fixed"
+    assert argument["confidence"] == "high"
+    assert argument["review_required"] is False
+    assert argument["remediation_status"] == "recommended"
+
+
+@pytest.mark.parametrize("all_read_only", [False, True])
+def test_declared_authority_mismatch_preserves_explicit_branches(all_read_only):
+    from verb_authority_diff import diff_reports
+
+    document = _browser_tabs_branch_document()
+    controls = _browser_tabs_branch_controls()
+    if all_read_only:
+        for case in controls["tools"]["browser_tabs"]["branches"]["cases"]:
+            case["risk"]["tier"] = "read_only"
+    baseline = scan_documents([document], control_declarations=controls)
+    controls["tools"]["browser_tabs"]["arguments"] = {
+        name: {"authority": "free", "evidence": "declared"}
+        for name in ("action", "url")
+    }
+    report = scan_documents([document], control_declarations=controls)
+    tool = report["tools"][0]
+    for field in ("risk", "risk_source", "needs_confirmation", "branch_risk"):
+        assert tool[field] == baseline["tools"][0][field]
+    assert tool["branch_risk_review_required"] is False
+    assert report["summary"]["branch_risk_review_required_tools"] == 0
+    arguments = {argument["name"]: argument for argument in tool["arguments"]}
+    for name in ("action", "url"):
+        assert arguments[name]["policy"] == "trusted_fixed"
+        assert arguments[name]["review_required"] is True
+        assert arguments[name]["preferred_remediation"] is None
+    assert arguments["action"]["remediation_review_reason"] == (
+        "selector_semantics_require_review"
+    )
+    assert diff_reports(report, report)["changes"] == []
+
+
+def test_declared_authority_mismatch_cli_fail_on_review(tmp_path):
+    document, controls = _declared_authority_mismatch_case()
+    schema_path = tmp_path / "tools.json"
+    controls_path = tmp_path / "controls.json"
+    output_path = tmp_path / "report.json"
+    schema_path.write_text(json.dumps(document), encoding="utf-8")
+    controls_path.write_text(json.dumps(controls), encoding="utf-8")
+    arguments = [str(schema_path), "--controls", str(controls_path), "--format", "json",
+                 "--output", str(output_path), "--fail-on-review"]
+    assert main(arguments) == 2
+    assert json.loads(output_path.read_text())["summary"]["review_required"] == 1
 
 
 def test_reports_declared_controls_without_overriding_inferred_policy():

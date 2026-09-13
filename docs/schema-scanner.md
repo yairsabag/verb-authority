@@ -93,6 +93,21 @@ with any of those review obligations. This static review debt is deliberately
 separate from `needs_confirmation`: a well-classified consequential call can
 require runtime approval without needing policy review.
 
+The argument `type` is a compact report label, not a complete JSON Schema.
+An argument with `anyOf`, `oneOf`, or `allOf` and no explicit `type` is reported
+as `json` (unless represented as an enum), rather than defaulting its displayed
+type to `string`. Here `json` means that the composition remains unresolved;
+it does not claim the branches have been validated or that all JSON values are
+accepted. The original schema and schema-review flag still apply. This display
+correction does not change authority inference, risk, review obligations,
+fingerprints, or runtime enforcement. Explicit-type and enum labels retain
+their existing behavior; no general union evaluator is supplied.
+Comparing an older report's `string` label to its corrected `json` label produces
+the existing `type_changed` review entry in Authority Diff, even when the schema
+fingerprint and authority policy are unchanged. Review that scanner-output
+correction before updating a stored baseline; it is not evidence of a changed
+handler or new authority.
+
 Report v6 also attaches remediation metadata to each `trusted_fixed`
 argument. When that argument has `review_required: false`, the JSON contract
 is:
@@ -319,7 +334,25 @@ arguments.
 These declarations are author-supplied evidence: the scanner validates their
 shape, fingerprints them, and displays them alongside (not instead of) its
 inferred policy. It does not inspect the enforcement or treat a declaration as
-proof. With `--redact-names`, tool and argument names plus attribution are
+proof. When an exposed argument is declared `constrained` or `free` but its
+inferred policy remains `trusted_fixed`, the report marks that mismatch as
+uncertain argument review and withholds standard remove/inject and exact-value
+remediation until the owner resolves it. The protected policy and effective
+risk stay unchanged, including under a `read_only` declaration. This is advice
+about conflicting authority assumptions, not permission to author the value or
+verification of the declared bounds. The same rule applies to every argument
+name; schema descriptions, MCP hints and raw schema extensions do not supply
+these separate controls. `locked` declarations and scans without a conflicting
+argument declaration retain their existing behavior. Enum selectors retain
+their selector-specific remediation reason and applicable branch review.
+
+This advisory correction uses the existing v6 report fields. A rescan of the
+same schema and controls can change review metadata and the control-declaration
+fingerprint, which includes derived review state; schema fingerprints and
+inferred authority policies remain unchanged. Review any resulting Authority
+Diff review entries before refreshing a stored baseline.
+
+With `--redact-names`, tool and argument names plus attribution are
 removed, but author-written bound sources, enforcement text, and notes remain;
 review a redacted report before sharing it.
 
