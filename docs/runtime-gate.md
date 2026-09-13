@@ -7,18 +7,19 @@ trusted-choice behavior, and the pinned Pydantic AI adapter boundary.
 
 ## Install
 
-The commands below target beta.16. See the [README publication status](../README.md#install-beta16)
-for index and artifact availability; before publication, install the source checkout instead.
+The commands below target beta.17. See the
+[README publication status](../README.md#install-beta17) for index and artifact
+availability; before publication, install the source checkout instead.
 
 ```bash
-python -m pip install "verb-authority==0.10.0b16"
+python -m pip install "verb-authority==0.10.0b17"
 env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority quickstart
 ```
 
 Or install the same release tag directly from GitHub once published:
 
 ```bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.16"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.17"
 ```
 
 The second command runs the offline schema-to-gate quickstart. The package has

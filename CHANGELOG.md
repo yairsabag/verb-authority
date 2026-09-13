@@ -6,6 +6,34 @@ Publication timestamps and artifacts are recorded in the linked GitHub releases.
 
 ## [Unreleased]
 
+## [0.10.0-beta.17]
+
+The package version is `0.10.0b17`. See the linked GitHub release for publication
+and package-index availability; a source version does not establish either.
+
+### Clearer schema review
+
+- Report untyped composite argument schemas (`anyOf`, `oneOf`, `allOf`) as
+  unresolved `json` instead of incorrectly displaying `string`. Explicit types,
+  enums and existing schema review remain respected; this is not union validation.
+- When an explicit `constrained` or `free` argument declaration disagrees with
+  fixed inference, require review and withhold standard remediation. Keep the
+  protected argument policy and effective risk unchanged. Without a conflicting
+  argument declaration, this correction does not change authority recommendations.
+- Preserve enum-selector review obligations and strengthen current-report
+  acceptance tests. Frozen historical evidence remains unchanged.
+
+### Upgrading
+
+- Reports can gain review requirements, withhold remediation and change derived
+  control fingerprints. Cross-version comparisons can report `type_changed` when
+  a previous `string` display becomes `json`. Automation using `--fail-on-review`
+  may now require attention. Review baseline changes against the intended tool
+  policy; these changes do not establish new handler permissions or vulnerabilities.
+- Scanner report v6, controls v1 and Authority Diff v2 remain unchanged, as do the
+  public runtime API, runtime protection and dependency pins. This candidate
+  improves scanner guidance; it does not add a new runtime defense.
+
 ## [0.10.0-beta.16]
 
 See the linked GitHub release for publication and package-index availability.
@@ -930,7 +958,9 @@ tag or GitHub release was created, and the version is intentionally not reused.
   quickstart, contribution and security guidance, and a focused bypass/tool
   schema issue form.
 
-[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.15...HEAD
+[Unreleased]: https://github.com/yairsabag/verb-authority/compare/v0.10.0-beta.17...HEAD
+[0.10.0-beta.17]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.17
+[0.10.0-beta.16]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.16
 [0.10.0-beta.15]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.15
 [0.10.0-beta.14]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.14
 [0.10.0-beta.13]: https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.13

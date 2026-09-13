@@ -474,14 +474,15 @@ env -u PYTHONPATH -u PYTHONHOME python -I -m verb_authority diff tools-main.json
 ```
 
 Or add the repository's zero-configuration composite action after exporting
-the baseline and candidate schemas in your workflow:
+the baseline and candidate schemas in your workflow. Check the
+[publication status](../README.md#install-beta17) before using the beta.17 tag below:
 
 ```yaml
 - uses: actions/checkout@v7
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.16
+- uses: yairsabag/verb-authority@v0.10.0-beta.17
   with:
     before: tools-main.json
     after: tools-pr.json
