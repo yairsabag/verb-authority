@@ -25,8 +25,10 @@ No payment handler or `GuardedToolRunner` is invoked by this fixture.
 
 The recorded beta.6 report classifies all four arguments as `typed_bounded`.
 The beta.10 report changes `account` and `recipient` to `trusted_fixed`.
-The current report-v6 regression expects all four protected, with `amount`
-and `purpose` explicitly requiring review. It does not relax the current
+The current report-v6 regression expects all four protected and requiring review.
+The owner's `constrained` declarations also require advisory review for `account`
+and `recipient`, rather than automatic fixed-value remediation. The frozen
+historical reports below are unchanged. This does not relax the current
 policy to match historical results. These classifications still do not decide
 the external business-policy oracle.
 
