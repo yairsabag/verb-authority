@@ -25,11 +25,11 @@ Verb Authority scans exported tool schemas, produces a reviewable
 per-argument authority map, and provides a small local runtime gate. It does
 not invoke tools while scanning and does not upload schemas.
 
-## Install beta.16
+## Install beta.17
 
-**Publication status:** the commands below target `0.10.0b16`. Check
+**Publication status:** the commands below target `0.10.0b17`. Check
 [PyPI](https://pypi.org/project/verb-authority/#history) for package-index availability
-and the [beta.16 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.16)
+and the [beta.17 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.17)
 for published artifacts and their hashes. A source version or branch does not
 itself establish publication. If that release is not available yet, evaluate
 this checkout with `python -I -m pip install .` instead.
@@ -37,13 +37,13 @@ this checkout with `python -I -m pip install .` instead.
 Install the dependency-free core from PyPI once available:
 
 ~~~bash
-python -m pip install "verb-authority==0.10.0b16"
+python -m pip install "verb-authority==0.10.0b17"
 ~~~
 
 Or install the same release tag directly from GitHub once published:
 
 ~~~bash
-python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.16"
+python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.17"
 ~~~
 
 The dependency-free core supports Python 3.10 through 3.14. See
@@ -254,7 +254,7 @@ keys through an application-owned catalog before entering
 `GuardedToolRunner`.
 
 ~~~bash
-python -m pip install "verb-authority[pydantic]==0.10.0b16"
+python -m pip install "verb-authority[pydantic]==0.10.0b17"
 ~~~
 
 The adapter supports only the audited local, synchronous paths documented for
@@ -278,14 +278,14 @@ Compare a protected baseline schema with the candidate schema:
 python -I -m verb_authority diff tools-main.json tools-pr.json --fail-on-increase --fail-on-review
 ~~~
 
-Or use the composite GitHub Action:
+Or use the composite GitHub Action once the beta.17 tag is published:
 
 ~~~yaml
 - uses: actions/checkout@v7
 - uses: actions/setup-python@v7
   with:
     python-version: "3.12"
-- uses: yairsabag/verb-authority@v0.10.0-beta.16
+- uses: yairsabag/verb-authority@v0.10.0-beta.17
   with:
     before: tools-main.json
     after: tools-pr.json
