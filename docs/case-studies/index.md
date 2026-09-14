@@ -51,6 +51,17 @@ That result describes this test arsenal, not a universal security score.
 require `ANTHROPIC_API_KEY`. The core module, tests, and other offline
 evaluations do not require an API key.
 
+## Optional source example: persisted effects
+
+The [SQLite change trial](../../examples/sqlite-change-trial/README.md) compares
+two implementations of a fixed fictional ticket tool and reopens database rows
+to identify a deliberately introduced cross-tenant write. It uses ordinary
+server-side argument injection, not VA runtime enforcement: the checker detects
+the SQL fault after execution and does not prevent or roll it back. This is owned
+synthetic evidence, not an external case study or a detection-advantage claim.
+Its pinned, explicit macOS acceptance is separate from the general pytest suite;
+the example is distributed as source, not as wheel runtime code.
+
 ## Submit a real or redacted schema
 
 Issue [#7](https://github.com/yairsabag/verb-authority/issues/7) is the public

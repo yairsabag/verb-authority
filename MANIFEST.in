@@ -9,3 +9,13 @@ include test_*.py
 include validate_v01.py chain_demo.py adversarial.py adaptive.py capability_demo.py agent_demo.py resolve_live.py
 include pydantic_ai_demo.py trusted_choice_demo.py
 include authority_assurance_demo.py
+include examples/sqlite-change-trial/README.md
+include examples/sqlite-change-trial/LICENSE
+include examples/sqlite-change-trial/requirements.txt
+include examples/sqlite-change-trial/check_acceptance.py
+include examples/sqlite-change-trial/sqlite-change-check/check_sqlite.py
+include examples/sqlite-change-trial/sqlite-change-check/subject_app.py
+include examples/sqlite-change-trial/sqlite-change-check/expectations.json
+include examples/sqlite-change-trial/sqlite-change-check/healthy.json
+include examples/sqlite-change-trial/sqlite-change-check/omit-tenant.json
+include examples/sqlite-change-trial/integration-change-check/comparison.py

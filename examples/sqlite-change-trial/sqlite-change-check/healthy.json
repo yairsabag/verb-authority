@@ -1,0 +1,5 @@
+{
+  "interface": "server_injection",
+  "implementation": "healthy",
+  "host": {"tenant": "tenant_alpha", "ticket_id": "ticket_1"}
+}
