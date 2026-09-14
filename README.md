@@ -27,20 +27,19 @@ not invoke tools while scanning and does not upload schemas.
 
 ## Install beta.17
 
-**Publication status:** the commands below target `0.10.0b17`. Check
-[PyPI](https://pypi.org/project/verb-authority/#history) for package-index availability
-and the [beta.17 GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.17)
-for published artifacts and their hashes. A source version or branch does not
-itself establish publication. If that release is not available yet, evaluate
-this checkout with `python -I -m pip install .` instead.
+**First visit?** Follow [one tool, one authority check](https://github.com/yairsabag/verb-authority/blob/main/docs/first-check.md)
+for isolated setup, the expected result, and one useful next step with your own
+schema. No model, API key, GPU, or service account is needed.
 
-Install the dependency-free core from PyPI once available:
+Beta.17 is published on [PyPI](https://pypi.org/project/verb-authority/0.10.0b17/).
+The [GitHub release](https://github.com/yairsabag/verb-authority/releases/tag/v0.10.0-beta.17)
+contains the release artifacts and their hashes. Install the dependency-free core:
 
 ~~~bash
 python -m pip install "verb-authority==0.10.0b17"
 ~~~
 
-Or install the same release tag directly from GitHub once published:
+Or install the same release tag directly from GitHub:
 
 ~~~bash
 python -I -m pip install "verb-authority @ git+https://github.com/yairsabag/verb-authority.git@v0.10.0-beta.17"

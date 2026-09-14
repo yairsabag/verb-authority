@@ -1,7 +1,8 @@
 # Verb Authority documentation
 
-Start with the repository [`README`](../README.md) for the two-minute install,
-quickstart, real-schema scan, and runtime example.
+Start with [one tool, one authority check](https://github.com/yairsabag/verb-authority/blob/main/docs/first-check.md)
+for isolated setup, the expected result, and a local review of one real schema.
+The repository [`README`](../README.md) also contains the runtime example.
 
 Use these focused references for the complete contracts:
 
