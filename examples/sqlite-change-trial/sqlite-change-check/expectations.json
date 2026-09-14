@@ -1,0 +1,9 @@
+{
+  "workflow": "tenant-ticket-update/v1",
+  "target": {"tenant": "tenant_alpha", "ticket_id": "ticket_1"},
+  "seed": [
+    {"tenant": "tenant_alpha", "ticket_id": "ticket_1", "text": "alpha original"},
+    {"tenant": "tenant_alpha", "ticket_id": "ticket_2", "text": "alpha unrelated"},
+    {"tenant": "tenant_beta", "ticket_id": "ticket_1", "text": "beta original"}
+  ]
+}

@@ -1,0 +1,1 @@
+verb-authority==0.10.0b17 --hash=sha256:6d309c70646f5c44ec5b30eddb904b83bcf31ed46aae90241fe574eca8664916
